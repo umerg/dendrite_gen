@@ -1,0 +1,13 @@
+einops >= 0.3
+torch >= 1.6
+numba
+numpy
+caveclient >= 7.4.3  
+cloud-volume >= 12.1.0  
+meshparty == 2.0.1
+pcg_skel >= 1.3.0
+imageryclient >= 1.0.4 
+skeleton_plot >= 0.0.10
+
+# ERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.
+# boto3 1.40.39 requires botocore<1.41.0,>=1.40.39, but you have botocore 1.40.18 which is incompatible.
