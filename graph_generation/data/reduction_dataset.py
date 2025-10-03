@@ -21,38 +21,33 @@ class RandRedDataset(IterableDataset, ABC):
         self.adjs = adjs  # list of scipy.sparse adjacency arrays (float64 okay)
 
     def get_random_reduction_sequence(self, graph, rng):
-        """
-        Generate one full sequence of (fine -> coarse) steps
-        until the reducer stops (n <= 1 or no cherries).
-        """
         data = []
         while True:
-            reduced_graph = graph.get_reduced_graph(rng)  # must return same class with updated state
+            reduced_graph = graph.get_reduced_graph(rng)
 
             # Stop if no reduction happened (terminal step)
             if reduced_graph.expansion_matrix is None:
                 break
 
-            # Pull fields for this step
+            # Shapes: n = graph.n, m = reduced_graph.n
             adj_fine = graph.adj
             adj_coarse = reduced_graph.adj
-            P_inv = reduced_graph.expansion_matrix  # fine->coarse membership (n x m), binary
+            P_inv = reduced_graph.expansion_matrix  # (n x m), fine→coarse
 
-            # Compute node_expansion (size per coarse node)
-            # scipy sparse: sum over rows -> col sums
-            node_expansion = np.asarray(P_inv.sum(axis=0)).ravel().astype(np.int32)
+            # KEY FIX: use the fine graph's node_expansion (length n) IMPORTANT
+            node_expansion = graph.node_expansion
 
             rgd = ReducedGraphData(
                 target_size=graph.n,
                 reduction_level=graph.level,
-                adj=adj_fine.astype(bool).astype(np.float32) if sp.sparse.issparse(adj_fine) else adj_fine,
-                node_expansion=node_expansion,
-                adj_reduced=adj_coarse.astype(bool).astype(np.float32) if sp.sparse.issparse(adj_coarse) else adj_coarse,
+                adj=adj_fine.astype(bool).astype(np.float32),
+                node_expansion=node_expansion,                # <-- fixed
+                adj_reduced=adj_coarse.astype(bool).astype(np.float32),
                 expansion_matrix=P_inv,
             )
             data.append(rgd)
 
-            graph = reduced_graph  # advance to next level
+            graph = reduced_graph  # advance
 
         return data
 
