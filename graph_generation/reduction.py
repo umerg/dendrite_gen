@@ -49,7 +49,6 @@ class CherryReducer:
         cherry_p: float = 0.8,
         ensure_progress: bool = True,
         state: Optional[_CherryState] = None,
-        expansion_matrix: Optional[sp.spmatrix] = None,  # fine->coarse for THIS step
         level: int = 0,
         weighted_reduction: bool = False,  # if True, coarsen via Laplacian
     ):
@@ -65,17 +64,6 @@ class CherryReducer:
             deg = np.asarray(self.adj.sum(1)).ravel()
             self._lap = sp.diags(deg) - self.adj
 
-        # Membership for THIS step (fine->coarse); at level 0 it is None
-        self.expansion_matrix: Optional[sp.spmatrix] = expansion_matrix
-
-        # Node expansion sizes that CREATED this graph (for training labels);
-        # at level 0 (no previous contraction), it is all-ones.
-        if expansion_matrix is None:
-            self.node_expansion = np.ones(self.n, dtype=np.int32)
-        else:
-            col_sums = np.asarray(expansion_matrix.sum(axis=0)).ravel()
-            self.node_expansion = col_sums.astype(np.int32)
-
         # Policy
         self.mode = mode
         self.cherry_p = float(cherry_p)
@@ -84,6 +72,12 @@ class CherryReducer:
         # Root/state
         self.root = root
         self._state = state if state is not None else self._build_initial_state()
+
+        # Outputs for dataset consumption
+        self.leaf_idx = None          # np.ndarray[int64], shape (L,)
+        self.leaf_mask = None         # np.ndarray[bool], shape (N,)
+        self.leaf_expansion = None    # np.ndarray[int32], shape (L,), values {1,2}
+        self.did_contract = False
 
     # ------------------------------------------------------------------
     # Public API used by your datasets
@@ -101,17 +95,26 @@ class CherryReducer:
 
         if not cherries_all or self.n <= 1:
             # No further contraction; return a "no-op" next level
-            return CherryReducer(
+            cr = CherryReducer(
                 adj=self.adj,
                 root=S.root,
                 mode=self.mode,
                 cherry_p=self.cherry_p,
                 ensure_progress=self.ensure_progress,
                 state=S,
-                expansion_matrix=None,
                 level=self.level + 1,
                 weighted_reduction=self.weighted_reduction,
             )
+            cr.did_contract = False
+            # expose current leaves for completeness (labels default to 1)
+            leaf_idx = np.array(sorted(S.leaves - {S.root}), dtype=np.int64)
+            leaf_mask = np.zeros(self.n, dtype=bool)
+            if len(leaf_idx) > 0:
+                leaf_mask[leaf_idx] = True
+            cr.leaf_idx = leaf_idx
+            cr.leaf_mask = leaf_mask
+            cr.leaf_expansion = np.ones_like(leaf_idx, dtype=np.int32)
+            return cr
 
         # Choose cherries for this level
         if self.mode == "deterministic":
@@ -157,8 +160,8 @@ class CherryReducer:
                 continue
             rows.append(new_index[s]); cols.append(s); data.append(1.0)
 
-        P = coo((data, (rows, cols)), shape=(m, self.n), dtype=np.float64)
-        P_inv = P.transpose().tocsr()
+        P = coo((data, (rows, cols)), shape=(m, self.n), dtype=np.float64)   # coarse x fine
+        P_inv = P.transpose().tocsr()                                       # fine x coarse
         P_inv.data[:] = 1.0  # binary membership
 
         # Compute reduced adjacency (drop self-loops, keep unweighted)
@@ -234,17 +237,33 @@ class CherryReducer:
             root=remap(S.root),
         )
 
-        return CherryReducer(
+        next_cr = CherryReducer(
             adj=Ar,
             root=new_state.root if new_state.root is not None else 0,
             mode=self.mode,
             cherry_p=self.cherry_p,
             ensure_progress=self.ensure_progress,
             state=new_state,
-            expansion_matrix=P_inv,   # fine->coarse membership for THIS step
             level=self.level + 1,
             weighted_reduction=self.weighted_reduction,
         )
+        next_cr.did_contract = True
+
+        # Leaf labels for NEXT graph (Ar / next_cr)
+        node_sizes = np.asarray(P_inv.sum(axis=0)).ravel().astype(np.int32)  # len m
+        leaf_idx = np.array(sorted(next_cr._state.leaves - {next_cr._state.root}), dtype=np.int64)
+        leaf_y = np.where(node_sizes[leaf_idx] > 1, 2, 1).astype(np.int32)   # binary {1,2}
+        
+        # Create leaf mask
+        leaf_mask = np.zeros(m, dtype=bool)
+        if len(leaf_idx) > 0:
+            leaf_mask[leaf_idx] = True
+
+        next_cr.leaf_idx = leaf_idx
+        next_cr.leaf_mask = leaf_mask
+        next_cr.leaf_expansion = leaf_y
+
+        return next_cr
 
     # ------------------------------------------------------------------
     # Internals

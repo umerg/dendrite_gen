@@ -21,33 +21,46 @@ class RandRedDataset(IterableDataset, ABC):
         self.adjs = adjs  # list of scipy.sparse adjacency arrays (float64 okay)
 
     def get_random_reduction_sequence(self, graph, rng):
+        """
+        Generate one full sequence of (fine -> coarse) steps
+        until the reducer stops (n <= 1 or no cherries).
+        """
         data = []
+
+        # G_0: initial graph; leaves from current state; labels = 1
+        leaf0_idx = np.array(sorted(graph._state.leaves - {graph._state.root}), dtype=np.int64)
+        leaf0_mask = np.zeros(graph.n, dtype=bool)
+        if len(leaf0_idx) > 0:
+            leaf0_mask[leaf0_idx] = True
+        rgd0 = ReducedGraphData(
+            target_size=graph.n,
+            reduction_level=graph.level,
+            adj=graph.adj.astype(bool).astype(np.float32) if sp.sparse.issparse(graph.adj) else graph.adj,
+            leaf_idx=leaf0_idx,
+            leaf_mask=leaf0_mask,
+            leaf_expansion=np.ones_like(leaf0_idx, dtype=np.int32),
+        )
+        data.append(rgd0)
+
         while True:
-            reduced_graph = graph.get_reduced_graph(rng)
+            reduced_graph = graph.get_reduced_graph(rng)  # must return same class with updated state
 
             # Stop if no reduction happened (terminal step)
-            if reduced_graph.expansion_matrix is None:
+            if not reduced_graph.did_contract:
                 break
 
-            # Shapes: n = graph.n, m = reduced_graph.n
-            adj_fine = graph.adj
-            adj_coarse = reduced_graph.adj
-            P_inv = reduced_graph.expansion_matrix  # (n x m), fine→coarse
-
-            # KEY FIX: use the fine graph's node_expansion (length n) IMPORTANT
-            node_expansion = graph.node_expansion
-
             rgd = ReducedGraphData(
-                target_size=graph.n,
-                reduction_level=graph.level,
-                adj=adj_fine.astype(bool).astype(np.float32),
-                node_expansion=node_expansion,                # <-- fixed
-                adj_reduced=adj_coarse.astype(bool).astype(np.float32),
-                expansion_matrix=P_inv,
+                target_size=reduced_graph.n,
+                reduction_level=reduced_graph.level,
+                adj=reduced_graph.adj.astype(bool).astype(np.float32)
+                    if sp.sparse.issparse(reduced_graph.adj) else reduced_graph.adj,
+                leaf_idx=reduced_graph.leaf_idx,
+                leaf_mask=reduced_graph.leaf_mask,
+                leaf_expansion=reduced_graph.leaf_expansion,  # {1,2}
             )
             data.append(rgd)
 
-            graph = reduced_graph  # advance
+            graph = reduced_graph  # advance to next level
 
         return data
 
