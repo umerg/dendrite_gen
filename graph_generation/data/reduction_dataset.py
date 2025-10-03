@@ -46,7 +46,8 @@ class RandRedDataset(IterableDataset, ABC):
             reduced_graph = graph.get_reduced_graph(rng)  # must return same class with updated state
 
             # Stop if no reduction happened (terminal step)
-            if not reduced_graph.did_contract:
+            if not reduced_graph.did_contract: # this happens before root is added to the sequence
+                # hence, ensures lowest graph in sequence is root + children
                 break
 
             rgd = ReducedGraphData(
