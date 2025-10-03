@@ -9,6 +9,7 @@ class ReducedGraphData(Data):
     """
     Required fields:
       - adj:               adjacency of the current reduced graph (SparseTensor)
+      - pos:               node positions (FloatTensor shape [N,3])
       - leaf_idx:          indices of leaf nodes in this graph (LongTensor shape [L])
       - leaf_mask:         boolean mask for leaf nodes (BoolTensor shape [N])
       - leaf_expansion:    labels for those leaves (LongTensor in {1,2}, shape [L])
@@ -20,13 +21,15 @@ class ReducedGraphData(Data):
         if not kwargs:
             return
 
-        # Minimal x to satisfy PyG (not used by model)
-        n = kwargs["adj"].shape[0] if hasattr(kwargs["adj"], "shape") else None
-        if n is None and isinstance(kwargs["adj"], SparseTensor):
-            n = kwargs["adj"].size(0)
-        if n is None:
-            raise ValueError("adj must have a known node dimension")
-        super().__init__(x=th.zeros(n))
+        # Use position matrix directly as x, EGNN expects positions as node features
+        pos = kwargs.get("pos", None)
+        if isinstance(pos, np.ndarray):
+            x = th.from_numpy(pos).to(th.float32)
+        elif isinstance(pos, th.Tensor):
+            x = pos if pos.dtype.is_floating_point else pos.float()
+        else:
+            raise ValueError("pos must be a numpy array or torch tensor")
+        super().__init__(x=x)
 
         for key, value in kwargs.items():
             if value is None:

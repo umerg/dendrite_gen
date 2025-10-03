@@ -15,18 +15,20 @@ class RandRedDataset(IterableDataset, ABC):
     Expects ReductionFactory to yield a stateful reducer (e.g., CherryReduction).
     No spectral features; only structural fields needed by the expansion model.
     """
-    def __init__(self, adjs, red_factory: ReductionFactory):
+    def __init__(self, adjs, poses, red_factory: ReductionFactory):
         super().__init__()
         self.red_factory = red_factory
         self.adjs = adjs  # list of scipy.sparse adjacency arrays (float64 okay)
+        self.poses = poses  # list of np.ndarray, each of shape (n, 3) for 3D positions
 
-    def get_random_reduction_sequence(self, graph, rng):
+    def get_random_reduction_sequence(self, graph, pos, rng):
         """
         Generate one full sequence of (fine -> coarse) steps
         until the reducer stops (n <= 1 or no cherries).
         """
         data = []
 
+        pos = pos.astype(np.float32)
         # G_0: initial graph; leaves from current state; labels = 1
         leaf0_idx = np.array(sorted(graph._state.leaves - {graph._state.root}), dtype=np.int64)
         leaf0_mask = np.zeros(graph.n, dtype=bool)
@@ -36,6 +38,7 @@ class RandRedDataset(IterableDataset, ABC):
             target_size=graph.n,
             reduction_level=graph.level,
             adj=graph.adj.astype(bool).astype(np.float32) if sp.sparse.issparse(graph.adj) else graph.adj,
+            pos=pos,  # initial positions
             leaf_idx=leaf0_idx,
             leaf_mask=leaf0_mask,
             leaf_expansion=np.ones_like(leaf0_idx, dtype=np.int32),
@@ -49,12 +52,15 @@ class RandRedDataset(IterableDataset, ABC):
             if not reduced_graph.did_contract: # this happens before root is added to the sequence
                 # hence, ensures lowest graph in sequence is root + children
                 break
+            
+            reduced_pos = pos[reduced_graph.survivor_mask]  # update positions to surviving nodes
 
             rgd = ReducedGraphData(
                 target_size=reduced_graph.n,
                 reduction_level=reduced_graph.level,
                 adj=reduced_graph.adj.astype(bool).astype(np.float32)
                     if sp.sparse.issparse(reduced_graph.adj) else reduced_graph.adj,
+                pos=reduced_pos,  # updated positions
                 leaf_idx=reduced_graph.leaf_idx,
                 leaf_mask=reduced_graph.leaf_mask,
                 leaf_expansion=reduced_graph.leaf_expansion,  # {1,2}
@@ -70,8 +76,8 @@ class FiniteRandRedDataset(RandRedDataset):
     """
     Precompute K random reduction sequences per input graph.
     """
-    def __init__(self, adjs, red_factory: ReductionFactory, num_red_seqs: int):
-        super().__init__(adjs, red_factory)
+    def __init__(self, adjs, poses, red_factory: ReductionFactory, num_red_seqs: int):
+        super().__init__(adjs, poses, red_factory)
         self.num_red_seqs = int(num_red_seqs)
 
         self.rng = np.random.default_rng(seed=0)
@@ -81,7 +87,8 @@ class FiniteRandRedDataset(RandRedDataset):
             for _ in range(self.num_red_seqs):
                 # NEW: fresh reducer per sequence
                 graph = red_factory(adj)
-                seq = self.get_random_reduction_sequence(graph, self.rng)
+                pos = self.poses[i]
+                seq = self.get_random_reduction_sequence(graph, pos, self.rng)
                 if seq:  # guard in case tree is already terminal
                     self.graph_reduced_data[i].extend(seq)
 
@@ -102,6 +109,7 @@ class InfiniteRandRedDataset(RandRedDataset):
     def __iter__(self):
         # NEW: keep raw adj list so we can reinit reducers
         base_adjs = [A.copy() for A in self.adjs]
+        base_poses = [P.copy() for P in self.poses]
 
         # worker-specific RNG
         worker_info = th.utils.data.get_worker_info()
@@ -110,14 +118,19 @@ class InfiniteRandRedDataset(RandRedDataset):
 
         # warm cache with fresh reducers
         graphs = [self.red_factory(A) for A in base_adjs]
-        graph_reduced_data = {i: self.get_random_reduction_sequence(g, rng) for i, g in enumerate(graphs)}
+
+        graph_reduced_data = {}
+        for i, g in enumerate(graphs):
+            pos = base_poses[i]
+            graph_reduced_data[i] = self.get_random_reduction_sequence(g, pos, rng)
 
         while True:
             i = rng.integers(len(base_adjs))
             if not graph_reduced_data[i]:
                 # NEW: reinit reducer and resample a full sequence
                 graphs[i] = self.red_factory(base_adjs[i].copy())
-                seq = self.get_random_reduction_sequence(graphs[i], rng)
+                pos = base_poses[i].copy()
+                seq = self.get_random_reduction_sequence(graphs[i], pos, rng)
                 if not seq:
                     # Degenerate: nothing to reduce (e.g., single-node tree). Skip this i.
                     continue

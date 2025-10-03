@@ -74,6 +74,7 @@ class CherryReducer:
         self._state = state if state is not None else self._build_initial_state()
 
         # Outputs for dataset consumption
+        self.survivor_mask = None      # np.ndarray[int64], shape (m,), indices of surviving nodes
         self.leaf_idx = None          # np.ndarray[int64], shape (L,)
         self.leaf_mask = None         # np.ndarray[bool], shape (N,)
         self.leaf_expansion = None    # np.ndarray[int32], shape (L,), values {1,2}
@@ -108,9 +109,12 @@ class CherryReducer:
             cr.did_contract = False
             # expose current leaves for completeness (labels default to 1)
             leaf_idx = np.array(sorted(S.leaves - {S.root}), dtype=np.int64)
+            
             leaf_mask = np.zeros(self.n, dtype=bool)
             if len(leaf_idx) > 0:
                 leaf_mask[leaf_idx] = True
+            
+            cr.survivor_mask = np.ones(self.n, dtype=np.int64)
             cr.leaf_idx = leaf_idx
             cr.leaf_mask = leaf_mask
             cr.leaf_expansion = np.ones_like(leaf_idx, dtype=np.int32)
@@ -253,7 +257,10 @@ class CherryReducer:
         node_sizes = np.asarray(P_inv.sum(axis=0)).ravel().astype(np.int32)  # len m
         leaf_idx = np.array(sorted(next_cr._state.leaves - {next_cr._state.root}), dtype=np.int64)
         leaf_y = np.where(node_sizes[leaf_idx] > 1, 2, 1).astype(np.int32)   # binary {1,2}
-        
+
+        # Create survivor mask to extract positions/features only of nodes of coarse graph
+        next_cr.survivor_mask = survivors.astype(np.int64)
+
         # Create leaf mask
         leaf_mask = np.zeros(m, dtype=bool)
         if len(leaf_idx) > 0:
