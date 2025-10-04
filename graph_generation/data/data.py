@@ -3,7 +3,7 @@ import numpy as np
 import scipy as sp
 import torch as th
 from torch_geometric.data import Data
-from torch_geometric.typing import SparseTensor
+from torch_sparse import SparseTensor
 
 class ReducedGraphData(Data):
     """

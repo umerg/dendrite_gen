@@ -114,7 +114,7 @@ class CherryReducer:
             if len(leaf_idx) > 0:
                 leaf_mask[leaf_idx] = True
             
-            cr.survivor_mask = np.ones(self.n, dtype=np.int64)
+            cr.survivor_mask = np.arange(self.n, dtype=np.int64)
             cr.leaf_idx = leaf_idx
             cr.leaf_mask = leaf_mask
             cr.leaf_expansion = np.ones_like(leaf_idx, dtype=np.int32)
