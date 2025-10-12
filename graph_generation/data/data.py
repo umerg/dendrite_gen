@@ -13,6 +13,7 @@ class ReducedGraphData(Data):
       - leaf_idx:          indices of leaf nodes in this graph (LongTensor shape [L])
       - leaf_mask:         boolean mask for leaf nodes (BoolTensor shape [N])
       - leaf_expansion:    labels for those leaves (LongTensor in {1,2}, shape [L])
+      - leaf_parent_idx:   parent index for each leaf (LongTensor shape [L], -1 if parent is root/None)
       - reduction_level:   current level (int)
       - target_size:       n (node count of this graph), for bookkeeping
     """
@@ -60,6 +61,6 @@ class ReducedGraphData(Data):
 
     def __inc__(self, key, value, *args, **kwargs):
         # Offset indices correctly when batching
-        if key == "leaf_idx":
+        if key in ("leaf_idx", "leaf_parent_idx"):
             return self.num_nodes
         return super().__inc__(key, value, *args, **kwargs)
