@@ -8,6 +8,7 @@ from einops.layers.torch import Rearrange
 # types
 
 from typing import Optional, List, Union
+from torch_scatter import scatter_add, scatter_max
 
 # pytorch geometric
 
@@ -66,13 +67,13 @@ class GlobalLinearAttention_Sparse(nn.Module):
         dim_head = 64
     ):
         super().__init__()
-        self.norm_seq = torch_geomtric.nn.norm.LayerNorm(dim)
-        self.norm_queries = torch_geomtric.nn.norm.LayerNorm(dim)
+        self.norm_seq = torch_geometric.nn.norm.LayerNorm(dim)
+        self.norm_queries = torch_geometric.nn.norm.LayerNorm(dim)
         self.attn1 = Attention_Sparse(dim, heads, dim_head)
         self.attn2 = Attention_Sparse(dim, heads, dim_head)
 
         # can't concat pyg norms with torch sequentials
-        self.ff_norm = torch_geomtric.nn.norm.LayerNorm(dim)
+        self.ff_norm = torch_geometric.nn.norm.LayerNorm(dim)
         self.ff = nn.Sequential(
             nn.Linear(dim, dim * 4),
             nn.GELU(),
@@ -97,7 +98,7 @@ class GlobalLinearAttention_Sparse(nn.Module):
 # define pytorch-geometric equivalents
 # Main edits in the code below for SO(3) => SO(2) equivariance: UGEDIT
 
-class EGNN_Sparse(MessagePassing):
+class SO2_EGNN_Sparse(MessagePassing):
     """ Different from the above since it separates the edge assignment
         from the computation (this allows for great reduction in time and 
         computations when the graph is locally or sparse connected).
@@ -115,19 +116,25 @@ class EGNN_Sparse(MessagePassing):
         norm_coors = False,
         norm_coors_scale_init = 1e-2,
         update_feats = True,
-        update_coors = True, 
+        update_coors = False, 
         dropout = 0.,
         coor_weights_clamp_value = None, 
         aggr = "add",
         # UGEDIT
         so2_axis=(0., 1., 0.), # axis of rotation for SO(2) equivariance
         anisotropic=False, # not implemented yet UGEDIT
+        # NEW
+        add_local_angles: bool = True,
+        angle_weighted_mean: bool = True,
+        rbf_k: int = 0,
+        rbf_gamma: float = 10.0,
+        eps: float = 1e-8,
         **kwargs
     ):
         assert aggr in {'add', 'sum', 'max', 'mean'}, 'pool method must be a valid option'
         assert update_feats or update_coors, 'you must update either features, coordinates, or both'
         kwargs.setdefault('aggr', aggr)
-        super(EGNN_Sparse, self).__init__(**kwargs)
+        super(SO2_EGNN_Sparse, self).__init__(**kwargs)
         # model params
         self.fourier_features = fourier_features
         self.feats_dim = feats_dim
@@ -145,7 +152,30 @@ class EGNN_Sparse(MessagePassing):
         self.register_buffer('uhat', u / (u.norm() + 1e-8))
         self.anisotropic = anisotropic
 
-        self.edge_input_dim = (fourier_features * 2) + edge_attr_dim + 3 + (feats_dim * 2) # 3 dims for dy, rho, y_i ; fourier not edited! UGEDITS
+        # NEW knobs
+        self.add_local_angles = add_local_angles
+        self.angle_weighted_mean = angle_weighted_mean
+        self.rbf_k = rbf_k
+        self.rbf_gamma = rbf_gamma
+        if self.rbf_k > 0:
+            class RBF(nn.Module):
+                def __init__(self, k, lo, hi, gamma):
+                    super().__init__()
+                    self.register_buffer('mu', torch.linspace(lo, hi, k))
+                    self.gamma = gamma
+                def forward(self, s):
+                    return torch.exp(-self.gamma * (s - self.mu.view(1, -1))**2)
+            # TODO: thread these ranges from config/data stats
+            rho_max, du_max = 5.0, 3.0
+            self.rbf_rho = RBF(self.rbf_k, 0.0, rho_max, self.rbf_gamma)
+            self.rbf_du  = RBF(self.rbf_k, -du_max, du_max, self.rbf_gamma)
+        self.eps = eps
+
+        # base edge scalars: rho, du, u_i, optionally cosφ/sinφ (+ option fourier)
+        base_scalar_dim = (rbf_k if rbf_k > 0 else 1) * 2 + 1  # rho, du, u_i
+        if self.add_local_angles:
+            base_scalar_dim += 2                               # cosφ, sinφ
+        self.edge_input_dim = (fourier_features * 2) + edge_attr_dim + base_scalar_dim + (feats_dim * 2)
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
 
@@ -191,7 +221,9 @@ class EGNN_Sparse(MessagePassing):
 
     def forward(self, x: Tensor, edge_index: Adj,
                 edge_attr: OptTensor = None, batch: Adj = None, 
-                angle_data: List = None,  size: Size = None) -> Tensor:
+                angle_data: List = None,  size: Size = None,
+                parent_idx: OptTensor = None,
+                pre_geom: Optional[dict] = None) -> Tensor:
         """ Inputs: 
             * x: (n_points, d) where d is pos_dims + feat_dims
             * edge_index: (2, n_edges)
@@ -202,26 +234,81 @@ class EGNN_Sparse(MessagePassing):
         """
         coors, feats = x[:, :self.pos_dim], x[:, self.pos_dim:]
         
-        rel_coors = coors[edge_index[0]] - coors[edge_index[1]]  # (E, 3)
-        # rel_dist  = (rel_coors ** 2).sum(dim=-1, keepdim=True) # irrelevant now UGEDIT
+        # If geometry was precomputed (static coordinates), reuse it.
+        if pre_geom is not None:
+            rel_coors = pre_geom['rel_coors']
+            row, col = edge_index
+            r_perp = pre_geom['r_perp']
+            rho = pre_geom['rho']
+            du = pre_geom['du']
+            u_i = pre_geom['u_i']
+            cosphi = pre_geom.get('cosphi', None)
+            sinphi = pre_geom.get('sinphi', None)
+            have_angles = cosphi is not None and sinphi is not None
+        else:
+            rel_coors = coors[edge_index[0]] - coors[edge_index[1]]  # (E, 3)
+            row, col = edge_index
 
-        # UGEDITS
-        # axis-aware decomposition
-        du   = (rel_coors @ self.uhat)                                    # (E, )
-        r_par = du[:, None] * self.uhat                                  # (E, 3)
-        r_perp = rel_coors - r_par                                     # (E, 3)
-        rho  = r_perp.norm(dim=-1, keepdim=True)                      # (E, 1)
-        du  = du[:, None]                                          # (E, 1)
-        u_i = (coors[edge_index[0]] @ self.uhat)[:, None]                 # (E, 1)
+            # axis-aware decomposition
+            du   = (rel_coors @ self.uhat)                                    # (E, )
+            r_par = du[:, None] * self.uhat                                  # (E, 3)
+            r_perp = rel_coors - r_par                                       # (E, 3)
+            rho  = r_perp.norm(dim=-1, keepdim=True).clamp_min(self.eps)     # (E, 1)
+            du = du[:, None]                                                 # (E, 1)
+            u_i = (coors[row] @ self.uhat)[:, None]                          # (E, 1)
+            have_angles = False  # will be set after computing angles
 
-        if self.fourier_features > 0: # irrelevant for take one UGEDIT
-            rel_dist = fourier_encode_dist(rel_dist, num_encodings = self.fourier_features)
+        if self.fourier_features > 0:
+            rel_dist = (rel_coors ** 2).sum(dim=-1, keepdim=True)
+            rel_dist = fourier_encode_dist(rel_dist, num_encodings=self.fourier_features)
             rel_dist = rearrange(rel_dist, 'n () d -> n d')
 
-        if exists(edge_attr):
-            edge_attr_feats = torch.cat([edge_attr, rho, du, u_i], dim=-1)
+        # --- Build edge features (rho, du, u_i, optional angles) ---
+        base_feats = []
+        if self.rbf_k > 0:
+            rho_feat = self.rbf_rho(rho)
+            du_feat  = self.rbf_du(du)
         else:
-            edge_attr_feats = torch.cat([rho, du, u_i], dim=-1)
+            rho_feat, du_feat = rho, du
+        base_feats.extend([rho_feat, du_feat, u_i])
+
+        if self.add_local_angles:
+            if pre_geom is not None and have_angles:
+                base_feats.extend([cosphi, sinphi])
+            else:
+                if parent_idx is None:
+                    raise ValueError("parent_idx must be provided for local angle computation; received None.")
+                # Compute local angles on-the-fly (coordinates may be changing if update_coors=True)
+                dir2 = r_perp / rho
+                N = coors.size(0)
+                parent = parent_idx.clamp(min=-1)               # [N]
+                has_parent = parent >= 0
+                v = coors - coors[parent.clamp(min=0)]          # undefined for roots, will be masked
+                v = torch.where(has_parent.view(-1,1), v, torch.zeros_like(v))
+                du_p = (v @ self.uhat).unsqueeze(-1)
+                v_perp = v - du_p * self.uhat                   # [N,3]
+                v_norm = v_perp.norm(dim=-1, keepdim=True)
+
+                edge_strength = rho.squeeze(-1)                 # [E]
+                max_val, argmax = scatter_max(edge_strength, row, dim_size=N)
+                fallback = torch.zeros_like(v_perp)
+                mask_valid = argmax >= 0
+                if mask_valid.any():
+                    idx_e = argmax[mask_valid]
+                    fallback[mask_valid] = r_perp[idx_e]
+                fb_norm = fallback.norm(dim=-1, keepdim=True)
+                fallback = fallback / (fb_norm + self.eps)
+                need_fb = (~has_parent) | (v_norm.squeeze(-1) <= 1e-6)
+                e1 = torch.where(need_fb.view(-1,1), fallback, v_perp / (v_norm + self.eps))
+                e2 = torch.cross(self.uhat.expand_as(e1), e1, dim=-1)
+                cosphi = (dir2 * e1[row]).sum(dim=-1, keepdim=True)
+                sinphi = (dir2 * e2[row]).sum(dim=-1, keepdim=True)
+                base_feats.extend([cosphi, sinphi])
+
+        if exists(edge_attr):
+            edge_attr_feats = torch.cat([edge_attr] + base_feats, dim=-1)
+        else:
+            edge_attr_feats = torch.cat(base_feats, dim=-1)
 
         hidden_out, coors_out = self.propagate(edge_index, x=feats, edge_attr=edge_attr_feats,
                                                            coors=coors, rel_coors=rel_coors,
@@ -291,7 +378,7 @@ class EGNN_Sparse(MessagePassing):
         return "E(n)-GNN Layer for Graphs " + str(self.__dict__) 
 
 
-class EGNN_Sparse_Network(nn.Module):
+class SO2_EGNN_Sparse_Network(nn.Module):
     r"""Sample GNN model architecture that uses the EGNN-Sparse
         message passing layer to learn over point clouds. 
         Main MPNN layer introduced in https://arxiv.org/abs/2102.09844v1
@@ -336,7 +423,18 @@ class EGNN_Sparse_Network(nn.Module):
                  global_linear_attn_heads = 8,
                  global_linear_attn_dim_head = 64,
                  num_global_tokens = 4,
-                 recalc=0 ,):
+                 recalc=0 ,
+                 # SO(2) knobs for layers
+                 so2_axis=(0.,1.,0.),
+                 add_local_angles=True,
+                 angle_weighted_mean=True,
+                 rbf_k=0,
+                 rbf_gamma=10.0,
+                 eps=1e-8,
+                 # offset head
+                 add_offset_head=True,
+                 offset_head_hidden=128,
+                 ):
         super().__init__()
 
         self.n_layers         = n_layers 
@@ -375,35 +473,56 @@ class EGNN_Sparse_Network(nn.Module):
         self.update_coors     = update_coors
         self.dropout          = dropout
         self.coor_weights_clamp_value = coor_weights_clamp_value
-        self.recalc           = recalc # recalc irrelevant for our purpose UGEDIT
+        self.recalc           = recalc
+
+        # axis buffer needed for decode
+        u = torch.tensor(so2_axis, dtype=torch.float32)
+        self.register_buffer('uhat', u / (u.norm() + 1e-8))
+
+        # basis-coef head
+        self.add_offset_head = add_offset_head
+        if self.add_offset_head:
+            self.offset_head = nn.Sequential(
+                nn.Linear(self.feats_dim, offset_head_hidden), nn.SiLU(),
+                nn.Linear(offset_head_hidden, offset_head_hidden), nn.SiLU(),
+                nn.Linear(offset_head_hidden, 3)
+            )
 
         # global attn irrelevant for take one UGEDIT
         self.has_global_attn = global_linear_attn_every > 0
         self.global_tokens = None
         self.global_linear_attn_every = global_linear_attn_every
         if self.has_global_attn:
-            self.global_tokens = nn.Parameter(torch.randn(num_global_tokens, dim))
+            self.global_tokens = nn.Parameter(torch.randn(num_global_tokens, self.feats_dim))
         
         # instantiate layers
         for i in range(n_layers):
-            layer = EGNN_Sparse(feats_dim = feats_dim,
-                                pos_dim = pos_dim,
-                                edge_attr_dim = edge_attr_dim,
-                                m_dim = m_dim,
-                                fourier_features = fourier_features, 
-                                soft_edge = soft_edge, 
-                                norm_feats = norm_feats,
-                                norm_coors = norm_coors,
-                                norm_coors_scale_init = norm_coors_scale_init, 
-                                update_feats = update_feats,
-                                update_coors = update_coors, 
-                                dropout = dropout, 
-                                coor_weights_clamp_value = coor_weights_clamp_value)
+            layer = SO2_EGNN_Sparse(
+                feats_dim = feats_dim,
+                pos_dim = pos_dim,
+                edge_attr_dim = edge_attr_dim,
+                m_dim = m_dim,
+                fourier_features = fourier_features,
+                soft_edge = soft_edge,
+                norm_feats = norm_feats,
+                norm_coors = norm_coors,
+                norm_coors_scale_init = norm_coors_scale_init,
+                update_feats = update_feats,
+                update_coors = update_coors,
+                dropout = dropout,
+                coor_weights_clamp_value = coor_weights_clamp_value,
+                so2_axis = so2_axis,
+                add_local_angles = add_local_angles,
+                angle_weighted_mean = angle_weighted_mean,
+                rbf_k = rbf_k,
+                rbf_gamma = rbf_gamma,
+                eps = eps,
+            )
 
             # global attention case
             is_global_layer = self.has_global_attn and (i % self.global_linear_attn_every) == 0
             if is_global_layer:
-                attn_layer = GlobalLinearAttention(dim = self.feats_dim, 
+                attn_layer = GlobalLinearAttention_Sparse(dim=self.feats_dim, 
                                                    heads = global_linear_attn_heads, 
                                                    dim_head = global_linear_attn_dim_head)
                 self.mpnn_layers.append(nn.ModuleList([layer, attn_layer]))
@@ -413,7 +532,8 @@ class EGNN_Sparse_Network(nn.Module):
             
 
     def forward(self, x, edge_index, batch, edge_attr,
-                bsize=None, recalc_edge=None, verbose=0):
+                bsize=None, recalc_edge=None, verbose=0,
+                parent_idx: Optional[torch.Tensor] = None):
         """ Recalculate edge features every `self.recalc_edge` with the
             `recalc_edge` function if self.recalc_edge is set.
 
@@ -424,6 +544,12 @@ class EGNN_Sparse_Network(nn.Module):
 
         # regulates wether to embedd edges each layer
         edges_need_embedding = True  
+        # Precompute static geometry if coordinates will remain fixed (update_coors False in all layers)
+        pre_geom = None
+        static_coords = all((not getattr(layer, 'update_coors', True)) for layer in self.mpnn_layers)
+        if parent_idx is not None and static_coords:
+            pre_geom = self._compute_static_so2_geometry(x[:, :self.pos_dim], edge_index, parent_idx)
+
         for i,layer in enumerate(self.mpnn_layers):
             
             # EDGES - Embedd each dim to its target dimensions:
@@ -434,27 +560,115 @@ class EGNN_Sparse_Network(nn.Module):
             # attn tokens
             global_tokens = None
             if exists(self.global_tokens):
-                unique, amounts = torch.unique(batch, return_counts)
+                unique, amounts = torch.unique(batch, return_counts=True)
                 num_idxs = torch.cat([torch.arange(num_idxs_i) for num_idxs_i in amounts], dim=-1)
                 global_tokens = self.global_tokens[num_idxs]
 
-            # pass layers
+            # pass layers
             is_global_layer = self.has_global_attn and (i % self.global_linear_attn_every) == 0
             if not is_global_layer:
-                x = layer(x, edge_index, edge_attr, batch=batch, size=bsize)
+                x = layer(x, edge_index, edge_attr, batch=batch, size=bsize, parent_idx=parent_idx, pre_geom=pre_geom)
             else: 
                 # only pass feats to the attn layer
                 x_attn = layer[0](x[:, self.pos_dim:], global_tokens)
-                # merge attn-ed feats and coords
+                # merge attn-ed feats and coords
                 x = torch.cat( (x[:, :self.pos_dim], x_attn), dim=-1)
-                x = layer[-1](x, edge_index, edge_attr, batch=batch, size=bsize)
+                x = layer[-1](x, edge_index, edge_attr, batch=batch, size=bsize, parent_idx=parent_idx, pre_geom=pre_geom)
 
             # recalculate edge info - not needed if last layer
             if self.recalc and ((i%self.recalc == 0) and not (i == len(self.mpnn_layers)-1)) :
-                edge_index, edge_attr, _ = recalc_edge(x) # returns attr, idx, any_other_info
+                edge_index, edge_attr, _ = recalc_edge(x) # returns attr, idx, any_other_info
                 edges_need_embedding = True
             
-        return x
+        # decode per-node parent-relative offsets
+        if not self.add_offset_head:
+            return {"node_state": x, "rel_pred": torch.zeros(x.size(0), 3, device=x.device, dtype=x.dtype)}
+
+        coors, feats = x[:, :self.pos_dim], x[:, self.pos_dim:]
+        N = coors.size(0)
+        if parent_idx is None:
+            raise ValueError("parent_idx is required to decode parent-relative offsets.")
+
+        # Use precomputed node frames if available
+        if pre_geom is not None:
+            e1 = pre_geom['e1_node']
+            e2 = pre_geom['e2_node']
+        else:
+            parent = parent_idx.clamp(min=-1)
+            has_parent = parent >= 0
+            v = coors - coors[parent.clamp(min=0)]
+            v = torch.where(has_parent.view(-1,1), v, torch.zeros_like(v))
+            du_p = (v @ self.uhat).unsqueeze(-1)
+            v_perp = v - du_p * self.uhat
+            v_norm = v_perp.norm(dim=-1, keepdim=True)
+            row, col = edge_index
+            r = coors[row] - coors[col]
+            r_perp = r - (r @ self.uhat).unsqueeze(-1) * self.uhat
+            rho = r_perp.norm(dim=-1)
+            max_val, argmax = scatter_max(rho, row, dim_size=N)
+            fallback = torch.zeros_like(v_perp)
+            mask_valid = argmax >= 0
+            if mask_valid.any():
+                fallback[mask_valid] = r_perp[argmax[mask_valid]]
+            fb_norm = fallback.norm(dim=-1, keepdim=True)
+            fallback = fallback / (fb_norm + 1e-8)
+            need_fb = (~has_parent) | (v_norm.squeeze(-1) <= 1e-6)
+            e1 = torch.where(need_fb.view(-1,1), fallback, v_perp / (v_norm + 1e-8))
+            e2 = torch.cross(self.uhat.expand_as(e1), e1, dim=-1)
+
+        # head
+        abc = self.offset_head(feats)
+        a, b, c = abc[:,0:1], abc[:,1:2], abc[:,2:3]
+        rel_pred = a*e1 + b*e2 + c*self.uhat
+
+        return {"node_state": x, "rel_pred": rel_pred}
 
     def __repr__(self):
         return 'EGNN_Sparse_Network of: {0} layers'.format(len(self.mpnn_layers))
+
+    def _compute_static_so2_geometry(self, coors: torch.Tensor, edge_index: torch.Tensor, parent_idx: torch.Tensor) -> dict:
+        """Precompute SO(2) geometric quantities reused across layers when coordinates are static.
+        Returns dict with per-edge and per-node frames & angle features.
+        """
+        row, col = edge_index
+        rel_coors = coors[row] - coors[col]                   # (E,3)
+        du = (rel_coors @ self.uhat)                          # (E,)
+        r_par = du[:, None] * self.uhat
+        r_perp = rel_coors - r_par
+        rho = r_perp.norm(dim=-1, keepdim=True).clamp_min(1e-8)  # (E,1)
+        du = du[:, None]
+        u_i = (coors[row] @ self.uhat)[:, None]
+        # Node-level parent frame
+        parent = parent_idx.clamp(min=-1)
+        has_parent = parent >= 0
+        v = coors - coors[parent.clamp(min=0)]
+        v = torch.where(has_parent.view(-1,1), v, torch.zeros_like(v))
+        du_p = (v @ self.uhat).unsqueeze(-1)
+        v_perp = v - du_p * self.uhat
+        v_norm = v_perp.norm(dim=-1, keepdim=True)
+        # Fallback from strongest outgoing edge
+        edge_strength = rho.squeeze(-1)
+        max_val, argmax = scatter_max(edge_strength, row, dim_size=coors.size(0))
+        fallback = torch.zeros_like(v_perp)
+        mask_valid = argmax >= 0
+        if mask_valid.any():
+            fallback[mask_valid] = r_perp[argmax[mask_valid]]
+        fb_norm = fallback.norm(dim=-1, keepdim=True)
+        fallback = fallback / (fb_norm + 1e-8)
+        need_fb = (~has_parent) | (v_norm.squeeze(-1) <= 1e-6)
+        e1 = torch.where(need_fb.view(-1,1), fallback, v_perp / (v_norm + 1e-8))
+        e2 = torch.cross(self.uhat.expand_as(e1), e1, dim=-1)
+        dir2 = r_perp / rho
+        cosphi = (dir2 * e1[row]).sum(dim=-1, keepdim=True)
+        sinphi = (dir2 * e2[row]).sum(dim=-1, keepdim=True)
+        return {
+            'rel_coors': rel_coors,
+            'r_perp': r_perp,
+            'rho': rho,
+            'du': du,
+            'u_i': u_i,
+            'e1_node': e1,
+            'e2_node': e2,
+            'cosphi': cosphi,
+            'sinphi': sinphi,
+        }

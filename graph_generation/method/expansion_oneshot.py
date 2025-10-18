@@ -85,60 +85,66 @@ class Expansion_OneShot(Method):
           - adj: SparseTensor [N×N] (undirected ok)
           - pos: Float [N,3] (absolute GT)
           - leaf_idx: Long [L]
-          - leaf_parent_idx: Long [L]  (>=0, already batched-shifted)
+          - parent_idx_1b: Long [N] (1-based; 0 denotes root; will be shifted in batching)
           - batch: Long [N]  (PyG batch vector)
-          - reduction_level, target_size (not used here)
-        Assumes `model(x, edge_index, batch, edge_attr=None, ...) -> [N,3]`
-        producing RELATIVE offsets per node.
+        The network returns a dict with:
+          - "node_state": [N, pos_dim + feats_dim]
+          - "rel_pred"  : [N, 3]  (predicted parent-relative offsets for ALL nodes)
         """
 
-        # --- sanity
-        assert (batch.leaf_parent_idx >= 0).all(), "Found -1 in leaf_parent_idx (unexpected root-parent leaf)."
+        # --- parent indices (1-based in Data for safe batching) -> shift back to 0-based with -1 for roots
+        if not hasattr(batch, "parent_idx_1b"):
+            raise ValueError("Expected batch.parent_idx_1b (1-based parent indices). Please update dataloader.")
+        parent_idx = batch.parent_idx_1b - 1                      # [N], -1 for roots
 
         # --- graph and positions
         pos_gt = batch.pos                             # [N,3] (absolute, untouched)
         edge_index, _ = to_edge_index(batch.adj)       # (2,E)
 
-        # --- build noisy-masked input positions (parents anchored)
+        # derive leaf -> parent mapping from global parent_idx
+        leaf_parent_idx = parent_idx[batch.leaf_idx]
+        assert (leaf_parent_idx >= 0).all(), "Leaf with no valid parent encountered."
+
+        # --- prepare masked input positions for leaves
         pos_in = self._make_masked_positions(
             pos=pos_gt,
             leaf_idx=batch.leaf_idx,
-            leaf_parent_idx=batch.leaf_parent_idx,
+            leaf_parent_idx=leaf_parent_idx,
             sigma=self.leaf_noise_sigma,
             clip=self.leaf_noise_clip,
         )                                              # [N,3]
 
-        # --- prepare EGNN input (positions + optional trivial features)
-        x_in = pos_in
-        # Try to detect expected feats_dim from model (EGNN_Sparse_Network has attr feats_dim & pos_dim)
-        feats_dim = getattr(model, 'feats_dim', None)
+        # --- prepare EGNN input (positions + minimal node features)
+        feats_dim = getattr(model, 'feats_dim', 0)
         pos_dim   = getattr(model, 'pos_dim', 3)
-        if feats_dim is not None:
-            if feats_dim > 0:
-                # Append zero feature matrix (optionally could encode is_leaf)
-                # shape: [N, feats_dim]
-                zero_feats = pos_in.new_zeros((pos_in.size(0), feats_dim))
-                # Example optional feature (commented): is_leaf flag
-                # is_leaf = pos_in.new_zeros((pos_in.size(0), 1))
-                # is_leaf[batch.leaf_idx] = 1.0
-                # zero_feats[:, :1] = is_leaf.squeeze(-1)
-                x_in = th.cat([pos_in, zero_feats], dim=-1)  # [N, pos_dim + feats_dim]
-            else:
-                # Ensure we only pass positions if feats_dim == 0
-                x_in = pos_in[:, :pos_dim]
 
-        # --- run the EGNN (expects x with positions first and optional features after)
-        pred_rel_all = model(
+        if feats_dim > 0:
+            # seed with simple is_leaf flag - could be extended later TODO
+            is_leaf = pos_in.new_zeros((pos_in.size(0), 1))
+            is_leaf[batch.leaf_idx] = 1.0
+            extra = pos_in.new_zeros((pos_in.size(0), feats_dim - 1)) if feats_dim > 1 else None
+            node_feats = th.cat([is_leaf, extra], dim=-1) if extra is not None else is_leaf
+            x_in = th.cat([pos_in, node_feats], dim=-1)
+        else:
+            x_in = pos_in[:, :pos_dim]
+
+        out = model(
             x=x_in,
             edge_index=edge_index,
             batch=batch.batch,
             edge_attr=None,
-        )  # [N, pos_dim]
+            parent_idx=parent_idx,
+        )
+        if isinstance(out, dict):
+            pred_rel_all = out["rel_pred"]                # [N,3]
+        else:
+            raise ValueError("Network must return a dict with 'rel_pred'.")
 
-        # --- gather predictions and targets for leaves only
         leaf_idx = batch.leaf_idx
         pred_rel = pred_rel_all[leaf_idx]                           # [L,3]
-        tgt_rel  = self._leaf_rel_targets(pos_gt, leaf_idx, batch.leaf_parent_idx)  # [L,3]
+
+        # -- target relative offsets from parents for leaves
+        tgt_rel  = self._leaf_rel_targets(pos_gt, leaf_idx, leaf_parent_idx)  # [L,3]
 
         # --- loss
         if pred_rel.numel() == 0:
@@ -148,10 +154,9 @@ class Expansion_OneShot(Method):
 
         loss = F.mse_loss(pred_rel, tgt_rel)
 
-        # (optional) monitor absolute predictions for leaves
         with th.no_grad():
-            parent_pos_in = pos_in[batch.leaf_parent_idx]          # [L,3]
-            abs_pred = parent_pos_in + pred_rel                    # [L,3] (for debugging)
+            parent_pos_in = pos_in[leaf_parent_idx]                # [L,3]
+            abs_pred = parent_pos_in + pred_rel                    # [L,3]
 
         metrics = {
             "leaf_pos_loss": float(loss.item()),
