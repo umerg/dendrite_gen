@@ -61,9 +61,7 @@ def get_expansion_items(cfg: DictConfig, train_graphs):
             n_layers=cfg.model.num_layers,
             feats_dim=cfg.model.feats_dim,
             pos_dim=3,
-            edge_attr_dim=cfg.model.edge_attr_dim,
             m_dim=cfg.model.m_dim,
-            update_feats=cfg.model.update_feats,
             dropout=cfg.model.dropout,
         )
     else:

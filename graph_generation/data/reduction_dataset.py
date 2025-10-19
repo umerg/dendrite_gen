@@ -35,9 +35,11 @@ class RandRedDataset(IterableDataset, ABC):
         if len(leaf0_idx) > 0:
             leaf0_mask[leaf0_idx] = True
         # parent indices for initial leaves
-        leaf0_parent_idx = np.array([
-            (graph._state.parent[l] if graph._state.parent[l] is not None else -1) for l in leaf0_idx
+        # Build parent_idx_1b (length N): 1-based parent indices; roots become 0.
+        parent_idx = np.array([
+            (graph._state.parent[u] if graph._state.parent[u] is not None else -1) for u in range(graph.n)
         ], dtype=np.int64)
+        parent_idx_1b = parent_idx + 1  # shift so root becomes 0
         rgd0 = ReducedGraphData(
             target_size=graph.n,
             reduction_level=graph.level,
@@ -46,7 +48,7 @@ class RandRedDataset(IterableDataset, ABC):
             leaf_idx=leaf0_idx,
             leaf_mask=leaf0_mask,
             leaf_expansion=np.ones_like(leaf0_idx, dtype=np.int32),
-            leaf_parent_idx=leaf0_parent_idx,
+            parent_idx_1b=parent_idx_1b,
         )
         data.append(rgd0)
 
@@ -60,6 +62,13 @@ class RandRedDataset(IterableDataset, ABC):
             
             reduced_pos = pos[reduced_graph.survivor_mask]  # update positions to surviving nodes
 
+            # Parent mapping for the reduced graph state
+            parent_idx = np.array([
+                (reduced_graph._state.parent[u] if reduced_graph._state.parent[u] is not None else -1)
+                for u in range(reduced_graph.n)
+            ], dtype=np.int64)
+            parent_idx_1b = parent_idx + 1
+
             rgd = ReducedGraphData(
                 target_size=reduced_graph.n,
                 reduction_level=reduced_graph.level,
@@ -69,7 +78,7 @@ class RandRedDataset(IterableDataset, ABC):
                 leaf_idx=reduced_graph.leaf_idx,
                 leaf_mask=reduced_graph.leaf_mask,
                 leaf_expansion=reduced_graph.leaf_expansion,  # {1,2}
-                leaf_parent_idx=reduced_graph.leaf_parent_idx,
+                parent_idx_1b=parent_idx_1b,
             )
             data.append(rgd)
 

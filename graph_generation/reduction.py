@@ -78,7 +78,7 @@ class CherryReducer:
         self.leaf_idx = None          # np.ndarray[int64], shape (L,)
         self.leaf_mask = None         # np.ndarray[bool], shape (N,)
         self.leaf_expansion = None    # np.ndarray[int32], shape (L,), values {1,2}
-        self.leaf_parent_idx = None   # np.ndarray[int64], shape (L,), parent indices (or -1 for root)
+    # parent_idx_1b will be derived externally per full node list; leaf-specific parents no longer stored
         self.did_contract = False
 
     # ------------------------------------------------------------------
@@ -120,9 +120,7 @@ class CherryReducer:
             cr.leaf_mask = leaf_mask
             cr.leaf_expansion = np.ones_like(leaf_idx, dtype=np.int32)
             # parent indices for current leaves (use -1 for root / None)
-            cr.leaf_parent_idx = np.array([
-                (S.parent[l] if S.parent[l] is not None else -1) for l in leaf_idx
-            ], dtype=np.int64)
+            # parent_idx_1b is constructed externally; omit leaf_parent_idx
             return cr
 
         # Choose cherries for this level
@@ -275,9 +273,7 @@ class CherryReducer:
         next_cr.leaf_mask = leaf_mask
         next_cr.leaf_expansion = leaf_y
         # parent indices for leaves in coarse graph (already remapped)
-        next_cr.leaf_parent_idx = np.array([
-            (next_cr._state.parent[l] if next_cr._state.parent[l] is not None else -1) for l in leaf_idx
-        ], dtype=np.int64)
+        # parent_idx_1b constructed externally when building ReducedGraphData
 
         return next_cr
 
