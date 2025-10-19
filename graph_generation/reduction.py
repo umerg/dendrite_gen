@@ -39,6 +39,12 @@ class CherryReducer:
       - expansion_matrix: fine->coarse membership (n x m), binary COO
       - node_expansion:  sizes of clusters that formed THIS graph
                          (col sums of previous expansion; = ones at level 0)
+
+        Parameters:
+            - contract_root: if False, the root is excluded from cherry contraction.
+                This makes the smallest graph in a reduction sequence be the root plus its
+                (leaf) children instead of a single collapsed root node. If True (default),
+                the root can be contracted like any other cherry, producing a size-1 final graph.
     """
 
     def __init__(
@@ -51,10 +57,12 @@ class CherryReducer:
         state: Optional[_CherryState] = None,
         level: int = 0,
         weighted_reduction: bool = False,  # if True, coarsen via Laplacian
+        contract_root: bool = True,        # if False, root is never contracted; smallest graph retains root+children
     ):
         # Normalize adjacency to CSR
-        self.adj: csr = adj.tocsr() if not isinstance(adj, csr) else adj.copy()
-        self.n: int = self.adj.shape[0]
+        # Store adjacency as CSR
+        self.adj = adj.tocsr() if not isinstance(adj, csr) else adj.copy()
+        self.n = self.adj.shape[0]
         self.level = level
         self.weighted_reduction = weighted_reduction
 
@@ -68,6 +76,7 @@ class CherryReducer:
         self.mode = mode
         self.cherry_p = float(cherry_p)
         self.ensure_progress = ensure_progress
+        self.contract_root = contract_root
 
         # Root/state
         self.root = root
@@ -78,7 +87,7 @@ class CherryReducer:
         self.leaf_idx = None          # np.ndarray[int64], shape (L,)
         self.leaf_mask = None         # np.ndarray[bool], shape (N,)
         self.leaf_expansion = None    # np.ndarray[int32], shape (L,), values {1,2}
-    # parent_idx_1b will be derived externally per full node list; leaf-specific parents no longer stored
+        # parent_idx_1b will be derived externally per full node list; leaf-specific parents no longer stored
         self.did_contract = False
 
     # ------------------------------------------------------------------
@@ -94,6 +103,9 @@ class CherryReducer:
         """
         S = self._state
         cherries_all = list(S.current_cherries)
+        # Optional: prevent root contraction for "root+children" minimal graph configuration
+        if not self.contract_root:
+            cherries_all = [u for u in cherries_all if u != S.root]
 
         if not cherries_all or self.n <= 1:
             # No further contraction; return a "no-op" next level
@@ -106,6 +118,7 @@ class CherryReducer:
                 state=S,
                 level=self.level + 1,
                 weighted_reduction=self.weighted_reduction,
+                contract_root=self.contract_root,
             )
             cr.did_contract = False
             # expose current leaves for completeness (labels default to 1)
@@ -253,6 +266,7 @@ class CherryReducer:
             state=new_state,
             level=self.level + 1,
             weighted_reduction=self.weighted_reduction,
+            contract_root=self.contract_root,
         )
         next_cr.did_contract = True
 
@@ -330,6 +344,7 @@ class ReductionFactory:
     Minimal factory that instantiates a CherryReducer for a given adjacency.
     - root: int index, or "auto" / "argmax_degree", or a callable adj -> root_index
     - mode: "stochastic" | "deterministic"
+    - contract_root: if False, root cannot be contracted; sequences end at root+children.
     """
     def __init__(
         self,
@@ -339,12 +354,14 @@ class ReductionFactory:
         ensure_progress: bool = True,
         root: RootSpec = "argmax_degree",
         weighted_reduction: bool = False,
+        contract_root: bool = True,
     ):
         self.mode = mode
         self.cherry_p = float(cherry_p)
         self.ensure_progress = ensure_progress
         self.root = root
         self.weighted_reduction = weighted_reduction
+        self.contract_root = contract_root
 
     def _resolve_root(self, adj: sp.spmatrix) -> int:
         if isinstance(self.root, int):
@@ -369,4 +386,5 @@ class ReductionFactory:
             cherry_p=self.cherry_p,
             ensure_progress=self.ensure_progress,
             weighted_reduction=self.weighted_reduction,
+            contract_root=self.contract_root,
         )
