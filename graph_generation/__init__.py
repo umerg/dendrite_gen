@@ -1,1 +1,1 @@
-from . import data, reduction
+from . import data, reduction, training, model, method, metrics

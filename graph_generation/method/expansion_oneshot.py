@@ -20,6 +20,7 @@ class Expansion_OneShot(Method):
         leaf_noise_sigma=0.05,           # <-- stddev of Gaussian around parent (same units as pos)
         leaf_noise_clip=None,            # <-- optional radius clamp (float) or None
     ):
+        super().__init__(diffusion=None)
         self.deterministic_expansion = deterministic_expansion
         self.min_red_frac = min_red_frac
         self.max_red_frac = max_red_frac
@@ -79,6 +80,9 @@ class Expansion_OneShot(Method):
     # ---------------------------------------------------------
     # 3) Forward + loss (MSE on leaves only) assuming model → [N,3]
     # ---------------------------------------------------------
+    def sample_graphs(self, target_size: th.Tensor, model: Module):
+        raise NotImplementedError("Expansion_OneShot.sample_graphs is not supported yet.")
+
     def get_loss(self, batch, model: th.nn.Module):
         """
         Expected batch fields:

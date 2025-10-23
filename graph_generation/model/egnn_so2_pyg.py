@@ -554,7 +554,8 @@ class SO2_EGNN_Sparse_Network(nn.Module):
             
             # EDGES - Embedd each dim to its target dimensions:
             if edges_need_embedding:
-                edge_attr = embedd_token(edge_attr, self.edge_embedding_dims, self.edge_emb_layers)
+                if edge_attr is not None:
+                    edge_attr = embedd_token(edge_attr, self.edge_embedding_dims, self.edge_emb_layers)
                 edges_need_embedding = False
 
             # attn tokens

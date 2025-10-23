@@ -7,15 +7,15 @@ from torch.nn import Module
 class Method(ABC):
     """Interface for graph generation methods."""
 
-    def __init__(self, diffusion):
+    def __init__(self, diffusion=None):
         self.diffusion = diffusion
 
     @abstractmethod
-    def sample_graphs(self, target_size: th.Tensor, model: Module, sign_net: Module):
+    def sample_graphs(self, target_size: th.Tensor, model: Module):
         pass
 
     @abstractmethod
-    def get_loss(self, batch, model: Module, sign_net: Module):
+    def get_loss(self, batch, model: Module):
         pass
 
     @property
@@ -24,5 +24,6 @@ class Method(ABC):
 
     def to(self, device):
         self._device = device
-        self.diffusion.to(device)
+        if self.diffusion is not None:
+            self.diffusion.to(device)
         return self
