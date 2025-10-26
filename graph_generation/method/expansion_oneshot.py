@@ -88,6 +88,7 @@ class Expansion_OneShot(Method):
         Expected batch fields:
           - adj: SparseTensor [N×N] (undirected ok)
           - pos: Float [N,3] (absolute GT)
+          - leaf_expansion: Long [L] in {1,2} (GT expansion states for leaves)
           - leaf_idx: Long [L]
           - parent_idx_1b: Long [N] (1-based; 0 denotes root; will be shifted in batching)
           - batch: Long [N]  (PyG batch vector)
@@ -104,6 +105,16 @@ class Expansion_OneShot(Method):
         # --- graph and positions
         pos_gt = batch.pos                             # [N,3] (absolute, untouched)
         edge_index, _ = to_edge_index(batch.adj)       # (2,E)
+
+        # --- tracking of leaves
+        if not hasattr(batch, "leaf_idx"):
+            raise ValueError("Expected batch.leaf_idx (leaf node indices). Please update dataloader.")
+        
+        # --- expansion state for leaves
+        if not hasattr(batch, "leaf_expansion"):
+            raise ValueError("Expected batch.leaf_expansion (leaf expansion states). Please update dataloader.")
+        leaf_expansion = batch.leaf_expansion - 1       # [L] in {0,1}
+        leaf_expansion = leaf_expansion.float() * 2 - 1 # map to {-1,1} for regression
 
         # derive leaf -> parent mapping from global parent_idx
         leaf_parent_idx = parent_idx[batch.leaf_idx]
@@ -141,11 +152,13 @@ class Expansion_OneShot(Method):
         )
         if isinstance(out, dict):
             pred_rel_all = out["rel_pred"]                # [N,3]
+            pred_expansion_all = out["expansion_pred"]    # [N,1] or [N]
         else:
-            raise ValueError("Network must return a dict with 'rel_pred'.")
+            raise ValueError("Network must return a dict with 'rel_pred' and 'expansion_red'.")
 
         leaf_idx = batch.leaf_idx
         pred_rel = pred_rel_all[leaf_idx]                           # [L,3]
+        pred_expansion = pred_expansion_all[leaf_idx]               # [L,1] or [L]
 
         # -- target relative offsets from parents for leaves
         tgt_rel  = self._leaf_rel_targets(pos_gt, leaf_idx, leaf_parent_idx)  # [L,3]
@@ -153,17 +166,21 @@ class Expansion_OneShot(Method):
         # --- loss
         if pred_rel.numel() == 0:
             loss = pred_rel_all.sum() * 0.0
-            metrics = {"leaf_pos_loss": 0.0, "num_leaves": 0}
+            metrics = {"leaf_pos_loss": 0.0, "leaf_expansion_loss": 0.0, "cumulative_loss": 0.0, "num_leaves": 0}
             return loss, metrics
 
-        loss = F.mse_loss(pred_rel, tgt_rel)
+        leaf_pos_loss = F.mse_loss(pred_rel, tgt_rel)
+        leaf_expansion_loss = F.mse_loss(pred_expansion, leaf_expansion.unsqueeze(-1))
+        loss = leaf_pos_loss + leaf_expansion_loss
 
         with th.no_grad():
             parent_pos_in = pos_in[leaf_parent_idx]                # [L,3]
             abs_pred = parent_pos_in + pred_rel                    # [L,3]
 
         metrics = {
-            "leaf_pos_loss": float(loss.item()),
+            "leaf_pos_loss": float(leaf_pos_loss.item()),
+            "leaf_expansion_loss": float(leaf_expansion_loss.item()),
+            "cumulative_loss": float(loss.item()),
             "num_leaves": int(leaf_idx.numel()),
             # "abs_pred_mean_norm": float(abs_pred.norm(dim=-1).mean().item()),
         }

@@ -485,7 +485,7 @@ class SO2_EGNN_Sparse_Network(nn.Module):
             self.offset_head = nn.Sequential(
                 nn.Linear(self.feats_dim, offset_head_hidden), nn.SiLU(),
                 nn.Linear(offset_head_hidden, offset_head_hidden), nn.SiLU(),
-                nn.Linear(offset_head_hidden, 3)
+                nn.Linear(offset_head_hidden, 4)  # 3 for offset, 1 for expansion state
             )
 
         # global attn irrelevant for take one UGEDIT
@@ -618,11 +618,12 @@ class SO2_EGNN_Sparse_Network(nn.Module):
             e2 = torch.cross(self.uhat.expand_as(e1), e1, dim=-1)
 
         # head
-        abc = self.offset_head(feats)
-        a, b, c = abc[:,0:1], abc[:,1:2], abc[:,2:3]
+        abce = self.offset_head(feats)
+        a, b, c, e = abce[:,0:1], abce[:,1:2], abce[:,2:3], abce[:,3:4]
         rel_pred = a*e1 + b*e2 + c*self.uhat
+        expansion_pred = e
 
-        return {"node_state": x, "rel_pred": rel_pred}
+        return {"node_state": x, "rel_pred": rel_pred, "expansion_pred": expansion_pred}
 
     def __repr__(self):
         return 'EGNN_Sparse_Network of: {0} layers'.format(len(self.mpnn_layers))
