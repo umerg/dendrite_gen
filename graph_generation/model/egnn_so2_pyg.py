@@ -28,6 +28,38 @@ except:
 
 from .egnn_pytorch import *
 
+# axis-aligned fallback helper
+def _axis_aligned_fallback_basis(uhat: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Given a unit axis uhat that must be ±x, ±y or ±z, return a fixed orthonormal
+    basis (e1, e2) spanning the plane perpendicular to uhat.
+    Mapping (right-handed):
+      x -> (e1=y, e2=z)
+      y -> (e1=z, e2=x)
+      z -> (e1=x, e2=y)
+    """
+    dev = uhat.device
+    abs_u = uhat.abs()
+    basis = torch.tensor([[1.,0.,0.],[0.,1.,0.],[0.,0.,1.]], device=dev)
+    # check axis-aligned (ignore sign)
+    if not any(torch.allclose(abs_u, b, atol=1e-5) for b in basis):
+        raise AssertionError("SO2 axis must be aligned with ±x, ±y, or ±z.")
+
+    # choose e1 according to which coordinate is 1 in abs(uhat)
+    if torch.allclose(abs_u, basis[0], atol=1e-5):       # x-axis
+        e1 = torch.tensor([0.,1.,0.], device=dev)
+    elif torch.allclose(abs_u, basis[1], atol=1e-5):     # y-axis
+        e1 = torch.tensor([0.,0.,1.], device=dev)
+    else:                                                # z-axis
+        e1 = torch.tensor([1.,0.,0.], device=dev)
+
+    # right-handed e2
+    e2 = torch.cross(uhat, e1, dim=-1)
+    # both are unit already, but be safe numerically
+    e1 = e1 / (e1.norm() + 1e-8)
+    e2 = e2 / (e2.norm() + 1e-8)
+    return e1, e2
+
 # global linear attention
 
 class Attention_Sparse(Attention):
@@ -50,7 +82,7 @@ class Attention_Sparse(Attention):
             for bi,n_idxs in zip(*batch_uniques):
                 x_list.append( 
                     self.sparse_forward(
-                        x[aux_count:aux_count+n_i], 
+                        x[aux_count:aux_count+n_idxs], 
                         context[aux_count:aux_count+n_idxs],
                         batch_uniques = (bi.unsqueeze(-1), n_idxs.unsqueeze(-1)) 
                     ) 
@@ -151,6 +183,11 @@ class SO2_EGNN_Sparse(MessagePassing):
         u = torch.tensor(so2_axis, dtype=torch.float32)
         self.register_buffer('uhat', u / (u.norm() + 1e-8))
         self.anisotropic = anisotropic
+
+        # NEW: assert axis-aligned and cache axis-aligned fallback basis
+        fb_e1, fb_e2 = _axis_aligned_fallback_basis(self.uhat)
+        self.register_buffer('fallback_e1', fb_e1)
+        self.register_buffer('fallback_e2', fb_e2)
 
         # NEW knobs
         self.add_local_angles = add_local_angles
@@ -289,17 +326,13 @@ class SO2_EGNN_Sparse(MessagePassing):
                 v_perp = v - du_p * self.uhat                   # [N,3]
                 v_norm = v_perp.norm(dim=-1, keepdim=True)
 
-                edge_strength = rho.squeeze(-1)                 # [E]
-                max_val, argmax = scatter_max(edge_strength, row, dim_size=N)
-                fallback = torch.zeros_like(v_perp)
-                mask_valid = argmax >= 0
-                if mask_valid.any():
-                    idx_e = argmax[mask_valid]
-                    fallback[mask_valid] = r_perp[idx_e]
-                fb_norm = fallback.norm(dim=-1, keepdim=True)
-                fallback = fallback / (fb_norm + self.eps)
+                # NEW fallback: use fixed global axes when v_perp ~ 0 or no parent
                 need_fb = (~has_parent) | (v_norm.squeeze(-1) <= 1e-6)
-                e1 = torch.where(need_fb.view(-1,1), fallback, v_perp / (v_norm + self.eps))
+                e1 = torch.where(
+                    need_fb.view(-1,1),
+                    self.fallback_e1.expand_as(v_perp),
+                    v_perp / (v_norm + self.eps)
+                )
                 e2 = torch.cross(self.uhat.expand_as(e1), e1, dim=-1)
                 cosphi = (dir2 * e1[row]).sum(dim=-1, keepdim=True)
                 sinphi = (dir2 * e2[row]).sum(dim=-1, keepdim=True)
@@ -479,6 +512,11 @@ class SO2_EGNN_Sparse_Network(nn.Module):
         u = torch.tensor(so2_axis, dtype=torch.float32)
         self.register_buffer('uhat', u / (u.norm() + 1e-8))
 
+        # cache axis-aligned fallback basis for decode path
+        fb_e1, fb_e2 = _axis_aligned_fallback_basis(self.uhat)
+        self.register_buffer('fallback_e1', fb_e1)
+        self.register_buffer('fallback_e2', fb_e2)
+
         # basis-coef head
         self.add_offset_head = add_offset_head
         if self.add_offset_head:
@@ -602,19 +640,14 @@ class SO2_EGNN_Sparse_Network(nn.Module):
             du_p = (v @ self.uhat).unsqueeze(-1)
             v_perp = v - du_p * self.uhat
             v_norm = v_perp.norm(dim=-1, keepdim=True)
-            row, col = edge_index
-            r = coors[row] - coors[col]
-            r_perp = r - (r @ self.uhat).unsqueeze(-1) * self.uhat
-            rho = r_perp.norm(dim=-1)
-            max_val, argmax = scatter_max(rho, row, dim_size=N)
-            fallback = torch.zeros_like(v_perp)
-            mask_valid = argmax >= 0
-            if mask_valid.any():
-                fallback[mask_valid] = r_perp[argmax[mask_valid]]
-            fb_norm = fallback.norm(dim=-1, keepdim=True)
-            fallback = fallback / (fb_norm + 1e-8)
+
+            # NEW fixed fallback
             need_fb = (~has_parent) | (v_norm.squeeze(-1) <= 1e-6)
-            e1 = torch.where(need_fb.view(-1,1), fallback, v_perp / (v_norm + 1e-8))
+            e1 = torch.where(
+                need_fb.view(-1,1),
+                self.fallback_e1.expand_as(v_perp),
+                v_perp / (v_norm + 1e-8)
+            )
             e2 = torch.cross(self.uhat.expand_as(e1), e1, dim=-1)
 
         # head
@@ -648,18 +681,16 @@ class SO2_EGNN_Sparse_Network(nn.Module):
         du_p = (v @ self.uhat).unsqueeze(-1)
         v_perp = v - du_p * self.uhat
         v_norm = v_perp.norm(dim=-1, keepdim=True)
-        # Fallback from strongest outgoing edge
-        edge_strength = rho.squeeze(-1)
-        max_val, argmax = scatter_max(edge_strength, row, dim_size=coors.size(0))
-        fallback = torch.zeros_like(v_perp)
-        mask_valid = argmax >= 0
-        if mask_valid.any():
-            fallback[mask_valid] = r_perp[argmax[mask_valid]]
-        fb_norm = fallback.norm(dim=-1, keepdim=True)
-        fallback = fallback / (fb_norm + 1e-8)
+
+        # NEW fixed fallback
         need_fb = (~has_parent) | (v_norm.squeeze(-1) <= 1e-6)
-        e1 = torch.where(need_fb.view(-1,1), fallback, v_perp / (v_norm + 1e-8))
+        e1 = torch.where(
+            need_fb.view(-1,1),
+            self.fallback_e1.expand_as(v_perp),
+            v_perp / (v_norm + 1e-8)
+        )
         e2 = torch.cross(self.uhat.expand_as(e1), e1, dim=-1)
+
         dir2 = r_perp / rho
         cosphi = (dir2 * e1[row]).sum(dim=-1, keepdim=True)
         sinphi = (dir2 * e2[row]).sum(dim=-1, keepdim=True)

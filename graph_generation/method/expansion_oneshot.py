@@ -154,7 +154,7 @@ class Expansion_OneShot(Method):
             pred_rel_all = out["rel_pred"]                # [N,3]
             pred_expansion_all = out["expansion_pred"]    # [N,1] or [N]
         else:
-            raise ValueError("Network must return a dict with 'rel_pred' and 'expansion_red'.")
+            raise ValueError("Network must return a dict with 'rel_pred' and 'expansion_pred'.")
 
         leaf_idx = batch.leaf_idx
         pred_rel = pred_rel_all[leaf_idx]                           # [L,3]
@@ -170,7 +170,12 @@ class Expansion_OneShot(Method):
             return loss, metrics
 
         leaf_pos_loss = F.mse_loss(pred_rel, tgt_rel)
-        leaf_expansion_loss = F.mse_loss(pred_expansion, leaf_expansion.unsqueeze(-1))
+        # Ensure dimension compatibility for expansion loss
+        if pred_expansion.dim() == 1:
+            pred_expansion = pred_expansion.unsqueeze(-1)  # [L] -> [L,1]
+        if leaf_expansion.dim() == 1:
+            leaf_expansion = leaf_expansion.unsqueeze(-1)  # [L] -> [L,1]
+        leaf_expansion_loss = F.mse_loss(pred_expansion, leaf_expansion)
         loss = leaf_pos_loss + leaf_expansion_loss
 
         with th.no_grad():
