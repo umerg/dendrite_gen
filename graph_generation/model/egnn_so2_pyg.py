@@ -15,9 +15,11 @@ from torch_scatter import scatter_add, scatter_max
 try:
     import torch_geometric
     from torch_geometric.nn import MessagePassing
+    from torch_geometric.nn import LayerNorm as PygLayerNorm
     from torch_geometric.typing import Adj, Size, OptTensor, Tensor
 except:
     Tensor = OptTensor = Adj = MessagePassing = Size = object
+    PygLayerNorm = nn.LayerNorm  # fallback
     PYG_AVAILABLE = False
     
     # to stop throwing errors from type suggestions
@@ -74,6 +76,67 @@ class Attention_Sparse(Attention):
         # only one example in batch - do dense - faster
         if batch_uniques[0].shape[0] == 1: 
             x, context = map(lambda t: rearrange(t, 'h d -> () h d'), (x, context))
+            return self.forward(x, context, mask=None).squeeze() # get rid of batch dim
+        # multiple examples in batch - do block-sparse by dense loop
+        else:
+            x_list = []
+            aux_count = 0
+            for bi,n_idxs in zip(*batch_uniques):
+                x_list.append( 
+                    self.sparse_forward(
+                        x[aux_count:aux_count+n_idxs], 
+                        context[aux_count:aux_count+n_idxs],
+                        batch_uniques = (bi.unsqueeze(-1), n_idxs.unsqueeze(-1)) 
+                    ) 
+                )
+                aux_count += int(n_idxs.item())
+            return torch.cat(x_list, dim=0)
+
+    @torch.no_grad()
+    def _unique_counts(self, b: torch.Tensor):
+        # returns (unique_ids, counts)
+        return torch.unique(b, return_counts=True)
+
+    def sparse_forward_with_separate_batches(self,
+                                           q: torch.Tensor,
+                                           kv: torch.Tensor,
+                                           *,
+                                           q_batch: Optional[torch.Tensor] = None,
+                                           kv_batch: Optional[torch.Tensor] = None,
+                                           mask: Optional[torch.Tensor] = None):
+        """Block-sparse over graphs with possibly different per-graph sizes for q vs kv.
+        Expects q.shape == [sum_q, d], kv.shape == [sum_kv, d].
+        If no batches are given, assumes a single graph and does dense.
+        """
+        assert (q_batch is None) == (kv_batch is None), "Pass both q_batch and kv_batch or neither."
+        if q_batch is None:
+            # single-graph fast path
+            q_ = rearrange(q, 'n d -> () n d')
+            kv_ = rearrange(kv, 'm d -> () m d')
+            return super().forward(q_, kv_, mask=None).squeeze(0)
+
+        # multi-graph path
+        (uq, _), (uk, _) = self._unique_counts(q_batch), self._unique_counts(kv_batch)
+        # assume the same set of graph ids exists in both batches
+        assert torch.equal(uq, uk), "q_batch and kv_batch must index the same set of graphs in order."
+
+        outs = []
+        for gid in uq.tolist():
+            q_sel = (q_batch == gid)
+            k_sel = (kv_batch == gid)
+            q_g = q[q_sel]
+            kv_g = kv[k_sel]
+            q_g = rearrange(q_g, 'n d -> () n d')
+            kv_g = rearrange(kv_g, 'm d -> () m d')
+            out_g = super().forward(q_g, kv_g, mask=None).squeeze(0)
+            outs.append(out_g)
+        return torch.cat(outs, dim=0)
+        assert batch is not None or batch_uniques is not None, "Batch/(uniques) must be passed for block_sparse_attn"
+        if batch_uniques is None: 
+            batch_uniques = torch.unique(batch, return_counts=True)
+        # only one example in batch - do dense - faster
+        if batch_uniques[0].shape[0] == 1: 
+            x, context = map(lambda t: rearrange(t, 'h d -> () h d'), (x, context))
             return self.forward(x, context, mask=None).squeeze() # get rid of batch dim
         # multiple examples in batch - do block-sparse by dense loop
         else:
@@ -99,31 +162,36 @@ class GlobalLinearAttention_Sparse(nn.Module):
         dim_head = 64
     ):
         super().__init__()
-        self.norm_seq = torch_geometric.nn.norm.LayerNorm(dim)
-        self.norm_queries = torch_geometric.nn.norm.LayerNorm(dim)
-        self.attn1 = Attention_Sparse(dim, heads, dim_head)
-        self.attn2 = Attention_Sparse(dim, heads, dim_head)
+        self.norm_seq = PygLayerNorm(dim)
+        self.norm_queries = PygLayerNorm(dim)
+        self.attn1 = Attention_Sparse(dim=dim, heads=heads, dim_head=dim_head)
+        self.attn2 = Attention_Sparse(dim=dim, heads=heads, dim_head=dim_head)
+        self.ff_norm_x = PygLayerNorm(dim)
+        self.ff_x = nn.Sequential(nn.Linear(dim, dim*4), nn.GELU(), nn.Linear(dim*4, dim))
+        self.ff_norm_q = PygLayerNorm(dim)
+        self.ff_q = nn.Sequential(nn.Linear(dim, dim*4), nn.GELU(), nn.Linear(dim*4, dim))
 
-        # can't concat pyg norms with torch sequentials
-        self.ff_norm = torch_geometric.nn.norm.LayerNorm(dim)
-        self.ff = nn.Sequential(
-            nn.Linear(dim, dim * 4),
-            nn.GELU(),
-            nn.Linear(dim * 4, dim)
-        )
-
-    def forward(self, x, queries, batch=None, batch_uniques=None, mask = None):
-        res_x, res_queries = x, queries
-        x, queries = self.norm_seq(x, batch=batch), self.norm_queries(queries, batch=batch)
-
-        induced = self.attn1.sparse_forward(queries, x, batch=batch, batch_uniques=batch_uniques, mask = mask)
-        out     = self.attn2.sparse_forward(x, induced, batch=batch, batch_uniques=batch_uniques)
-
-        x =  out + res_x
-        queries = induced + res_queries
-
-        x_norm = self.ff_norm(x, batch=batch)
-        x = self.ff(x_norm) + x_norm
+    def forward(self,
+                x: torch.Tensor,
+                queries: torch.Tensor,
+                *,
+                x_batch: Optional[torch.Tensor] = None,
+                q_batch: Optional[torch.Tensor] = None):
+        # norm
+        x_n = self.norm_seq(x, batch=x_batch) if x_batch is not None else self.norm_seq(x)
+        q_n = self.norm_queries(queries, batch=q_batch) if q_batch is not None else self.norm_queries(queries)
+        # ISAB step 1: tokens ← nodes
+        induced = self.attn1.sparse_forward_with_separate_batches(q_n, x_n, q_batch=q_batch, kv_batch=x_batch)
+        # ISAB step 2: nodes ← tokens
+        out = self.attn2.sparse_forward_with_separate_batches(x_n, induced, q_batch=x_batch, kv_batch=q_batch)
+        # residuals
+        x = x + out
+        queries = queries + induced
+        # FFN on both (stabilizes training)
+        x_ = self.ff_norm_x(x, batch=x_batch) if x_batch is not None else self.ff_norm_x(x)
+        x = x + self.ff_x(x_)
+        q_ = self.ff_norm_q(queries, batch=q_batch) if q_batch is not None else self.ff_norm_q(queries)
+        queries = queries + self.ff_q(q_)
         return x, queries
 
 
@@ -230,7 +298,7 @@ class SO2_EGNN_Sparse(MessagePassing):
         ) if soft_edge else None # soft edge irrelevant for take one UGEDIT
 
         # NODES - can't do identity in node_norm bc pyg expects 2 inputs, but identity expects 1. 
-        self.node_norm = torch_geometric.nn.norm.LayerNorm(feats_dim) if norm_feats else None
+        self.node_norm = PygLayerNorm(feats_dim) if norm_feats else None
         self.coors_norm = CoorsNorm(scale_init = norm_coors_scale_init) if norm_coors else nn.Identity()
 
         self.node_mlp = nn.Sequential(
@@ -434,6 +502,26 @@ class SO2_EGNN_Sparse_Network(nn.Module):
         -----
         Diff with normal layer: one has to do preprocessing before (radius, global token, ...)
     """
+
+    @staticmethod
+    def _make_global_tokens(global_tokens_param: torch.Tensor, batch: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return (tokens, tokens_batch) where we tile m learned tokens for each graph in the batch."""
+        # batch is shape [N], values 0..B-1
+        device = batch.device
+        B = int(batch.max().item()) + 1 if batch.numel() else 0
+        if B == 0:
+            return torch.empty(0, global_tokens_param.size(-1), device=device), torch.empty(0, dtype=torch.long, device=device)
+        m, d = global_tokens_param.shape
+        tokens = global_tokens_param.unsqueeze(0).expand(B, m, d).reshape(B * m, d)
+        tokens_batch = torch.arange(B, device=device).repeat_interleave(m)
+        return tokens, tokens_batch
+
+    def _iter_egnn_layers(self):
+        for L in self.mpnn_layers:
+            if isinstance(L, nn.ModuleList):  # [ATTN, EGNN]
+                yield L[1]
+            else:
+                yield L
     def __init__(self, n_layers, feats_dim, 
                  pos_dim = 3,
                  edge_attr_dim = 0, 
@@ -558,12 +646,12 @@ class SO2_EGNN_Sparse_Network(nn.Module):
             )
 
             # global attention case
-            is_global_layer = self.has_global_attn and (i % self.global_linear_attn_every) == 0
+            is_global_layer = self.has_global_attn and ((i + 1) % self.global_linear_attn_every) == 0
             if is_global_layer:
                 attn_layer = GlobalLinearAttention_Sparse(dim=self.feats_dim, 
                                                    heads = global_linear_attn_heads, 
                                                    dim_head = global_linear_attn_dim_head)
-                self.mpnn_layers.append(nn.ModuleList([layer, attn_layer]))
+                self.mpnn_layers.append(nn.ModuleList([attn_layer, layer]))  # [ATTN, EGNN]
             # normal case
             else: 
                 self.mpnn_layers.append(layer)
@@ -584,7 +672,7 @@ class SO2_EGNN_Sparse_Network(nn.Module):
         edges_need_embedding = True  
         # Precompute static geometry if coordinates will remain fixed (update_coors False in all layers)
         pre_geom = None
-        static_coords = all((not getattr(layer, 'update_coors', True)) for layer in self.mpnn_layers)
+        static_coords = all((not getattr(L, 'update_coors', True)) for L in self._iter_egnn_layers())
         if parent_idx is not None and static_coords:
             pre_geom = self._compute_static_so2_geometry(x[:, :self.pos_dim], edge_index, parent_idx)
 
@@ -596,23 +684,24 @@ class SO2_EGNN_Sparse_Network(nn.Module):
                     edge_attr = embedd_token(edge_attr, self.edge_embedding_dims, self.edge_emb_layers)
                 edges_need_embedding = False
 
-            # attn tokens
-            global_tokens = None
-            if exists(self.global_tokens):
-                unique, amounts = torch.unique(batch, return_counts=True)
-                num_idxs = torch.cat([torch.arange(num_idxs_i) for num_idxs_i in amounts], dim=-1)
-                global_tokens = self.global_tokens[num_idxs]
-
             # pass layers
-            is_global_layer = self.has_global_attn and (i % self.global_linear_attn_every) == 0
-            if not is_global_layer:
-                x = layer(x, edge_index, edge_attr, batch=batch, size=bsize, parent_idx=parent_idx, pre_geom=pre_geom)
-            else: 
-                # only pass feats to the attn layer
-                x_attn = layer[0](x[:, self.pos_dim:], global_tokens)
-                # merge attn-ed feats and coords
-                x = torch.cat( (x[:, :self.pos_dim], x_attn), dim=-1)
-                x = layer[-1](x, edge_index, edge_attr, batch=batch, size=bsize, parent_idx=parent_idx, pre_geom=pre_geom)
+            is_global_layer = self.has_global_attn and ((i + 1) % self.global_linear_attn_every) == 0
+            if isinstance(layer, nn.ModuleList):  # global block: [ATTN, EGNN]
+                # (a) build tokens per graph
+                tokens, tokens_batch = self._make_global_tokens(self.global_tokens, batch)
+
+                # (b) run ISAB on features only
+                coors, feats = x[:, :self.pos_dim], x[:, self.pos_dim:]
+                feats, _ = layer[0](feats, tokens, x_batch=batch, q_batch=tokens_batch)
+
+                # (c) merge and continue with EGNN
+                x = torch.cat([coors, feats], dim=-1)
+                x = layer[1](x, edge_index, edge_attr, batch=batch, size=bsize,
+                             parent_idx=parent_idx, pre_geom=pre_geom)
+            else:
+                # regular EGNN layer
+                x = layer(x, edge_index, edge_attr, batch=batch, size=bsize,
+                          parent_idx=parent_idx, pre_geom=pre_geom)
 
             # recalculate edge info - not needed if last layer
             if self.recalc and ((i%self.recalc == 0) and not (i == len(self.mpnn_layers)-1)) :

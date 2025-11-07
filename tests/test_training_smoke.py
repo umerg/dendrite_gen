@@ -15,6 +15,13 @@ from __future__ import annotations
 
 import random
 from types import SimpleNamespace
+import sys, os
+from pathlib import Path
+
+# Ensure project root on sys.path for 'graph_generation' import when running directly.
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
 
 import numpy as np
 import networkx as nx
@@ -91,7 +98,18 @@ def _make_cfg():
     return SimpleNamespace(
         name="training_smoke",
         debugging=False,
-        model=SimpleNamespace(name="egnn", num_layers=2, feats_dim=4, m_dim=16, dropout=0.0),
+        # Added global linear attention config parameters required by updated SO2_EGNN_Sparse_Network
+        model=SimpleNamespace(
+            name="egnn",
+            num_layers=2,
+            feats_dim=4,
+            m_dim=16,
+            dropout=0.0,
+            global_linear_attn_every=1,        # enable global attention every layer
+            global_linear_attn_heads=4,
+            global_linear_attn_dim_head=32,
+            num_global_tokens=2,
+        ),
         method=SimpleNamespace(name="expansion", deterministic_expansion=False, leaf_noise_sigma=0.05, leaf_noise_clip=None),
         reduction=SimpleNamespace(mode="stochastic", cherry_p=0.8, ensure_progress=True, root=0, contract_root=False,
                                   num_red_seqs=-1, min_red_frac=0.0, max_red_frac=0.5, red_threshold=0),
@@ -121,6 +139,10 @@ def test_training_smoke():
         pos_dim=3,
         m_dim=cfg.model.m_dim,
         dropout=cfg.model.dropout,
+        global_linear_attn_every=cfg.model.global_linear_attn_every,
+        global_linear_attn_heads=cfg.model.global_linear_attn_heads,
+        global_linear_attn_dim_head=cfg.model.global_linear_attn_dim_head,
+        num_global_tokens=cfg.model.num_global_tokens,
     )
     method = gg.method.Expansion_OneShot(
         deterministic_expansion=cfg.method.deterministic_expansion,
@@ -130,6 +152,22 @@ def test_training_smoke():
         leaf_noise_sigma=cfg.method.leaf_noise_sigma,
         leaf_noise_clip=cfg.method.leaf_noise_clip,
     )
+
+    # Sanity: ensure global attention is enabled
+    assert hasattr(model, "global_linear_attn_every") and model.global_linear_attn_every > 0, "Global attention config not applied"
+
+    # Quick loss path smoke before trainer: ensures expansion state loss present
+    sample_batch = next(iter(loader))
+    res = method.get_loss(sample_batch, model)
+    if res is not None:
+        loss, metrics = res
+        required_keys = {"leaf_pos_loss", "leaf_expansion_loss", "cumulative_loss"}
+        missing = required_keys - set(metrics.keys())
+        assert not missing, f"Missing loss metrics: {missing}"
+        assert metrics["num_leaves"] >= 0, "Invalid num_leaves metric"
+        print(f"Pre-training one-step loss check OK: {metrics}")
+    else:
+        print("Pre-training one-step loss check skipped (batch contained no leaves).")
 
     # No metrics & validation disabled
     trainer = gg.training.Trainer(
