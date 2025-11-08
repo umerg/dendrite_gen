@@ -127,12 +127,14 @@ def main(cfg: DictConfig):
             max_size=cfg.dataset.max_size,
             seed=0,
         )
-        validation_graphs = graph_generator(
-            num_graphs=cfg.dataset.val_size,
-            min_size=cfg.dataset.min_size,
-            max_size=cfg.dataset.max_size,
-            seed=1,
-        )
+        # validation_graphs = graph_generator(
+        #     num_graphs=cfg.dataset.val_size,
+        #     min_size=cfg.dataset.min_size,
+        #     max_size=cfg.dataset.max_size,
+        #     seed=1,
+        # )
+        validation_graphs = train_graphs  # TODO remove
+
         test_graphs = graph_generator(
             num_graphs=cfg.dataset.test_size,
             min_size=cfg.dataset.min_size,

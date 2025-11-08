@@ -74,11 +74,14 @@ def generate_tree_graphs(
     max_size: int,
     seed: int | None = None,
 ) -> list[nx.Graph]:
-    """Generate a list of random tree graphs with 3D positions.
+    """Generate a list of random binary tree graphs with 3D positions.
 
     The returned graphs are plain ``networkx.Graph`` objects whose nodes each have
     a ``pos`` attribute: a length-3 ``numpy.ndarray`` of dtype ``float32``.
     This matches the geometric requirement enforced in ``Trainer.evaluate``.
+
+    Binary tree constraint: Each internal node has exactly 2 children (degree 3),
+    and leaf nodes have degree 1. Only the root has degree 2 if it has children.
 
     Args:
         num_graphs: Number of tree graphs to generate.
@@ -93,8 +96,7 @@ def generate_tree_graphs(
 
     Notes:
         * Sizes are sampled uniformly from the integer range [min_size, max_size].
-        * Tree topology is sampled using ``networkx.random_tree`` to obtain a
-          uniformly random labelled tree for the chosen size.
+        * Binary tree topology: internal nodes have exactly 2 children.
         * 3D positions are assigned via a spring layout (``nx.spring_layout``)
           with dimension=3, then centered & scaled mildly for stability.
         * All graphs share a single master RNG so that calls are reproducible.
@@ -102,50 +104,50 @@ def generate_tree_graphs(
     assert min_size > 0 and max_size >= min_size, "Invalid size bounds"
     rng = np.random.default_rng(seed)
     graphs: list[nx.Graph] = []
+    
     for i in range(num_graphs):
         n = int(rng.integers(min_size, max_size + 1))
-        # Random labelled tree (fallback if networkx.random_tree unavailable)
-        # Use a fresh seed per tree to keep topology varied but reproducible overall.
-        tree_seed = int(rng.integers(0, 2**32 - 1))
-        if hasattr(nx, "random_tree"):
-            G = nx.random_tree(n, seed=tree_seed)
+        
+        # Generate binary tree using recursive splitting
+        G = nx.Graph()
+        
+        if n == 1:
+            G.add_node(0)
         else:
-            # Custom Prüfer sequence based random tree generator (labels 0..n-1)
-            G = nx.Graph()
-            if n == 1:
-                G.add_node(0)
-            else:
-                prufer = rng.integers(0, n, size=n - 2)
-                degree = np.ones(n, dtype=np.int64)
-                for v in prufer:
-                    degree[v] += 1
-                # Use list of leaves; we pick the smallest leaf for determinism
-                # You could randomize selection; keeping deterministic simplifies tests
-                leaves = [i for i in range(n) if degree[i] == 1]
-                leaves.sort()
-                for v in prufer:
-                    leaf = leaves[0]  # smallest leaf
-                    G.add_edge(leaf, v)
-                    degree[leaf] -= 1
-                    degree[v] -= 1
-                    leaves.pop(0)
-                    if degree[v] == 1:
-                        # insert while keeping sorted order (n is small typically)
-                        # linear insert is fine for small n
-                        inserted = False
-                        for idx, l in enumerate(leaves):
-                            if v < l:
-                                leaves.insert(idx, v)
-                                inserted = True
+            # For strict binary tree: every internal node has exactly 2 children
+            # This means we can only have certain tree sizes: 1, 3, 5, 7, 9, etc. (1 + 2k)
+            # Adjust n to nearest valid size if needed
+            if n % 2 == 0:
+                n = n + 1  # Force odd number for full binary tree
+                
+            # Simple approach: create complete binary tree structure
+            # Number internal nodes = (n-1)/2, number of leaves = (n+1)/2
+            nodes = list(range(n))
+            rng.shuffle(nodes)  # randomize for variety
+            
+            # Create tree: first node is root, then alternate levels
+            G.add_node(nodes[0])
+            
+            if n >= 3:
+                # Build tree level by level ensuring binary property
+                level_nodes = [nodes[0]]  # current level
+                node_idx = 1
+                
+                while node_idx < n and level_nodes:
+                    next_level = []
+                    
+                    for parent in level_nodes:
+                        # Give this parent exactly 2 children if possible
+                        for _ in range(2):
+                            if node_idx >= n:
                                 break
-                        if not inserted:
-                            leaves.append(v)
-                # two leaves remain
-                G.add_edge(leaves[0], leaves[1])
-            # Ensure all nodes present
-            for u in range(n):
-                if u not in G:
-                    G.add_node(u)
+                            child = nodes[node_idx]
+                            G.add_node(child)
+                            G.add_edge(parent, child)
+                            next_level.append(child)
+                            node_idx += 1
+                    
+                    level_nodes = next_level
 
         # Spring layout in 3D
         layout_seed = int(rng.integers(0, 2**32 - 1))

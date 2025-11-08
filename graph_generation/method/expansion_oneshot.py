@@ -216,13 +216,33 @@ class Expansion_OneShot(Method):
             spawn_counts_final[disable] = 0
 
         # 5) Ensure progress if capacity still available
-        if ensure_progress and spawn_counts_final.sum().item() == 0 and (remaining_capacity >= 2).any():
-            for g in range(target_size.numel()):
-                if remaining_capacity[g] >= 2:
-                    first_leaf_g = th.nonzero(leaf_batch == g, as_tuple=False)
-                    if first_leaf_g.numel() > 0:
-                        spawn_counts_final[first_leaf_g[0]] = 2
-                        break
+        if ensure_progress and (remaining_capacity >= 2).any():
+            # Guarantee per-graph progress: for every graph that
+            # (a) still has capacity for at least one 2-branch AND
+            # (b) has at least one current leaf, AND
+            # (c) has no leaf already scheduled to expand this step,
+            # force exactly one leaf to expand (add 2 children).
+            # This prevents graphs from stalling at size=3 (root + 2 children)
+            # when the model prematurely predicts all leaves as terminal.
+            num_graphs = int(target_size.numel())
+            for g in range(num_graphs):
+                if remaining_capacity[g] < 2:
+                    continue  # not enough room for a binary expansion
+                mask_g = (leaf_batch == g)
+                if not mask_g.any():
+                    continue  # no leaves to expand in this graph
+                if (spawn_counts_final[mask_g] == 2).any():
+                    continue  # already at least one expansion scheduled for this graph
+                # Force the first leaf (deterministically or random) to expand
+                leaf_indices_g = th.nonzero(mask_g, as_tuple=False).flatten()
+                if self.deterministic_expansion:
+                    # Deterministic ordering: pick smallest index (first in tensor)
+                    forced_leaf = leaf_indices_g[0]
+                else:
+                    # Random selection among available leaves for diversity
+                    rand_idx = th.randint(low=0, high=leaf_indices_g.numel(), size=(1,), device=leaf_indices_g.device)
+                    forced_leaf = leaf_indices_g[rand_idx]
+                spawn_counts_final[forced_leaf] = 2
 
         # 6) Count new children & early exit
         total_new_children = int(spawn_counts_final.sum().item())

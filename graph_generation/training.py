@@ -1,6 +1,7 @@
 import pickle
 from pathlib import Path
 from time import time
+import logging
 
 import matplotlib.pyplot as plt
 import networkx as nx
@@ -49,7 +50,15 @@ class Trainer:
         self.cfg = cfg
 
         self.rng = np.random.default_rng(0)
-        self.device = "cuda" if th.cuda.is_available() and not cfg.debugging else "cpu"
+        # Prefer CUDA, fallback to CPU (MPS has stability issues with PyG)
+        if not cfg.debugging:
+            if th.cuda.is_available():
+                self.device = "cuda"
+            else:
+                self.device = "cpu"
+        else:
+            self.device = "cpu"
+        print(f"Selected device: {self.device}")
         self.method = method.to(self.device)
         self.model = model.to(self.device)
         self.optimizer = Adam(self.model.parameters(), cfg.training.lr)
@@ -108,6 +117,22 @@ class Trainer:
 
         num_parameters = sum(p.numel() for p in model.parameters())
         print(f"Total number of model parameters: {num_parameters / 1e6} Million")
+        
+        # Set up logging to file
+        self.logger = logging.getLogger(__name__)
+        self.logger.setLevel(logging.INFO)
+        
+        # Add file handler if not already present
+        if not any(isinstance(h, logging.FileHandler) for h in self.logger.handlers):
+            log_file = self.output_dir / "training.log"
+            file_handler = logging.FileHandler(log_file)
+            file_handler.setLevel(logging.INFO)
+            formatter = logging.Formatter('%(asctime)s - %(message)s')
+            file_handler.setFormatter(formatter)
+            self.logger.addHandler(file_handler)
+            
+        self.logger.info(f"Training initialized on device: {self.device}")
+        self.logger.info(f"Total model parameters: {num_parameters / 1e6:.6f} Million")
 
     def save_checkpoint(self):
         checkpoint = {
@@ -148,6 +173,8 @@ class Trainer:
 
     def train(self):
         print(f"Training model on {self.device}")
+        if hasattr(self, 'logger'):
+            self.logger.info(f"Starting training on {self.device}")
         self.model.train()
 
         last_step = False
@@ -216,6 +243,8 @@ class Trainer:
 
     def run_validation(self):
         print(f"Running validation at {self.step} steps.")
+        if hasattr(self, 'logger'):
+            self.logger.info(f"Running validation at step {self.step}")
 
         # --- VALIDATION LOOP (metrics + optional plots) ---
         # We gate metric computation & test-trigger logic with cfg.validation.enable_metrics.
@@ -379,12 +408,45 @@ class Trainer:
                 fig_path = eval_plots_dir / f"step_{self.step}_beta_{beta}.png"
                 fig.savefig(fig_path, dpi=150)
                 results["examples_path"] = str(fig_path)
+
+                # NEW: side-by-side comparison plots (reference vs predicted) for same permutation order
+                eval_graphs_perm = [eval_graphs[i] for i in pred_perm]
+                comp_rows = max_examples
+                comp_cols = 2  # reference | predicted
+                comp_fig, comp_axs = plt.subplots(comp_rows, comp_cols, figsize=(comp_cols * 5, comp_rows * 3.5))
+                if isinstance(comp_axs, plt.Axes):
+                    comp_axs = np.array([[comp_axs]])
+                comp_axs = np.atleast_2d(comp_axs)
+                for i in range(max_examples):
+                    refG = eval_graphs_perm[i]
+                    predG = results["pred_graphs"][i]
+                    for col_idx, (Gcur, title_prefix) in enumerate([(refG, 'Eval'), (predG, 'Pred')]):
+                        axc = comp_axs[i][col_idx]
+                        pos_cur = {n: Gcur.nodes[n]['pos'][:2] for n in Gcur.nodes()}
+                        # edges
+                        for u, v in Gcur.edges():
+                            p1 = pos_cur[u]; p2 = pos_cur[v]
+                            axc.plot([p1[0], p2[0]], [p1[1], p2[1]], color='lightgray', linewidth=1.0, zorder=1)
+                        xs = [pos_cur[n][0] for n in Gcur.nodes()]
+                        ys = [pos_cur[n][1] for n in Gcur.nodes()]
+                        axc.scatter(xs, ys, c='tab:blue' if title_prefix=='Eval' else 'tab:orange', s=30, edgecolors='k', linewidths=0.5, zorder=2)
+                        axc.set_title(f"{title_prefix} N={Gcur.number_of_nodes()}")
+                        axc.set_xticks([]); axc.set_yticks([])
+                comp_fig.tight_layout()
+                comp_path = eval_plots_dir / f"step_{self.step}_beta_{beta}_compare.png"
+                comp_fig.savefig(comp_path, dpi=150)
+                results["examples_compare"] = comp_fig
+                results["examples_compare_path"] = str(comp_path)
             else:
                 results["examples"] = None
                 results["examples_path"] = None
+                results["examples_compare"] = None
+                results["examples_compare_path"] = None
         else:
             results["examples"] = None
             results["examples_path"] = None
+            results["examples_compare"] = None
+            results["examples_compare_path"] = None
 
         return results
 
@@ -395,7 +457,11 @@ class Trainer:
                 print(f"{'   ' * indent}{key}:")
                 self.log(value, prefix=f"{prefix}{key}/", indent=indent + 1)
             elif isinstance(value, float):
-                print(f"{'   ' * indent}{key}: {value}")
+                log_msg = f"{'   ' * indent}{key}: {value}"
+                print(log_msg)
+                # Also log to file
+                if hasattr(self, 'logger'):
+                    self.logger.info(f"{prefix}{key}: {value}")
                 if self.cfg.wandb.logging and self.wandb_run is not None:
                     self.wandb_run.log({f"{prefix}{key}": value}, step=self.step)
             elif isinstance(value, Figure):
