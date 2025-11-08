@@ -88,6 +88,7 @@ def get_expansion_items(cfg: DictConfig, train_graphs):
         red_threshold=cfg.reduction.red_threshold,
         leaf_noise_sigma=cfg.method.leaf_noise_sigma,
         leaf_noise_clip=cfg.method.leaf_noise_clip,
+        debug=cfg.debugging,
     ) # expansion with one-shot generation at every step
 
     return {

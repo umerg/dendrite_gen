@@ -532,7 +532,7 @@ class SO2_EGNN_Sparse_Network(nn.Module):
                  embedding_dims=[],
                  edge_embedding_nums=[], 
                  edge_embedding_dims=[],
-                 update_coors=True, 
+                 update_coors=False, 
                  update_feats=True, 
                  norm_feats=True, 
                  norm_coors=False,

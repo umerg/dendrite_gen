@@ -17,12 +17,20 @@ class Expansion_OneShot(Method):
         red_threshold=0,
         leaf_noise_sigma=0.05,           # <-- stddev of Gaussian around parent (same units as pos)
         leaf_noise_clip=None,            # <-- optional radius clamp (float) or None
+        debug: bool = False,
+        debug_max_batches: int = 2,
+        debug_dir: str | None = None,
     ):
         super().__init__(diffusion=None)
         self.deterministic_expansion = deterministic_expansion
         self.red_threshold = red_threshold
         self.leaf_noise_sigma = float(leaf_noise_sigma)
         self.leaf_noise_clip = leaf_noise_clip
+        self.debug = debug
+        self._debug_step = 0
+        from pathlib import Path as _P
+        self.debug_dir = _P(debug_dir) if debug_dir is not None else _P.cwd() / "debug_graphs"
+        self.debug_max_batches = debug_max_batches
     
     # ---------------------------------------------------------
     # Shared noise sampler to guarantee identical stochastic policy
@@ -441,6 +449,53 @@ class Expansion_OneShot(Method):
             sigma=self.leaf_noise_sigma,
             clip=self.leaf_noise_clip,
         )                                              # [N,3]
+
+        # --- optional debug plotting (GT vs masked) ---
+        if getattr(self, 'debug', False):
+            try:
+                from utils.debug_helpers import plot_gt_and_masked
+                # Only plot a limited number of batches per global debug step to avoid flood
+                # Determine unique graphs in this batch; sample first K
+                batch_vec = batch.batch if hasattr(batch, 'batch') else None
+                if batch_vec is not None:
+                    unique_graphs = batch_vec.unique().tolist()
+                    for b_id in unique_graphs[: self.debug_max_batches]:
+                        node_mask = (batch_vec == b_id)
+                        if node_mask.sum() == 0:
+                            continue
+                        # Build per-graph sub adjacency (by masking rows/cols)
+                        # Simpler: reuse full adj; plotting function only cares about included nodes positions.
+                        # Create sliced views
+                        sub_indices = node_mask.nonzero(as_tuple=False).flatten()
+                        # Gather positions
+                        pos_gt_sub = pos_gt[sub_indices]
+                        pos_in_sub = pos_in[sub_indices]
+                        # Build adjacency subset: filter edges where both endpoints in this subset
+                        row, col, val = batch.adj.coo()
+                        keep = node_mask[row] & node_mask[col]
+                        row_sub = row[keep]
+                        col_sub = col[keep]
+                        val_sub = val[keep]
+                        import torch as _t
+                        from torch_sparse import SparseTensor as _ST
+                        # Reindex nodes to 0..k-1
+                        mapping = {int(gidx.item()): i for i, gidx in enumerate(sub_indices)}
+                        row_mapped = _t.tensor([mapping[int(r.item())] for r in row_sub], device=row_sub.device)
+                        col_mapped = _t.tensor([mapping[int(c.item())] for c in col_sub], device=col_sub.device)
+                        adj_sub = _ST(row=row_mapped, col=col_mapped, value=val_sub, sparse_sizes=(sub_indices.numel(), sub_indices.numel()))
+                        plot_gt_and_masked(
+                            adj_sub,
+                            pos_gt_sub,
+                            pos_in_sub,
+                            self.debug_dir,
+                            prefix=f"trainstep{self._debug_step}",
+                            step=self._debug_step,
+                            batch_id=b_id,
+                        )
+                self._debug_step += 1
+            except Exception as _e:  # pragma: no cover - debug only
+                # Fail silently in debug helper to avoid breaking training
+                pass
 
         # --- prepare EGNN input (positions + minimal node features)
         feats_dim = getattr(model, 'feats_dim', 0)
