@@ -192,32 +192,44 @@ class Trainer:
     def run_validation(self):
         print(f"Running validation at {self.step} steps.")
 
-        # Evaluate for all EMA beta values
+        # --- VALIDATION LOOP (metrics + optional plots) ---
+        # We gate metric computation & test-trigger logic with cfg.validation.enable_metrics.
+        # We gate example plotting with cfg.validation.enable_plots.
+        # Original code retained inside conditionals for future reactivation.
         val_results = {}
         test_results = {}
+        enable_metrics = getattr(self.cfg.validation, 'enable_metrics', True)
+        enable_plots = getattr(self.cfg.validation, 'enable_plots', True)
+
         for beta in self.cfg.ema.betas:
+            # Always generate graphs (needed for plots & potential metrics later)
             val_results[f"ema_{beta}"] = self.evaluate(self.validation_graphs, beta)
 
-            # Compute validation score
-            unique_novel_valid_keys = [
-                str(m) for m in self.metrics if "UniqueNovelValid" in str(m)
-            ]
-            if len(unique_novel_valid_keys) > 0:
-                validation_score = val_results[f"ema_{beta}"][
-                    unique_novel_valid_keys[0]
+            if enable_metrics:
+                # --- METRIC VALIDATION SCORE BLOCK (original logic) ---
+                unique_novel_valid_keys = [
+                    str(m) for m in self.metrics if "UniqueNovelValid" in str(m)
                 ]
+                if len(unique_novel_valid_keys) > 0:
+                    validation_score = val_results[f"ema_{beta}"][
+                        unique_novel_valid_keys[0]
+                    ]
+                else:
+                    # Ratio metric used as inverse score previously
+                    validation_score = 1 / val_results[f"ema_{beta}"]["Ratio"]
+
+                # Evaluate on test set if validation score improved
+                if validation_score >= self.best_validation_scores[beta]:
+                    self.best_validation_scores[beta] = validation_score
+                    test_results[f"ema_{beta}"] = self.evaluate(self.test_graphs, beta)
             else:
-                validation_score = 1 / val_results[f"ema_{beta}"]["Ratio"]
+                # Metrics disabled: insert placeholder
+                val_results[f"ema_{beta}"]["metrics_disabled"] = True
 
-            # Evaluate on test set if validation score improved
-            if validation_score >= self.best_validation_scores[beta]:
-                self.best_validation_scores[beta] = validation_score
-                test_results[f"ema_{beta}"] = self.evaluate(self.test_graphs, beta)
-
-        # Log results
+        # Log results (test_results empty if metrics disabled & no improvements tracked)
         self.log({"validation": val_results, "test": test_results})
 
-        # Dump results
+        # Dump results (persist even if metrics disabled to keep artifacts of generated graphs/plots)
         if self.cfg.training.save_checkpoint:
             val_dir = self.output_dir / "validation"
             val_dir.mkdir(exist_ok=True)
@@ -251,49 +263,103 @@ class Trainer:
         # Generate graphs
         pred_graphs = []
         for batch in batches:
-            pred_graphs += self.method.sample_graphs(
+            pred_graphs_batch = self.method.sample_graphs(
                 target_size=th.tensor(batch, device=self.device),
                 model=model,
-            )
+            )  # returns list[nx.Graph] with geometric node attrs
+            pred_graphs += pred_graphs_batch
+        # Reorder according to original permutation
         results["pred_graphs"] = [pred_graphs[i] for i in pred_perm]
         if self.device == "cuda":
             th.cuda.empty_cache()
 
-        # Validate graphs
-        for metric in self.metrics:
-            results[str(metric)] = metric(
-                reference_graphs=eval_graphs,
-                predicted_graphs=pred_graphs,
-                train_graphs=self.train_graphs,
-            )
+        # Consistency assertions: all graphs must have 'pos' attribute per node
+        def _assert_geometric(graphs: list[nx.Graph]):
+            if not graphs:
+                return
+            # Check dimensionality consistency
+            first_node = next(iter(graphs[0].nodes()))
+            ref_dim = len(graphs[0].nodes[first_node]['pos']) if 'pos' in graphs[0].nodes[first_node] else None
+            for G in graphs:
+                for n in G.nodes():
+                    assert 'pos' in G.nodes[n], "Graph node missing 'pos' attribute"
+                    assert isinstance(G.nodes[n]['pos'], (list, tuple, np.ndarray)), "'pos' must be list/tuple/ndarray"
+                    assert len(G.nodes[n]['pos']) == ref_dim, "Inconsistent position dimensionality across graphs"
+        _assert_geometric(eval_graphs)
+        _assert_geometric(results["pred_graphs"])
 
-        if self.cfg.validation.per_graph_size:
-            for n in set(target_size):
-                eval_graphs_n = [g for g in eval_graphs if len(g) == n]
-                pred_graphs_n = [g for g in pred_graphs if len(g) == n]
-                results[f"size_{n}"] = {}
-                for metric in self.metrics:
-                    results[f"size_{n}"][str(metric)] = metric(
-                        reference_graphs=eval_graphs_n,
-                        predicted_graphs=pred_graphs_n,
-                        train_graphs=self.train_graphs,
-                    )
+        # Metric computation gated
+        enable_metrics = getattr(self.cfg.validation, 'enable_metrics', True)
+        if enable_metrics:
+            # Validate graphs (original metric loop)
+            for metric in self.metrics:
+                results[str(metric)] = metric(
+                    reference_graphs=eval_graphs,
+                    predicted_graphs=pred_graphs,
+                    train_graphs=self.train_graphs,
+                )
 
-        # Sample plots
-        n = min(4, len(self.validation_graphs)) // 2
-        fig, axs = plt.subplots(n, 2, figsize=(50, 50))
-        for i in range(n * n):
-            G = pred_graphs[i]
-            ax = axs[i // n, i % n]
-            nx.draw(
-                G=G,
-                ax=ax,
-                pos=nx.spring_layout(G, seed=42),
-            )
-            ax.title.set_text(f"N = {len(G)}")
-            ax.title.set_fontsize(40)
-        fig.tight_layout()
-        results["examples"] = fig
+            if self.cfg.validation.per_graph_size:
+                for n in set(target_size):
+                    eval_graphs_n = [g for g in eval_graphs if len(g) == n]
+                    pred_graphs_n = [g for g in pred_graphs if len(g) == n]
+                    results[f"size_{n}"] = {}
+                    for metric in self.metrics:
+                        results[f"size_{n}"][str(metric)] = metric(
+                            reference_graphs=eval_graphs_n,
+                            predicted_graphs=pred_graphs_n,
+                            train_graphs=self.train_graphs,
+                        )
+        else:
+            results['metrics_disabled'] = True
+
+        # Example plot generation gated
+        enable_plots = getattr(self.cfg.validation, 'enable_plots', True)
+
+        if enable_plots:
+            # Plot using stored geometric positions (first two coordinates projected to XY)
+            max_examples = min(8, len(results["pred_graphs"]))
+            cols = min(4, max_examples)
+            rows = int(np.ceil(max_examples / cols))
+            if max_examples > 0:
+                fig, axs = plt.subplots(rows, cols, figsize=(cols * 5, rows * 5))
+                if isinstance(axs, plt.Axes):
+                    axs = np.array([[axs]])
+                axs = np.atleast_2d(axs)
+                for i in range(max_examples):
+                    G = results["pred_graphs"][i]
+                    r = i // cols; c = i % cols
+                    ax = axs[r][c]
+                    # Extract positions
+                    pos_dict = {n: G.nodes[n]['pos'][:2] for n in G.nodes()}
+                    # Draw edges manually for consistent style
+                    for u, v in G.edges():
+                        p1 = pos_dict[u]; p2 = pos_dict[v]
+                        ax.plot([p1[0], p2[0]], [p1[1], p2[1]], color='lightgray', linewidth=1.0, zorder=1)
+                    # Scatter nodes (uniform color since no leaf attribute)
+                    xs = [pos_dict[n][0] for n in G.nodes()]
+                    ys = [pos_dict[n][1] for n in G.nodes()]
+                    ax.scatter(xs, ys, c='tab:blue', s=30, edgecolors='k', linewidths=0.5, zorder=2)
+                    ax.set_title(f"N={G.number_of_nodes()}")
+                    ax.set_xticks([]); ax.set_yticks([])
+                # Hide unused axes
+                for j in range(max_examples, rows * cols):
+                    r = j // cols; c = j % cols
+                    axs[r][c].axis('off')
+                fig.tight_layout()
+                results["examples"] = fig
+                # Save figure to eval_plots directory
+                eval_plots_dir = self.output_dir / 'eval_plots'
+                eval_plots_dir.mkdir(exist_ok=True)
+                fig_path = eval_plots_dir / f"step_{self.step}_beta_{beta}.png"
+                fig.savefig(fig_path, dpi=150)
+                results["examples_path"] = str(fig_path)
+            else:
+                results["examples"] = None
+                results["examples_path"] = None
+        else:
+            results["examples"] = None
+            results["examples_path"] = None
 
         return results
 
@@ -308,7 +374,11 @@ class Trainer:
                 if self.cfg.wandb.logging:
                     self.wandb_run.log({f"{prefix}{key}": value}, step=self.step)
             elif isinstance(value, Figure):
-                if self.cfg.wandb.logging:
-                    self.wandb_run.log(
-                        {f"{prefix}{key}": wandb.Image(value)}, step=self.step
-                    )
+                # Wandb logging for figures currently disabled or wandb import commented out.
+                # Keeping placeholder for future reactivation.
+                if getattr(self.cfg.wandb, 'logging', False) and hasattr(self, 'wandb_run') and self.wandb_run is not None:
+                    try:
+                        import wandb  # local import guarded
+                        self.wandb_run.log({f"{prefix}{key}": wandb.Image(value)}, step=self.step)
+                    except Exception as e:
+                        print(f"[wandb logging skipped] {e}")

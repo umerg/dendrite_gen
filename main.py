@@ -84,8 +84,6 @@ def get_expansion_items(cfg: DictConfig, train_graphs):
     # Method
     method = gg.method.Expansion_OneShot(
         deterministic_expansion=cfg.method.deterministic_expansion,
-        min_red_frac=cfg.reduction.min_red_frac,
-        max_red_frac=cfg.reduction.max_red_frac,
         red_threshold=cfg.reduction.red_threshold,
         leaf_noise_sigma=cfg.method.leaf_noise_sigma,
         leaf_noise_clip=cfg.method.leaf_noise_clip,

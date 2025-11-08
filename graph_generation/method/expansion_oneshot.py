@@ -60,12 +60,8 @@ class Expansion_OneShot(Method):
           - Noise distribution matches training masking via `_sample_noise`.
 
         Returns:
-          graphs: list[networkx.Graph] of length G.
-          pos: final positions tensor [N,3].
-          batch: batch vector [N].
-
-        Note: For simplicity we return NetworkX graphs without node features; positions are
-              returned separately so downstream code can attach them as needed.
+          graphs: list[networkx.Graph] of length G. Each node carries:
+              - 'pos': np.ndarray (3,) geometric position
         """
         if target_size.dim() != 1:
             raise ValueError("target_size must be 1D tensor of per-graph capacities.")
@@ -76,7 +72,7 @@ class Expansion_OneShot(Method):
         num_graphs = int(target_size.numel())
 
         # ---- Initial root nodes ----
-        
+
         # Explicitly initialize all roots at origin (0,0,0) 
         root_pos = th.zeros((num_graphs, 3), device=device)
 
@@ -118,7 +114,7 @@ class Expansion_OneShot(Method):
             )
             step += 1
 
-        # ---- Unbatch into per-graph NetworkX graphs ----
+        # ---- Unbatch into per-graph geometric NetworkX graphs ----
         # Extract COO for adjacency and segment by batch
         row, col, val = adj.coo()
         graphs = []
@@ -128,18 +124,20 @@ class Expansion_OneShot(Method):
             # Map global node index -> local index
             local_map = {int(n.item()): i for i, n in enumerate(node_ids)}
             G = nx.Graph()
-            # Add nodes (store position metadata separately if desired)
+            # Add nodes with geometric position only
             for i_local, n_global in enumerate(node_ids.tolist()):
-                G.add_node(i_local)
-            # Add edges where both endpoints belong to this graph
+                G.add_node(
+                    i_local,
+                    pos=pos[n_global].detach().cpu().numpy(),
+                )
+            # Add edges where both endpoints belong to this graph (undirected, avoid duplicates)
             for r, c in zip(row.tolist(), col.tolist()):
                 if r in local_map and c in local_map:
                     # Undirected; ensure single edge by adding only if r<=c
                     if local_map[r] <= local_map[c]:
                         G.add_edge(local_map[r], local_map[c])
             graphs.append(G)
-
-        return graphs, pos, batch
+        return graphs
     
     @th.no_grad()
     def expand(
