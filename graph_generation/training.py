@@ -6,12 +6,24 @@ import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
 import torch as th
-# from hydra.core.hydra_config import HydraConfig
 from matplotlib.figure import Figure
-# from omegaconf import OmegaConf
 from torch.optim import Adam
 
-# import wandb
+# Optional / guarded imports (Hydra, OmegaConf, wandb)
+try:  # Hydra runtime config access
+    from hydra.core.hydra_config import HydraConfig  # type: ignore
+except Exception:  # pragma: no cover
+    HydraConfig = None  # fallback when running outside hydra
+
+try:  # Config serialization for wandb
+    from omegaconf import OmegaConf  # type: ignore
+except Exception:  # pragma: no cover
+    OmegaConf = None
+
+try:  # Experiment tracking (optional)
+    import wandb  # type: ignore
+except Exception:  # pragma: no cover
+    wandb = None
 
 from .metrics import Metric
 from .model import EMA, EMA1
@@ -57,8 +69,15 @@ class Trainer:
             **{f"model_ema_{c}": m for c, m in self.ema_models.items()},
         }
 
-        # checkpoint dir
-        self.output_dir = Path(HydraConfig.get().runtime.output_dir)
+        # checkpoint / artifact directory (Hydra-aware fallback)
+        if HydraConfig is not None:
+            try:
+                self.output_dir = Path(HydraConfig.get().runtime.output_dir)
+            except Exception:  # pragma: no cover
+                self.output_dir = Path("./outputs")
+        else:
+            # Running outside Hydra (e.g., direct script execution)
+            self.output_dir = Path("./outputs")
 
         # Resume from checkpoint
         if cfg.training.resume:
@@ -69,16 +88,22 @@ class Trainer:
             self.best_validation_scores = {beta: -1 for beta in cfg.ema.betas} # what are EMA betas? TODO
             self.run_id = None
 
-        # Wandb
-        if cfg.wandb.logging:
-            self.wandb_run = wandb.init(
-                project="tree-generation",
-                config=OmegaConf.to_container(cfg, resolve=True),
-                name=cfg.name,
-                resume=self.run_id,
-            )
-            self.run_id = self.wandb_run.id
+        # Wandb (only if requested AND available AND OmegaConf present)
+        if cfg.wandb.logging and wandb is not None and OmegaConf is not None:
+            try:
+                self.wandb_run = wandb.init(
+                    project="tree-generation",
+                    config=OmegaConf.to_container(cfg, resolve=True),
+                    name=cfg.name,
+                    resume=self.run_id,
+                )
+                self.run_id = self.wandb_run.id
+            except Exception as e:  # pragma: no cover
+                print(f"[wandb disabled] {e}")
+                self.wandb_run = None
+                self.run_id = None
         else:
+            self.wandb_run = None
             self.run_id = None
 
         num_parameters = sum(p.numel() for p in model.parameters())
@@ -371,14 +396,13 @@ class Trainer:
                 self.log(value, prefix=f"{prefix}{key}/", indent=indent + 1)
             elif isinstance(value, float):
                 print(f"{'   ' * indent}{key}: {value}")
-                if self.cfg.wandb.logging:
+                if self.cfg.wandb.logging and self.wandb_run is not None:
                     self.wandb_run.log({f"{prefix}{key}": value}, step=self.step)
             elif isinstance(value, Figure):
                 # Wandb logging for figures currently disabled or wandb import commented out.
                 # Keeping placeholder for future reactivation.
-                if getattr(self.cfg.wandb, 'logging', False) and hasattr(self, 'wandb_run') and self.wandb_run is not None:
+                if getattr(self.cfg.wandb, 'logging', False) and self.wandb_run is not None and wandb is not None:
                     try:
-                        import wandb  # local import guarded
                         self.wandb_run.log({f"{prefix}{key}": wandb.Image(value)}, step=self.step)
                     except Exception as e:
                         print(f"[wandb logging skipped] {e}")

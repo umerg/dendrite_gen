@@ -1,0 +1,57 @@
+defaults:
+  - _self_
+  - dataset: tree
+  - method: expansion_oneshot
+
+dataset:
+  train_size: 10
+  val_size: 2
+  test_size: 2
+
+reduction:
+  mode: "stochastic"
+  cherry_p: 0.8
+  ensure_progress: True
+  root: 0
+  contract_root: False
+  num_red_seqs: -1
+  min_red_frac: 0.0
+  max_red_frac: 0.5
+  red_threshold: 0
+
+training:
+  batch_size: 2
+  lr: 1e-3
+  num_steps: 10
+  max_num_workers: 0
+  log_interval: 1
+  save_checkpoint: False
+  resume: False # if True, resume from last checkpoint, if number, resume from that step
+
+validation:
+  batch_size: 2
+  interval: 2
+  first_step: 0
+  per_graph_size: False
+  enable_metrics: False
+  enable_plots: True
+
+testing: False # if True, only evaluate on test set
+
+model:
+  name: egnn
+  num_layers: 2
+  feats_dim: 16
+  m_dim: 4
+  dropout: 0.0
+
+ema:
+  betas: [1]
+  gamma: 1.0
+  power: 1.0
+
+name: full_run_smoke_test
+debugging: False
+
+wandb:
+  logging: False

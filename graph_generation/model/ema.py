@@ -52,6 +52,18 @@ class EMA(Module):
     def forward(self, *args, **kwargs):
         return self.ema_model(*args, **kwargs)
 
+    # Proxy attribute access (e.g., feats_dim) to underlying model or ema_model.
+    def __getattr__(self, name):
+        # Prefer ema_model attributes (updated weights) then base model.
+        if name in {"_model", "ema_model", "beta", "gamma", "power", "train_param_names"}:
+            return super().__getattr__(name)
+        if hasattr(self.ema_model, name):
+            return getattr(self.ema_model, name)
+        if hasattr(self.model, name):
+            return getattr(self.model, name)
+        # Fall back to default behavior (may raise AttributeError)
+        return super().__getattr__(name)
+
 
 class EMA1(Module):
     def __init__(self, model):
@@ -71,3 +83,10 @@ class EMA1(Module):
         res = self.model(*args, **kwargs)
         self.model.train(training_mode)
         return res
+
+    def __getattr__(self, name):
+        if name in {"_model"}:
+            return super().__getattr__(name)
+        if hasattr(self.model, name):
+            return getattr(self.model, name)
+        return super().__getattr__(name)

@@ -1,4 +1,4 @@
-name: tree
+name: tree_synthetic
 min_size: 10
 max_size: 20
 load: false

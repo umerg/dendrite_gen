@@ -43,14 +43,15 @@ def get_expansion_items(cfg: DictConfig, train_graphs):
 
     # Dataloader
     is_mp = cfg.reduction.num_red_seqs < 0  # if infinite dataset
+    num_workers = min(mp.cpu_count(), cfg.training.max_num_workers) * is_mp
     train_dataloader = DataLoader(
         train_dataset,
         batch_size=cfg.training.batch_size,
         shuffle=False,
         pin_memory=True,
         collate_fn=Batch.from_data_list,
-        num_workers=min(mp.cpu_count(), cfg.training.max_num_workers) * is_mp,
-        multiprocessing_context="spawn" if is_mp else None,
+        num_workers=num_workers,
+        multiprocessing_context="spawn" if num_workers > 0 else None,
     )
 
     # Model
