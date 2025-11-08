@@ -2,6 +2,7 @@
 import numpy as np
 import scipy as sp
 import torch as th
+import networkx as nx
 from torch_geometric.data import Data
 from torch_sparse import SparseTensor
 
@@ -65,3 +66,100 @@ class ReducedGraphData(Data):
         if key in ("leaf_idx", "parent_idx_1b"):
             return self.num_nodes
         return super().__inc__(key, value, *args, **kwargs)
+
+
+def generate_tree_graphs(
+    num_graphs: int,
+    min_size: int,
+    max_size: int,
+    seed: int | None = None,
+) -> list[nx.Graph]:
+    """Generate a list of random tree graphs with 3D positions.
+
+    The returned graphs are plain ``networkx.Graph`` objects whose nodes each have
+    a ``pos`` attribute: a length-3 ``numpy.ndarray`` of dtype ``float32``.
+    This matches the geometric requirement enforced in ``Trainer.evaluate``.
+
+    Args:
+        num_graphs: Number of tree graphs to generate.
+        min_size: Minimum number of nodes per tree (inclusive).
+        max_size: Maximum number of nodes per tree (inclusive).
+        seed: Optional RNG seed for reproducibility. If provided, generation is
+            deterministic for the given (num_graphs, min_size, max_size, seed).
+
+    Returns:
+        A list of ``networkx.Graph`` objects. For each node ``u`` in each graph
+        ``G``, ``G.nodes[u]['pos']`` is a 3D coordinate ``np.ndarray``.
+
+    Notes:
+        * Sizes are sampled uniformly from the integer range [min_size, max_size].
+        * Tree topology is sampled using ``networkx.random_tree`` to obtain a
+          uniformly random labelled tree for the chosen size.
+        * 3D positions are assigned via a spring layout (``nx.spring_layout``)
+          with dimension=3, then centered & scaled mildly for stability.
+        * All graphs share a single master RNG so that calls are reproducible.
+    """
+    assert min_size > 0 and max_size >= min_size, "Invalid size bounds"
+    rng = np.random.default_rng(seed)
+    graphs: list[nx.Graph] = []
+    for i in range(num_graphs):
+        n = int(rng.integers(min_size, max_size + 1))
+        # Random labelled tree (fallback if networkx.random_tree unavailable)
+        # Use a fresh seed per tree to keep topology varied but reproducible overall.
+        tree_seed = int(rng.integers(0, 2**32 - 1))
+        if hasattr(nx, "random_tree"):
+            G = nx.random_tree(n, seed=tree_seed)
+        else:
+            # Custom Prüfer sequence based random tree generator (labels 0..n-1)
+            G = nx.Graph()
+            if n == 1:
+                G.add_node(0)
+            else:
+                prufer = rng.integers(0, n, size=n - 2)
+                degree = np.ones(n, dtype=np.int64)
+                for v in prufer:
+                    degree[v] += 1
+                # Use list of leaves; we pick the smallest leaf for determinism
+                # You could randomize selection; keeping deterministic simplifies tests
+                leaves = [i for i in range(n) if degree[i] == 1]
+                leaves.sort()
+                for v in prufer:
+                    leaf = leaves[0]  # smallest leaf
+                    G.add_edge(leaf, v)
+                    degree[leaf] -= 1
+                    degree[v] -= 1
+                    leaves.pop(0)
+                    if degree[v] == 1:
+                        # insert while keeping sorted order (n is small typically)
+                        # linear insert is fine for small n
+                        inserted = False
+                        for idx, l in enumerate(leaves):
+                            if v < l:
+                                leaves.insert(idx, v)
+                                inserted = True
+                                break
+                        if not inserted:
+                            leaves.append(v)
+                # two leaves remain
+                G.add_edge(leaves[0], leaves[1])
+            # Ensure all nodes present
+            for u in range(n):
+                if u not in G:
+                    G.add_node(u)
+
+        # Spring layout in 3D
+        layout_seed = int(rng.integers(0, 2**32 - 1))
+        pos_dict = nx.spring_layout(G, dim=3, seed=layout_seed)
+        # Convert to numpy arrays (float32) and (optionally) normalize.
+        coords = np.vstack([pos_dict[u] for u in G.nodes()]).astype(np.float32)
+        # Center & scale for nicer spread.
+        coords -= coords.mean(axis=0, keepdims=True)
+        max_norm = np.max(np.linalg.norm(coords, axis=1))
+        if max_norm > 0:
+            coords /= max_norm
+        # Assign back
+        for idx, u in enumerate(G.nodes()):
+            G.nodes[u]['pos'] = coords[idx]
+
+        graphs.append(G)
+    return graphs
