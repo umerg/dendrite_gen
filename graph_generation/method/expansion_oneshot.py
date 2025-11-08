@@ -5,6 +5,9 @@ from torch_geometric.utils import to_edge_index
 import torch.nn.functional as F
 from torch_scatter import scatter
 from torch_sparse import SparseTensor
+import logging
+
+logger = logging.getLogger(__name__)
 
 from .method import Method
 
@@ -31,6 +34,8 @@ class Expansion_OneShot(Method):
         from pathlib import Path as _P
         self.debug_dir = _P(debug_dir) if debug_dir is not None else _P.cwd() / "debug_graphs"
         self.debug_max_batches = debug_max_batches
+        if self.debug:
+            logger.info(f"Expansion_OneShot debug enabled; plots will be saved under: {self.debug_dir}")
     
     # ---------------------------------------------------------
     # Shared noise sampler to guarantee identical stochastic policy
@@ -452,25 +457,21 @@ class Expansion_OneShot(Method):
 
         # --- optional debug plotting (GT vs masked) ---
         if getattr(self, 'debug', False):
-            try:
-                from utils.debug_helpers import plot_gt_and_masked
-                # Only plot a limited number of batches per global debug step to avoid flood
-                # Determine unique graphs in this batch; sample first K
-                batch_vec = batch.batch if hasattr(batch, 'batch') else None
-                if batch_vec is not None:
-                    unique_graphs = batch_vec.unique().tolist()
-                    for b_id in unique_graphs[: self.debug_max_batches]:
-                        node_mask = (batch_vec == b_id)
-                        if node_mask.sum() == 0:
-                            continue
-                        # Build per-graph sub adjacency (by masking rows/cols)
-                        # Simpler: reuse full adj; plotting function only cares about included nodes positions.
-                        # Create sliced views
+            from utils.debug_helpers import plot_gt_and_masked  # let import error be explicit
+            batch_vec = batch.batch if hasattr(batch, 'batch') else None
+            if batch_vec is not None:
+                unique_graphs = batch_vec.unique().tolist()
+                plotted = 0
+                for b_id in unique_graphs:
+                    if plotted >= self.debug_max_batches:
+                        break
+                    node_mask = (batch_vec == b_id)
+                    if node_mask.sum() == 0:
+                        continue
+                    try:
                         sub_indices = node_mask.nonzero(as_tuple=False).flatten()
-                        # Gather positions
                         pos_gt_sub = pos_gt[sub_indices]
                         pos_in_sub = pos_in[sub_indices]
-                        # Build adjacency subset: filter edges where both endpoints in this subset
                         row, col, val = batch.adj.coo()
                         keep = node_mask[row] & node_mask[col]
                         row_sub = row[keep]
@@ -478,12 +479,31 @@ class Expansion_OneShot(Method):
                         val_sub = val[keep]
                         import torch as _t
                         from torch_sparse import SparseTensor as _ST
-                        # Reindex nodes to 0..k-1
                         mapping = {int(gidx.item()): i for i, gidx in enumerate(sub_indices)}
-                        row_mapped = _t.tensor([mapping[int(r.item())] for r in row_sub], device=row_sub.device)
-                        col_mapped = _t.tensor([mapping[int(c.item())] for c in col_sub], device=col_sub.device)
-                        adj_sub = _ST(row=row_mapped, col=col_mapped, value=val_sub, sparse_sizes=(sub_indices.numel(), sub_indices.numel()))
-                        plot_gt_and_masked(
+                        # Reindex edges
+                        try:
+                            # Handle empty edge case explicitly to keep dtype correct
+                            if row_sub.numel() == 0:
+                                row_mapped = _t.empty((0,), dtype=_t.long, device=row_sub.device)
+                                col_mapped = _t.empty((0,), dtype=_t.long, device=row_sub.device)
+                                val_mapped = _t.empty((0,), dtype=val_sub.dtype, device=val_sub.device)
+                            else:
+                                row_mapped = _t.tensor([mapping[int(r.item())] for r in row_sub], device=row_sub.device, dtype=_t.long)
+                                col_mapped = _t.tensor([mapping[int(c.item())] for c in col_sub], device=col_sub.device, dtype=_t.long)
+                                val_mapped = val_sub
+                        except KeyError as ke:
+                            logger.warning(f"Reindex KeyError graph={b_id}: {ke}; skipping plot")
+                            continue
+                        # Build sparse tensor safely
+                        adj_sub = _ST(row=row_mapped, col=col_mapped, value=val_mapped, sparse_sizes=(sub_indices.numel(), sub_indices.numel()))
+                        leaf_global = set(batch.leaf_idx.tolist())
+                        leaf_local_idx = [mapping[gidx] for gidx in sub_indices.tolist() if gidx in leaf_global]
+                        leaf_expansion_map = {}
+                        for g_leaf, lab in zip(batch.leaf_idx.tolist(), batch.leaf_expansion.tolist()):
+                            if g_leaf in mapping:
+                                leaf_expansion_map[mapping[g_leaf]] = lab
+                        leaf_expansion_local = [leaf_expansion_map[i] for i in leaf_local_idx]
+                        gt_file, masked_file = plot_gt_and_masked(
                             adj_sub,
                             pos_gt_sub,
                             pos_in_sub,
@@ -491,11 +511,18 @@ class Expansion_OneShot(Method):
                             prefix=f"trainstep{self._debug_step}",
                             step=self._debug_step,
                             batch_id=b_id,
+                            leaf_local_idx=leaf_local_idx,
+                            leaf_expansion=leaf_expansion_local,
                         )
+                        logger.info(
+                            f"[ExpansionDebug] step={self._debug_step} graph={b_id} nodes={sub_indices.numel()} leaves={len(leaf_local_idx)} saved: {gt_file.name}, {masked_file.name}"
+                        )
+                        plotted += 1
+                    except Exception as e_plot:
+                        import traceback, sys
+                        tb = ''.join(traceback.format_exception(type(e_plot), e_plot, e_plot.__traceback__))
+                        logger.error(f"Plot failure step={self._debug_step} graph={b_id}: {e_plot}\n{tb}")
                 self._debug_step += 1
-            except Exception as _e:  # pragma: no cover - debug only
-                # Fail silently in debug helper to avoid breaking training
-                pass
 
         # --- prepare EGNN input (positions + minimal node features)
         feats_dim = getattr(model, 'feats_dim', 0)

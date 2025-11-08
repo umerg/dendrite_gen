@@ -26,6 +26,7 @@ def get_expansion_items(cfg: DictConfig, train_graphs):
         cherry_p=cfg.reduction.cherry_p,
         ensure_progress=cfg.reduction.ensure_progress,
         root=cfg.reduction.root,
+        contract_root=cfg.reduction.contract_root,
     ) # initialised cherry reduction factory
 
     adjs = []
