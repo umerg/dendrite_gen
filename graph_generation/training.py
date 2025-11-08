@@ -72,7 +72,7 @@ class Trainer:
         # Wandb
         if cfg.wandb.logging:
             self.wandb_run = wandb.init(
-                project="dendrite-generation",
+                project="tree-generation",
                 config=OmegaConf.to_container(cfg, resolve=True),
                 name=cfg.name,
                 resume=self.run_id,
