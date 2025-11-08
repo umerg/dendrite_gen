@@ -155,23 +155,23 @@ class Trainer:
                 if self.device == "cuda":
                     th.cuda.empty_cache()
 
-    # def test(self): TODO
-    #     print(f"Testing model at {self.step} steps on {self.device}")
+    def test(self):
+        print(f"Testing model at {self.step} steps on {self.device}")
 
-    #     # Test for all EMA beta values
-    #     test_results = {}
-    #     for beta in self.cfg.ema.betas:
-    #         test_results[f"ema_{beta}"] = self.evaluate(self.test_graphs, beta)
+        # Test for all EMA beta values
+        test_results = {}
+        for beta in self.cfg.ema.betas:
+            test_results[f"ema_{beta}"] = self.evaluate(self.test_graphs, beta)
 
-    #     # Log results
-    #     self.log({"test": test_results})
+        # Log results
+        self.log({"test": test_results})
 
-    #     # Dump results
-    #     if self.cfg.training.save_checkpoint:
-    #         test_dir = self.output_dir / "test"
-    #         test_dir.mkdir(exist_ok=True)
-    #         with open(test_dir / f"step_{self.step}.pkl", "wb") as f:
-    #             pickle.dump(test_results, f)
+        # Dump results
+        if self.cfg.training.save_checkpoint:
+            test_dir = self.output_dir / "test"
+            test_dir.mkdir(exist_ok=True)
+            with open(test_dir / f"step_{self.step}.pkl", "wb") as f:
+                pickle.dump(test_results, f)
 
     def run_step(self, batch):
         batch = batch.to(self.device, non_blocking=True)
