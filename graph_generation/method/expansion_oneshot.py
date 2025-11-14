@@ -532,8 +532,25 @@ class Expansion_OneShot(Method):
             # seed with simple is_leaf flag - could be extended later TODO
             is_leaf = pos_in.new_zeros((pos_in.size(0), 1))
             is_leaf[batch.leaf_idx] = 1.0
-            extra = pos_in.new_zeros((pos_in.size(0), feats_dim - 1)) if feats_dim > 1 else None
-            node_feats = th.cat([is_leaf, extra], dim=-1) if extra is not None else is_leaf
+            
+            features = [is_leaf]
+            feats_used = 1
+            
+            # Add sibling order as binary feature for left child in binary trees
+            if hasattr(batch, "sibling_order") and feats_used < feats_dim:
+                so = batch.sibling_order.to(pos_in.device)
+                sib_is_left = (so == 0).float().unsqueeze(-1)
+                # Clamp roots (-1) to 0 for network stability as specified
+                sib_is_left = th.where(so.unsqueeze(-1) >= 0, sib_is_left, th.zeros_like(sib_is_left))
+                features.append(sib_is_left)
+                feats_used += 1
+            
+            # Fill remaining dimensions with zeros if needed
+            if feats_used < feats_dim:
+                extra = pos_in.new_zeros((pos_in.size(0), feats_dim - feats_used))
+                features.append(extra)
+            
+            node_feats = th.cat(features, dim=-1)
             x_in = th.cat([pos_in, node_feats], dim=-1)
         else:
             x_in = pos_in[:, :pos_dim]

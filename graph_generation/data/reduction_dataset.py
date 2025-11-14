@@ -49,11 +49,12 @@ class RandRedDataset(IterableDataset, ABC):
             leaf_mask=leaf0_mask,
             leaf_expansion=np.ones_like(leaf0_idx, dtype=np.int32),
             parent_idx_1b=parent_idx_1b,
+            sibling_order=graph.sibling_order_array,  # NEW
         )
         data.append(rgd0)
 
         while True:
-            reduced_graph = graph.get_reduced_graph(rng)  # must return same class with updated state
+            reduced_graph = graph.get_reduced_graph()  # use the reducer's internal RNG
 
             # Stop if no reduction happened (terminal step)
             if not reduced_graph.did_contract: # this happens before root is added to the sequence
@@ -79,6 +80,7 @@ class RandRedDataset(IterableDataset, ABC):
                 leaf_mask=reduced_graph.leaf_mask,
                 leaf_expansion=reduced_graph.leaf_expansion,  # {1,2}
                 parent_idx_1b=parent_idx_1b,
+                sibling_order=reduced_graph.sibling_order_array,  # NEW
             )
             data.append(rgd)
 
@@ -101,7 +103,7 @@ class FiniteRandRedDataset(RandRedDataset):
         for i, adj in enumerate(adjs):
             for _ in range(self.num_red_seqs):
                 # NEW: fresh reducer per sequence
-                graph = red_factory(adj)
+                graph = red_factory(adj, rng=self.rng)
                 pos = self.poses[i]
                 seq = self.get_random_reduction_sequence(graph, pos, self.rng)
                 if seq:  # guard in case tree is already terminal
@@ -132,7 +134,7 @@ class InfiniteRandRedDataset(RandRedDataset):
         rng = np.random.default_rng(worker_id)
 
         # warm cache with fresh reducers
-        graphs = [self.red_factory(A) for A in base_adjs]
+        graphs = [self.red_factory(A, rng=rng) for A in base_adjs]
 
         graph_reduced_data = {}
         for i, g in enumerate(graphs):
@@ -143,7 +145,7 @@ class InfiniteRandRedDataset(RandRedDataset):
             i = rng.integers(len(base_adjs))
             if not graph_reduced_data[i]:
                 # NEW: reinit reducer and resample a full sequence
-                graphs[i] = self.red_factory(base_adjs[i].copy())
+                graphs[i] = self.red_factory(base_adjs[i].copy(), rng=rng)
                 pos = base_poses[i].copy()
                 seq = self.get_random_reduction_sequence(graphs[i], pos, rng)
                 if not seq:

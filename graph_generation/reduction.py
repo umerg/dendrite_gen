@@ -21,6 +21,8 @@ class _CherryState:
     leaf_child_count: Dict[Node, int]
     current_cherries: Set[Node]
     root: Node
+    # NEW: per-child fixed order within its parent (0-based); root(s) excluded
+    sibling_order: Dict[Node, int]
 
 class CherryReducer:
     """
@@ -58,6 +60,7 @@ class CherryReducer:
         level: int = 0,
         weighted_reduction: bool = False,  # if True, coarsen via Laplacian
         contract_root: bool = True,        # if False, root is never contracted; smallest graph retains root+children
+        rng=None,                          # numpy RNG for deterministic sibling order
     ):
         # Normalize adjacency to CSR
         # Store adjacency as CSR
@@ -78,8 +81,9 @@ class CherryReducer:
         self.ensure_progress = ensure_progress
         self.contract_root = contract_root
 
-        # Root/state
+        # Root/state and RNG for sibling order
         self.root = root
+        self.rng = rng if rng is not None else np.random.default_rng()
         self._state = state if state is not None else self._build_initial_state()
 
         # Outputs for dataset consumption
@@ -90,10 +94,18 @@ class CherryReducer:
         # parent_idx_1b will be derived externally per full node list; leaf-specific parents no longer stored
         self.did_contract = False
 
+    @property
+    def sibling_order_array(self) -> np.ndarray:
+        """Return vector length n: node i's 0-based position among siblings, or -1 for root"""
+        out = np.full(self.n, -1, dtype=np.int64)
+        for u, ord_u in self._state.sibling_order.items():
+            out[u] = ord_u
+        return out
+    
     # ------------------------------------------------------------------
     # Public API used by your datasets
     # ------------------------------------------------------------------
-    def get_reduced_graph(self, rng=np.random.default_rng()) -> "CherryReducer":
+    def get_reduced_graph(self) -> "CherryReducer":
         """
         Execute one cherry-prune level and return the next CherryReducer:
           - choose cherries (all or Bernoulli(p))
@@ -119,6 +131,7 @@ class CherryReducer:
                 level=self.level + 1,
                 weighted_reduction=self.weighted_reduction,
                 contract_root=self.contract_root,
+                rng=self.rng,
             )
             cr.did_contract = False
             # expose current leaves for completeness (labels default to 1)
@@ -135,14 +148,14 @@ class CherryReducer:
             # parent indices for current leaves (use -1 for root / None)
             # parent_idx_1b is constructed externally; omit leaf_parent_idx
             return cr
-
+        
         # Choose cherries for this level
         if self.mode == "deterministic":
             chosen_parents = cherries_all
         else:
-            chosen_parents = [u for u in cherries_all if rng.random() < self.cherry_p]
+            chosen_parents = [u for u in cherries_all if self.rng.random() < self.cherry_p]
             if self.ensure_progress and not chosen_parents:
-                chosen_parents = [rng.choice(cherries_all)]
+                chosen_parents = [self.rng.choice(cherries_all)]
 
         chosen_set = set(chosen_parents)
 
@@ -247,6 +260,12 @@ class CherryReducer:
             if new_num_children[u] > 0 and cnt == new_num_children[u]
         }
 
+        # Preserve sibling order for surviving nodes
+        new_sibling_order = {
+            remap(c): order for c, order in S.sibling_order.items()
+            if new_index[c] >= 0
+        }
+
         new_state = _CherryState(
             parent=new_parent,
             children=new_children,
@@ -255,6 +274,7 @@ class CherryReducer:
             leaf_child_count=new_leaf_child_count,
             current_cherries=new_current_cherries,
             root=remap(S.root),
+            sibling_order=new_sibling_order,
         )
 
         next_cr = CherryReducer(
@@ -267,6 +287,7 @@ class CherryReducer:
             level=self.level + 1,
             weighted_reduction=self.weighted_reduction,
             contract_root=self.contract_root,
+            rng=self.rng,
         )
         next_cr.did_contract = True
 
@@ -327,6 +348,17 @@ class CherryReducer:
             u for u in range(self.n) if num_children[u] > 0 and leaf_child_count[u] == num_children[u]
         }
 
+        # Initialize sibling order using the reducer's RNG for deterministic behavior
+        sibling_order: Dict[Node, int] = {}
+        for p, kids in children.items():
+            if not kids:
+                continue
+            perm = list(kids)
+            # Use the reducer's RNG to shuffle children order deterministically
+            self.rng.shuffle(perm)
+            for idx, c in enumerate(perm):
+                sibling_order[c] = idx
+
         return _CherryState(
             parent=parent,
             children=children,
@@ -335,6 +367,7 @@ class CherryReducer:
             leaf_child_count=leaf_child_count,
             current_cherries=current_cherries,
             root=self.root,
+            sibling_order=sibling_order,
         )
 
 RootSpec = Union[int, str, Callable[[sp.spmatrix], int]]
@@ -377,7 +410,7 @@ class ReductionFactory:
             return int(np.argmax(deg))  # often a good proxy for soma/root
         raise ValueError(f"Unrecognized root spec: {self.root}")
 
-    def __call__(self, adj: sp.spmatrix) -> CherryReducer:
+    def __call__(self, adj: sp.spmatrix, rng=None) -> CherryReducer:
         root = self._resolve_root(adj)
         return CherryReducer(
             adj=adj,
@@ -387,4 +420,5 @@ class ReductionFactory:
             ensure_progress=self.ensure_progress,
             weighted_reduction=self.weighted_reduction,
             contract_root=self.contract_root,
+            rng=rng,
         )

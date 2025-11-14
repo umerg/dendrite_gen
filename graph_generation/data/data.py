@@ -18,6 +18,8 @@ class ReducedGraphData(Data):
                            Recover conventional parent indices (root=-1) via: parent_idx = parent_idx_1b - 1
       - reduction_level:   current level (int)
       - target_size:       n (node count of this graph), for bookkeeping
+    Optional fields we now supply:
+      - sibling_order:     LongTensor shape [N] with -1 for roots, else 0..k-1
     """
     def __init__(self, **kwargs):
         super().__init__()
