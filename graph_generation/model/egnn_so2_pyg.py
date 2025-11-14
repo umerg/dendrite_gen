@@ -221,8 +221,8 @@ class SO2_EGNN_Sparse(MessagePassing):
         coor_weights_clamp_value = None, 
         aggr = "add",
         # UGEDIT
-        so2_axis=(0., 1., 0.), # axis of rotation for SO(2) equivariance
-        anisotropic=False, # not implemented yet UGEDIT
+        so2_axis=(0., 0., 1.), # axis of rotation for SO(2) equivariance, default z-axis
+        anisotropic=False, # not implemented yet - two MLPs for xy and z separately UGEDIT
         # NEW
         add_local_angles: bool = True,
         angle_weighted_mean: bool = True,
@@ -280,7 +280,7 @@ class SO2_EGNN_Sparse(MessagePassing):
         base_scalar_dim = (rbf_k if rbf_k > 0 else 1) * 2 + 1  # rho, du, u_i
         if self.add_local_angles:
             base_scalar_dim += 2                               # cosφ, sinφ
-        self.edge_input_dim = (fourier_features * 2) + edge_attr_dim + base_scalar_dim + (feats_dim * 2)
+        self.edge_input_dim = (fourier_features * 2) + edge_attr_dim + base_scalar_dim + (feats_dim * 2) # features for both nodes connected by edge
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
 
@@ -314,7 +314,7 @@ class SO2_EGNN_Sparse(MessagePassing):
             self.dropout,
             SiLU(),
             nn.Linear(self.m_dim * 4, 1)
-        ) if update_coors else None
+        ) if update_coors else None # false for us
 
         self.apply(self.init_)
 
@@ -363,7 +363,7 @@ class SO2_EGNN_Sparse(MessagePassing):
             u_i = (coors[row] @ self.uhat)[:, None]                          # (E, 1)
             have_angles = False  # will be set after computing angles
 
-        if self.fourier_features > 0:
+        if self.fourier_features > 0: # switched off for us
             rel_dist = (rel_coors ** 2).sum(dim=-1, keepdim=True)
             rel_dist = fourier_encode_dist(rel_dist, num_encodings=self.fourier_features)
             rel_dist = rearrange(rel_dist, 'n () d -> n d')
@@ -546,7 +546,7 @@ class SO2_EGNN_Sparse_Network(nn.Module):
                  num_global_tokens = 4,
                  recalc=0 ,
                  # SO(2) knobs for layers
-                 so2_axis=(0.,1.,0.),
+                 so2_axis=(0.,0.,1.),
                  add_local_angles=True,
                  angle_weighted_mean=True,
                  rbf_k=0,
@@ -666,23 +666,23 @@ class SO2_EGNN_Sparse_Network(nn.Module):
             * x: (N, pos_dim+feats_dim) will be unpacked into coors, feats.
         """
         # NODES - Embedd each dim to its target dimensions:
-        x = embedd_token(x, self.embedding_dims, self.emb_layers)
+        x = embedd_token(x, self.embedding_dims, self.emb_layers) # identity if no embedding layers
 
         # regulates wether to embedd edges each layer
         edges_need_embedding = True  
         # Precompute static geometry if coordinates will remain fixed (update_coors False in all layers)
         pre_geom = None
-        static_coords = all((not getattr(L, 'update_coors', True)) for L in self._iter_egnn_layers())
+        static_coords = all((not getattr(L, 'update_coors', True)) for L in self._iter_egnn_layers()) # bit redundant for now as all layers same, but future-proof
         if parent_idx is not None and static_coords:
-            pre_geom = self._compute_static_so2_geometry(x[:, :self.pos_dim], edge_index, parent_idx)
+            pre_geom = self._compute_static_so2_geometry(x[:, :self.pos_dim], edge_index, parent_idx) # we will be precomputing in current set-up
 
         for i,layer in enumerate(self.mpnn_layers):
             
             # EDGES - Embedd each dim to its target dimensions:
             if edges_need_embedding:
                 if edge_attr is not None:
-                    edge_attr = embedd_token(edge_attr, self.edge_embedding_dims, self.edge_emb_layers)
-                edges_need_embedding = False
+                    edge_attr = embedd_token(edge_attr, self.edge_embedding_dims, self.edge_emb_layers) # identity if no embedding layers
+                edges_need_embedding = False # embedd edges only once unless recalc (later)
 
             # pass layers
             is_global_layer = self.has_global_attn and ((i + 1) % self.global_linear_attn_every) == 0
@@ -692,7 +692,7 @@ class SO2_EGNN_Sparse_Network(nn.Module):
 
                 # (b) run ISAB on features only
                 coors, feats = x[:, :self.pos_dim], x[:, self.pos_dim:]
-                feats, _ = layer[0](feats, tokens, x_batch=batch, q_batch=tokens_batch)
+                feats, _ = layer[0](feats, tokens, x_batch=batch, q_batch=tokens_batch) # global attn step before every mpnn layer
 
                 # (c) merge and continue with EGNN
                 x = torch.cat([coors, feats], dim=-1)
@@ -741,7 +741,7 @@ class SO2_EGNN_Sparse_Network(nn.Module):
 
         # head
         abce = self.offset_head(feats)
-        a, b, c, e = abce[:,0:1], abce[:,1:2], abce[:,2:3], abce[:,3:4]
+        a, b, c, e = abce[:,0:1], abce[:,1:2], abce[:,2:3], abce[:,3:4] # basis coeffs + expansion state
         rel_pred = a*e1 + b*e2 + c*self.uhat
         expansion_pred = e
 
