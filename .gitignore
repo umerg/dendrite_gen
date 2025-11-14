@@ -140,3 +140,6 @@ dmypy.json
 
 # ouputs
 outputs/
+dataloading_tests/
+debug_graphs/
+expansion_test_plots/

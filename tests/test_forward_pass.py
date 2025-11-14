@@ -34,7 +34,7 @@ from torch.utils.data import DataLoader
 from torch_geometric.data import Batch
 
 import graph_generation as gg  # root package (expects __init__.py already present)
-from utils.proprocessing import nx_graph_to_adj_pos  # canonical converter
+from utils.data_loading import nx_graph_to_adj_pos  # canonical converter
 
 
 def _make_random_binary_tree(n_min: int, n_max: int) -> nx.Graph:

@@ -30,7 +30,7 @@ from torch.utils.data import DataLoader
 from torch_geometric.data import Batch
 
 import graph_generation as gg
-from utils.proprocessing import nx_graph_to_adj_pos
+from utils.data_loading import nx_graph_to_adj_pos
 
 # HydraConfig shim (Trainer expects HydraConfig.get().runtime.output_dir). Provide minimal stub.
 import types as _types

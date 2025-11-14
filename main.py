@@ -13,7 +13,7 @@ from omegaconf import DictConfig
 from torch.utils.data import DataLoader
 from torch_geometric.data import Batch
 
-from utils.proprocessing import nx_graph_to_adj_pos
+from utils.data_loading import nx_graph_to_adj_pos, load_swc_graphs_from_dir
 
 import graph_generation as gg
 
@@ -110,13 +110,13 @@ def main(cfg: DictConfig):
     th.manual_seed(0)
 
     # Graphs
-    if cfg.dataset.load: # needs to change TODO
-        with open(Path("./data") / f"{cfg.dataset.name}.pkl", "rb") as f:
-            dataset = pickle.load(f)
-
-        train_graphs = dataset["train"]
-        validation_graphs = dataset["val"]
-        test_graphs = dataset["test"]
+    if cfg.dataset.load:  # load from SWC directory structure: data_dir/{train,val,test}
+        data_root = Path(cfg.dataset.data_dir)
+        if not data_root.exists():
+            raise FileNotFoundError(f"Dataset directory not found: {data_root}")
+        train_graphs = load_swc_graphs_from_dir(data_root / "train")
+        validation_graphs = load_swc_graphs_from_dir(data_root / "val")
+        test_graphs = load_swc_graphs_from_dir(data_root / "test")
 
     elif cfg.dataset.name in ["tree_synthetic"]: # retaining synthetic graphs dataset if required for testing
         graph_generator = (
