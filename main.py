@@ -71,7 +71,7 @@ def get_expansion_items(cfg: DictConfig, train_graphs):
             global_linear_attn_dim_head=cfg.model.global_linear_attn_dim_head,
             num_global_tokens=cfg.model.num_global_tokens,
             offset_head_hidden=cfg.model.offset_head_hidden,
-            so2_axis=cfg.model.so2_axis,
+            # so2_axis=cfg.model.so2_axis,
             use_global_fallback_frames=cfg.model.use_global_fallback_frames,
         )
     else:

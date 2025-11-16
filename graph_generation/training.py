@@ -9,6 +9,7 @@ import numpy as np
 import torch as th
 from matplotlib.figure import Figure
 from torch.optim import Adam
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
 # Optional / guarded imports (Hydra, OmegaConf, wandb)
 try:  # Hydra runtime config access
@@ -62,6 +63,21 @@ class Trainer:
         self.method = method.to(self.device)
         self.model = model.to(self.device)
         self.optimizer = Adam(self.model.parameters(), cfg.training.lr)
+
+        # Optional LR scheduler (Cosine Annealing over training horizon)
+        self.scheduler = None
+        scheduler_name = getattr(cfg.training, "lr_scheduler", None)
+        if scheduler_name is not None:
+            scheduler_name = str(scheduler_name).lower()
+        if scheduler_name in ("cosine", "cosine_annealing"):
+            # By default, anneal over the full training horizon
+            T_max = getattr(cfg.training, "scheduler_T_max", cfg.training.num_steps)
+            eta_min = getattr(cfg.training, "scheduler_eta_min", 0.0)
+            self.scheduler = CosineAnnealingLR(
+                self.optimizer,
+                T_max=T_max,
+                eta_min=eta_min,
+            )
 
         # EMA - lets keep EMA for future use but keep beta=1 for now
         self.ema_models = {
@@ -141,6 +157,8 @@ class Trainer:
             if model is not None
         }
         checkpoint["optimizer"] = self.optimizer.state_dict()
+        if getattr(self, "scheduler", None) is not None:
+            checkpoint["scheduler"] = self.scheduler.state_dict()
         checkpoint["step"] = self.step
         checkpoint["best_validation_scores"] = self.best_validation_scores
         checkpoint["run_id"] = self.run_id
@@ -167,6 +185,8 @@ class Trainer:
             if model is not None:
                 model.load_state_dict(checkpoint[name])
         self.optimizer.load_state_dict(checkpoint["optimizer"])
+        if "scheduler" in checkpoint and getattr(self, "scheduler", None) is not None:
+            self.scheduler.load_state_dict(checkpoint["scheduler"])
         self.step = checkpoint["step"]
         self.best_validation_scores = checkpoint["best_validation_scores"]
         self.run_id = checkpoint["run_id"]
@@ -233,11 +253,15 @@ class Trainer:
         self.optimizer.zero_grad(set_to_none=True)
         loss.backward()
         self.optimizer.step()
+        if self.scheduler is not None:
+            # Step LR scheduler once per global training step
+            self.scheduler.step()
 
         for model in list(self.ema_models.values()):
             if model is not None:
                 model.update(step=self.step)
-
+        # Optionally log current LR
+        loss_terms["lr"] = float(self.optimizer.param_groups[0]["lr"])
         return loss_terms
 
     def run_validation(self):
