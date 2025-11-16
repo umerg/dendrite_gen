@@ -65,6 +65,14 @@ def get_expansion_items(cfg: DictConfig, train_graphs):
             pos_dim=3,
             m_dim=cfg.model.m_dim,
             dropout=cfg.model.dropout,
+            norm_feats=cfg.model.norm_feats,
+            global_linear_attn_every=cfg.model.global_linear_attn_every,
+            global_linear_attn_heads=cfg.model.global_linear_attn_heads,
+            global_linear_attn_dim_head=cfg.model.global_linear_attn_dim_head,
+            num_global_tokens=cfg.model.num_global_tokens,
+            offset_head_hidden=cfg.model.offset_head_hidden,
+            so2_axis=cfg.model.so2_axis,
+            use_global_fallback_frames=cfg.model.use_global_fallback_frames,
         )
     else:
         raise ValueError(f"Unknown model name: {cfg.model.name}")
@@ -89,7 +97,10 @@ def get_expansion_items(cfg: DictConfig, train_graphs):
         red_threshold=cfg.reduction.red_threshold,
         leaf_noise_sigma=cfg.method.leaf_noise_sigma,
         leaf_noise_clip=cfg.method.leaf_noise_clip,
+        sibling_loss_weight=cfg.method.sibling_loss_weight,
         debug=cfg.debugging,
+        debug_max_batches=cfg.debugging_max_batches,
+        debug_dir=cfg.debugging_dir,
     ) # expansion with one-shot generation at every step
 
     return {

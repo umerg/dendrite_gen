@@ -20,6 +20,7 @@ class Expansion_OneShot(Method):
         red_threshold=0,
         leaf_noise_sigma=0.05,           # <-- stddev of Gaussian around parent (same units as pos)
         leaf_noise_clip=None,            # <-- optional radius clamp (float) or None
+        sibling_loss_weight: float = 0.8,  # weight for sibling distance regularizer
         debug: bool = False,
         debug_max_batches: int = 2,
         debug_dir: str | None = None,
@@ -29,6 +30,7 @@ class Expansion_OneShot(Method):
         self.red_threshold = red_threshold
         self.leaf_noise_sigma = float(leaf_noise_sigma)
         self.leaf_noise_clip = leaf_noise_clip
+        self.sibling_loss_weight = float(sibling_loss_weight)
         self.debug = debug
         self._debug_step = 0
         from pathlib import Path as _P
@@ -683,7 +685,49 @@ class Expansion_OneShot(Method):
             pred_expansion.float(),
             leaf_expansion.float(),
         )
-        loss = leaf_pos_loss + leaf_expansion_loss
+        # --- sibling distance regularizer (prevents siblings collapsing) ---
+        # Work in absolute coordinates for leaves:
+        #   abs_gt_all   : GT leaf positions
+        #   abs_pred_all : predicted leaf positions (parent + predicted offset)
+        leaf_idx = batch.leaf_idx                          # [L]
+        abs_gt_all = pos_gt[leaf_idx]                      # [L,3]
+        parent_pos_in_all = pos_in[leaf_parent_idx]        # [L,3]
+        abs_pred_all = parent_pos_in_all + pred_rel        # [L,3]
+
+        sibling_dist_loss = abs_pred_all.sum() * 0.0  # default 0, preserves dtype/device
+
+        # Group leaves by parent; for parents with >=2 leaf children, build one pair (first two)
+        if leaf_idx.numel() > 1:
+            unique_parents, inverse, counts = leaf_parent_idx.unique(
+                return_inverse=True, return_counts=True
+            )  # unique_parents[K], inverse[L], counts[K]
+
+            # parents that have at least two leaf children
+            mask_multi = counts >= 2
+            if mask_multi.any():
+                pair_indices = []
+                for parent in unique_parents[mask_multi]:
+                    leaf_pos_for_parent = (leaf_parent_idx == parent).nonzero(as_tuple=False).flatten()
+                    if leaf_pos_for_parent.numel() < 2:
+                        continue
+                    # take the first two as a sibling pair (arbitrary ordering)
+                    pair_indices.append(leaf_pos_for_parent[:2])
+
+                if len(pair_indices) > 0:
+                    pair_indices = th.stack(pair_indices, dim=0)  # [S,2]
+                    idx1 = pair_indices[:, 0]
+                    idx2 = pair_indices[:, 1]
+
+                    v_gt = abs_gt_all[idx2] - abs_gt_all[idx1]        # [S,3]
+                    v_pred = abs_pred_all[idx2] - abs_pred_all[idx1]  # [S,3]
+
+                    d_gt = v_gt.norm(dim=-1)                          # [S]
+                    d_pred = v_pred.norm(dim=-1)                      # [S]
+
+                    sibling_dist_loss = F.mse_loss(d_pred, d_gt)
+
+        # combine losses with sibling regularizer
+        loss = leaf_pos_loss + leaf_expansion_loss + self.sibling_loss_weight * sibling_dist_loss
 
         with th.no_grad():
             parent_pos_in = pos_in[leaf_parent_idx]                # [L,3]
@@ -692,6 +736,7 @@ class Expansion_OneShot(Method):
         metrics = {
             "leaf_pos_loss": float(leaf_pos_loss.item()),
             "leaf_expansion_loss": float(leaf_expansion_loss.item()),
+            "sibling_dist_loss": float(sibling_dist_loss.item()),
             "cumulative_loss": float(loss.item()),
             "num_leaves": int(leaf_idx.numel()),
             # "abs_pred_mean_norm": float(abs_pred.norm(dim=-1).mean().item()),
