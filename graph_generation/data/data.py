@@ -99,8 +99,9 @@ def generate_tree_graphs(
     Notes:
         * Sizes are sampled uniformly from the integer range [min_size, max_size].
         * Binary tree topology: internal nodes have exactly 2 children.
-        * 3D positions are assigned via a spring layout (``nx.spring_layout``)
-          with dimension=3, then centered & scaled mildly for stability.
+                * 3D positions are assigned via a spring layout (``nx.spring_layout``)
+                    with dimension=3; then translated so the root is at the origin and
+                    scaled (divide by max node norm) for stability.
         * All graphs share a single master RNG so that calls are reproducible.
     """
     assert min_size > 0 and max_size >= min_size, "Invalid size bounds"
@@ -124,15 +125,17 @@ def generate_tree_graphs(
                 
             # Simple approach: create complete binary tree structure
             # Number internal nodes = (n-1)/2, number of leaves = (n+1)/2
-            nodes = list(range(n))
-            rng.shuffle(nodes)  # randomize for variety
-            
-            # Create tree: first node is root, then alternate levels
-            G.add_node(nodes[0])
+            # Ensure node 0 is always the root; shuffle remaining nodes only
+            root = 0
+            ordered_nodes = [root] + list(range(1, n))
+            rng.shuffle(ordered_nodes[1:])  # shuffle non-root nodes for variety
+
+            # Create tree: root first, then alternate levels
+            G.add_node(root)
             
             if n >= 3:
                 # Build tree level by level ensuring binary property
-                level_nodes = [nodes[0]]  # current level
+                level_nodes = [root]  # current level contains only the root initially
                 node_idx = 1
                 
                 while node_idx < n and level_nodes:
@@ -143,7 +146,7 @@ def generate_tree_graphs(
                         for _ in range(2):
                             if node_idx >= n:
                                 break
-                            child = nodes[node_idx]
+                            child = ordered_nodes[node_idx]
                             G.add_node(child)
                             G.add_edge(parent, child)
                             next_level.append(child)
@@ -156,8 +159,9 @@ def generate_tree_graphs(
         pos_dict = nx.spring_layout(G, dim=3, seed=layout_seed)
         # Convert to numpy arrays (float32) and (optionally) normalize.
         coords = np.vstack([pos_dict[u] for u in G.nodes()]).astype(np.float32)
-        # Center & scale for nicer spread.
-        coords -= coords.mean(axis=0, keepdims=True)
+        # Translate so root (node 0) is at origin, then scale by max norm.
+        root_pos = coords[0].copy()
+        coords -= root_pos
         max_norm = np.max(np.linalg.norm(coords, axis=1))
         if max_norm > 0:
             coords /= max_norm

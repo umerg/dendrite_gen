@@ -198,7 +198,6 @@ class Trainer:
             ):
                 if self.device == "cuda":
                     th.cuda.empty_cache()
-
                 self.run_validation()
 
                 if self.cfg.training.save_checkpoint:

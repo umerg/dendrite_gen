@@ -105,6 +105,8 @@ class Expansion_OneShot(Method):
         leaf_expansion = th.where(target_size >= 3, th.full_like(leaf_idx, 2), th.full_like(leaf_idx, 1))
 
         pos = root_pos
+        # Persistent sibling order: -1 for nodes with no sibling assignment yet
+        sibling_order = th.full((num_graphs,), -1, device=device, dtype=th.long)
 
         # Safety max steps: enough to reach capacity even if only one leaf expands each time.
         max_steps = int(target_size.max().item() * 2)  # generous upper bound
@@ -112,7 +114,7 @@ class Expansion_OneShot(Method):
         terminated = False
 
         while not terminated and step < max_steps:
-            adj, pos, leaf_idx, leaf_expansion, parent_idx_1b, batch, terminated = self.expand(
+            adj, pos, leaf_idx, leaf_expansion, parent_idx_1b, batch, sibling_order, terminated = self.expand(
                 adj,
                 batch,
                 target_size,
@@ -121,9 +123,10 @@ class Expansion_OneShot(Method):
                 leaf_idx=leaf_idx,
                 leaf_expansion=leaf_expansion,
                 parent_idx_1b=parent_idx_1b,
+                sibling_order=sibling_order,
                 step=step,
-                ensure_progress=True,
-                map_threshold=0.5,
+                ensure_progress=False,
+                map_threshold=0.4,
             )
             step += 1
 
@@ -164,8 +167,9 @@ class Expansion_OneShot(Method):
         leaf_idx: th.Tensor | None = None,
         leaf_expansion: th.Tensor | None = None,
         parent_idx_1b: th.Tensor | None = None,
+        sibling_order: th.Tensor | None = None,
         step: int = 0,
-        ensure_progress: bool = True,
+        ensure_progress: bool = False,
         map_threshold: float = 0.5,
     ):
         """Expand graphs by one generation step using binary leaf branching.
@@ -194,8 +198,11 @@ class Expansion_OneShot(Method):
         # 2) Per-graph current size & remaining slots
         size_per_graph = scatter(th.ones_like(batch_reduced), batch_reduced)
         remaining_capacity = target_size.to(device) - size_per_graph
+        if sibling_order is None:
+            sibling_order = th.full((pos.size(0),), -1, device=device, dtype=th.long)
+
         if (remaining_capacity <= 0).all() or leaf_idx.numel() == 0:
-            return adj_reduced, pos, leaf_idx.clone(), leaf_expansion.clone(), parent_idx_1b, batch_reduced, True
+            return adj_reduced, pos, leaf_idx.clone(), leaf_expansion.clone(), parent_idx_1b, batch_reduced, sibling_order.clone(), True
 
         # 3) Map labels -> spawn counts (binary branching)
         spawn_counts = (leaf_expansion == 2).long() * 2  # {0,2}
@@ -260,7 +267,7 @@ class Expansion_OneShot(Method):
         # 6) Count new children & early exit
         total_new_children = int(spawn_counts_final.sum().item())
         if total_new_children == 0:
-            return adj_reduced, pos, leaf_idx.clone(), leaf_expansion.clone(), parent_idx_1b, batch_reduced, True
+            return adj_reduced, pos, leaf_idx.clone(), leaf_expansion.clone(), parent_idx_1b, batch_reduced, sibling_order.clone(), True
 
         # ----- EXPANSION -----
 
@@ -270,6 +277,7 @@ class Expansion_OneShot(Method):
         new_child_parents = []
         new_child_batches = []
         parent_child_edges = []
+        sibling_order_new = []  # track sibling order for newly created children (0=left,1=right)
         running_child_index = 0
         for li, sc in zip(leaf_idx.tolist(), spawn_counts_final.tolist()):
             if sc == 0:
@@ -279,12 +287,18 @@ class Expansion_OneShot(Method):
             noise = self._sample_noise((sc, parent_pos.shape[0]), device, sigma=self.leaf_noise_sigma, clip=self.leaf_noise_clip)
             child_pos = parent_pos.unsqueeze(0) + noise
             new_child_positions.append(child_pos)
-            for _ in range(sc):
+            # record sibling order (0 for first, 1 for second) for binary branching
+            for local_child in range(sc):
                 global_child_idx = base_N + running_child_index
                 parent_child_edges.append((li, global_child_idx))
                 new_child_parents.append(li)
                 new_child_batches.append(int(batch_reduced[li].item()))
+                # spawn_counts are only 0 or 2; if ever >2, local_child gives order anyway
                 running_child_index += 1
+                # collect sibling order
+                # build list lazily to avoid prealloc; will map after concatenation
+                # list defined earlier
+                sibling_order_new.append(0 if local_child == 0 else 1)
         if running_child_index != total_new_children:
             raise ValueError("Child accounting mismatch: expected %d got %d" % (total_new_children, running_child_index))
 
@@ -293,6 +307,10 @@ class Expansion_OneShot(Method):
         parent_idx_new_0b = th.cat([parent_idx, th.tensor(new_child_parents, device=device, dtype=parent_idx.dtype)])
         parent_idx_1b_new = parent_idx_new_0b + 1
         batch_new = th.cat([batch_reduced, th.tensor(new_child_batches, device=device, dtype=batch_reduced.dtype)])
+
+        # build sibling order tensor: -1 for existing nodes, {0,1} for new children (left/right)
+        # Persistent sibling order: keep previous assignments, append new children
+        sibling_order_next = th.cat([sibling_order, th.tensor(sibling_order_new, device=device, dtype=th.long)], dim=0)
 
         # 8) Rebuild adjacency (undirected parent-child edges)
         row_old, col_old, val_old = adj_reduced.coo()
@@ -314,7 +332,7 @@ class Expansion_OneShot(Method):
         # 9) Next leaf set (children only)
         leaf_idx_next = th.arange(base_N, base_N + total_new_children, device=device, dtype=leaf_idx.dtype)
         if leaf_idx_next.numel() == 0:
-            return adj_new, pos_new, leaf_idx_next, leaf_idx_next.new_empty((0,), dtype=leaf_expansion.dtype), parent_idx_1b_new, batch_new, True
+            return adj_new, pos_new, leaf_idx_next, leaf_idx_next.new_empty((0,), dtype=leaf_expansion.dtype), parent_idx_1b_new, batch_new, sibling_order_next, True
 
         # ----- POSITION REFINEMENT FOR LEAVES & NEXT EXPANSION PREDICTION -----
 
@@ -322,15 +340,25 @@ class Expansion_OneShot(Method):
         feats_dim = getattr(model, 'feats_dim', 0)
         pos_dim = getattr(model, 'pos_dim', 3)
         if feats_dim > 0:
+            # feature 0: is_leaf flag
             is_leaf_flag = pos_new.new_zeros((pos_new.size(0), 1))
             is_leaf_flag[leaf_idx_next] = 1.0
-            extra = pos_new.new_zeros((pos_new.size(0), feats_dim - 1)) if feats_dim > 1 else None
-            node_feats = th.cat([is_leaf_flag, extra], dim=-1) if extra is not None else is_leaf_flag
+            features = [is_leaf_flag]
+            feats_used = 1
+            # feature 1: sibling left flag (persistent) if capacity permits
+            if feats_used < feats_dim:
+                so = sibling_order_next
+                sib_is_left = (so == 0).float().unsqueeze(-1)
+                sib_is_left = th.where(so.unsqueeze(-1) >= 0, sib_is_left, sib_is_left.new_zeros(sib_is_left.shape))
+                features.append(sib_is_left)
+                feats_used += 1
+            if feats_used < feats_dim:
+                features.append(pos_new.new_zeros((pos_new.size(0), feats_dim - feats_used)))
+            node_feats = th.cat(features, dim=-1)
             x_in = th.cat([pos_new[:, :pos_dim], node_feats], dim=-1)
         else:
             x_in = pos_new[:, :pos_dim]
         edge_index, _ = to_edge_index(adj_new)
-        
         out = model(x=x_in, edge_index=edge_index, batch=batch_new, edge_attr=None, parent_idx=parent_idx_new_0b)
         if not isinstance(out, dict) or 'rel_pred' not in out or 'expansion_pred' not in out:
             raise ValueError("Model must return dict with 'rel_pred' and 'expansion_pred'.")
@@ -352,15 +380,15 @@ class Expansion_OneShot(Method):
 
         # calculating expansion labels for next step
 
-        # expansion_prob = expansion_pred_leaves.squeeze(-1).sigmoid() # training loss currently does not use logits
-        leaf_expansion_next = (expansion_pred_leaves.squeeze(-1) > map_threshold).long() + 1
+        expansion_prob = expansion_pred_leaves.squeeze(-1).sigmoid() # training loss currently does not use logits
+        leaf_expansion_next = (expansion_prob > map_threshold).long() + 1
 
         # 11) Termination condition for next step
         size_per_graph_new = scatter(th.ones_like(batch_new), batch_new)
         remaining_capacity_new = target_size.to(device) - size_per_graph_new
         terminated = (remaining_capacity_new < 2).all() or leaf_idx_next.numel() == 0
 
-        return adj_new, pos_new, leaf_idx_next, leaf_expansion_next, parent_idx_1b_new, batch_new, terminated
+        return adj_new, pos_new, leaf_idx_next, leaf_expansion_next, parent_idx_1b_new, batch_new, sibling_order_next, terminated
 
     # ---------------------------------------------------------
     # 1) Build masked positions: replace leaf coords by parent + noise
@@ -422,6 +450,42 @@ class Expansion_OneShot(Method):
           - "node_state": [N, pos_dim + feats_dim]
           - "rel_pred"  : [N, 3]  (predicted parent-relative offsets for ALL nodes)
         """
+        
+        # --- DEBUG: Print detailed batch information ---
+        if getattr(self, 'debug', False):
+            print(f"\n[BatchDebug] step={self._debug_step} ============================")
+            print(f"[BatchDebug] Batch attributes: {[attr for attr in dir(batch) if not attr.startswith('_')]}")
+            
+            if hasattr(batch, 'batch'):
+                unique_graphs = batch.batch.unique().tolist()
+                print(f"[BatchDebug] Graphs in batch: {unique_graphs} (total: {len(unique_graphs)})")
+                for g_id in unique_graphs:
+                    mask = (batch.batch == g_id)
+                    print(f"[BatchDebug] Graph {g_id}: {mask.sum().item()} nodes")
+            
+            if hasattr(batch, 'pos'):
+                print(f"[BatchDebug] pos.shape: {batch.pos.shape}, dtype: {batch.pos.dtype}")
+                print(f"[BatchDebug] pos range: [{batch.pos.min().item():.4f}, {batch.pos.max().item():.4f}]")
+            
+            if hasattr(batch, 'adj'):
+                print(f"[BatchDebug] adj.shape: {batch.adj.sizes()}, nnz: {batch.adj.nnz()}")
+            
+            if hasattr(batch, 'leaf_idx'):
+                print(f"[BatchDebug] leaf_idx: {batch.leaf_idx.tolist()} (count: {len(batch.leaf_idx)})")
+            
+            if hasattr(batch, 'leaf_expansion'):
+                print(f"[BatchDebug] leaf_expansion: {batch.leaf_expansion.tolist()}")
+                expansion_counts = {}
+                for exp in batch.leaf_expansion.tolist():
+                    expansion_counts[exp] = expansion_counts.get(exp, 0) + 1
+                print(f"[BatchDebug] expansion counts: {expansion_counts}")
+            
+            if hasattr(batch, 'parent_idx_1b'):
+                print(f"[BatchDebug] parent_idx_1b: {batch.parent_idx_1b.tolist()}")
+                root_mask = (batch.parent_idx_1b == 0)
+                print(f"[BatchDebug] Root nodes (parent_idx_1b==0): {th.nonzero(root_mask, as_tuple=False).flatten().tolist()}")
+            
+            print(f"[BatchDebug] ==========================================\n")
 
         # --- parent indices (1-based in Data for safe batching) -> shift back to 0-based with -1 for roots
         if not hasattr(batch, "parent_idx_1b"):
@@ -440,7 +504,7 @@ class Expansion_OneShot(Method):
         if not hasattr(batch, "leaf_expansion"):
             raise ValueError("Expected batch.leaf_expansion (leaf expansion states). Please update dataloader.")
         leaf_expansion = batch.leaf_expansion - 1       # [L] in {0,1}
-        leaf_expansion = leaf_expansion.float() * 2 - 1 # map to {-1,1} for regression
+        # leaf_expansion = leaf_expansion.float() * 2 - 1 # map to {-1,1} for regression
 
         # derive leaf -> parent mapping from global parent_idx
         leaf_parent_idx = parent_idx[batch.leaf_idx]
@@ -455,9 +519,9 @@ class Expansion_OneShot(Method):
             clip=self.leaf_noise_clip,
         )                                              # [N,3]
 
-        # --- optional debug plotting (GT vs masked) ---
+        # --- Enhanced debug plotting (GT vs masked) with root/leaf coloring ---
         if getattr(self, 'debug', False):
-            from utils.debug_helpers import plot_gt_and_masked  # let import error be explicit
+            from utils.debug_helpers import plot_gt_and_masked_enhanced  # enhanced plotting function
             batch_vec = batch.batch if hasattr(batch, 'batch') else None
             if batch_vec is not None:
                 unique_graphs = batch_vec.unique().tolist()
@@ -472,17 +536,25 @@ class Expansion_OneShot(Method):
                         sub_indices = node_mask.nonzero(as_tuple=False).flatten()
                         pos_gt_sub = pos_gt[sub_indices]
                         pos_in_sub = pos_in[sub_indices]
+                        
+                        # Enhanced debug info for this graph
+                        print(f"[PlotDebug] Graph {b_id}: processing {sub_indices.numel()} nodes")
+                        print(f"[PlotDebug] Graph {b_id} node indices: {sub_indices.tolist()}")
+                        
                         row, col, val = batch.adj.coo()
                         keep = node_mask[row] & node_mask[col]
                         row_sub = row[keep]
                         col_sub = col[keep]
                         val_sub = val[keep]
+                        
+                        print(f"[PlotDebug] Graph {b_id}: {len(row_sub)} edges after filtering")
+                        
                         import torch as _t
                         from torch_sparse import SparseTensor as _ST
                         mapping = {int(gidx.item()): i for i, gidx in enumerate(sub_indices)}
+                        
                         # Reindex edges
                         try:
-                            # Handle empty edge case explicitly to keep dtype correct
                             if row_sub.numel() == 0:
                                 row_mapped = _t.empty((0,), dtype=_t.long, device=row_sub.device)
                                 col_mapped = _t.empty((0,), dtype=_t.long, device=row_sub.device)
@@ -494,16 +566,29 @@ class Expansion_OneShot(Method):
                         except KeyError as ke:
                             logger.warning(f"Reindex KeyError graph={b_id}: {ke}; skipping plot")
                             continue
+                            
                         # Build sparse tensor safely
                         adj_sub = _ST(row=row_mapped, col=col_mapped, value=val_mapped, sparse_sizes=(sub_indices.numel(), sub_indices.numel()))
+                        
+                        # Enhanced node type identification
                         leaf_global = set(batch.leaf_idx.tolist())
                         leaf_local_idx = [mapping[gidx] for gidx in sub_indices.tolist() if gidx in leaf_global]
+                        
+                        # Find root nodes (parent_idx_1b == 0)
+                        root_global = set(th.nonzero(batch.parent_idx_1b == 0, as_tuple=False).flatten().tolist())
+                        root_local_idx = [mapping[gidx] for gidx in sub_indices.tolist() if gidx in root_global]
+                        
+                        # Build expansion mapping
                         leaf_expansion_map = {}
                         for g_leaf, lab in zip(batch.leaf_idx.tolist(), batch.leaf_expansion.tolist()):
                             if g_leaf in mapping:
                                 leaf_expansion_map[mapping[g_leaf]] = lab
                         leaf_expansion_local = [leaf_expansion_map[i] for i in leaf_local_idx]
-                        gt_file, masked_file = plot_gt_and_masked(
+                        
+                        print(f"[PlotDebug] Graph {b_id}: roots={root_local_idx}, leaves={leaf_local_idx}")
+                        print(f"[PlotDebug] Graph {b_id}: leaf_expansion={leaf_expansion_local}")
+                        
+                        gt_file, masked_file = plot_gt_and_masked_enhanced(
                             adj_sub,
                             pos_gt_sub,
                             pos_in_sub,
@@ -513,9 +598,10 @@ class Expansion_OneShot(Method):
                             batch_id=b_id,
                             leaf_local_idx=leaf_local_idx,
                             leaf_expansion=leaf_expansion_local,
+                            root_local_idx=root_local_idx,
                         )
                         logger.info(
-                            f"[ExpansionDebug] step={self._debug_step} graph={b_id} nodes={sub_indices.numel()} leaves={len(leaf_local_idx)} saved: {gt_file.name}, {masked_file.name}"
+                            f"[ExpansionDebug] step={self._debug_step} graph={b_id} nodes={sub_indices.numel()} roots={len(root_local_idx)} leaves={len(leaf_local_idx)} saved: {gt_file.name}, {masked_file.name}"
                         )
                         plotted += 1
                     except Exception as e_plot:
@@ -532,16 +618,20 @@ class Expansion_OneShot(Method):
             # seed with simple is_leaf flag - could be extended later TODO
             is_leaf = pos_in.new_zeros((pos_in.size(0), 1))
             is_leaf[batch.leaf_idx] = 1.0
-            
             features = [is_leaf]
             feats_used = 1
-            
+
             # Add sibling order as binary feature for left child in binary trees
             if hasattr(batch, "sibling_order") and feats_used < feats_dim:
                 so = batch.sibling_order.to(pos_in.device)
                 sib_is_left = (so == 0).float().unsqueeze(-1)
                 # Clamp roots (-1) to 0 for network stability as specified
                 sib_is_left = th.where(so.unsqueeze(-1) >= 0, sib_is_left, th.zeros_like(sib_is_left))
+
+                # check that number of left siblings == number of right siblings
+                if getattr(self, 'debug', False):
+                    if (so == 0).sum().item() != (so == 1).sum().item():
+                        logger.warning("Unequal number of left/right siblings in batch; check data integrity.")
                 features.append(sib_is_left)
                 feats_used += 1
             
@@ -587,7 +677,12 @@ class Expansion_OneShot(Method):
             pred_expansion = pred_expansion.unsqueeze(-1)  # [L] -> [L,1]
         if leaf_expansion.dim() == 1:
             leaf_expansion = leaf_expansion.unsqueeze(-1)  # [L] -> [L,1]
-        leaf_expansion_loss = F.mse_loss(pred_expansion, leaf_expansion)
+        # leaf_expansion_loss = F.mse_loss(pred_expansion, leaf_expansion)
+        # lets use a Logit Loss for better stability
+        leaf_expansion_loss = F.binary_cross_entropy_with_logits(
+            pred_expansion.float(),
+            leaf_expansion.float(),
+        )
         loss = leaf_pos_loss + leaf_expansion_loss
 
         with th.no_grad():

@@ -1,4 +1,3 @@
-name: tree_synthetic
-min_size: 4
-max_size: 8
-load: false
+name: tree_dataset
+data_dir: /Volumes/Seagate/test_tree_loading
+load: True

@@ -135,7 +135,7 @@ def main(cfg: DictConfig):
         #     max_size=cfg.dataset.max_size,
         #     seed=1,
         # )
-        validation_graphs = train_graphs  # TODO remove
+        validation_graphs = train_graphs[:8]  # TODO remove
 
         test_graphs = graph_generator(
             num_graphs=cfg.dataset.test_size,

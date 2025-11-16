@@ -1,12 +1,12 @@
 defaults:
   - _self_
-  - dataset: tree
+  - dataset: synthetic
   - method: expansion_oneshot
 
 dataset:
-  train_size: 1
-  val_size: 1
-  test_size: 1
+  train_size: 100
+  val_size: 5
+  test_size: 5
 
 reduction:
   mode: "stochastic"
@@ -22,15 +22,15 @@ reduction:
 training:
   batch_size: 4
   lr: 1e-6
-  num_steps: 5000
+  num_steps: 500000
   max_num_workers: 0
-  log_interval: 100
+  log_interval: 10000
   save_checkpoint: False
   resume: False # if True, resume from last checkpoint, if number, resume from that step
 
 validation:
-  batch_size: 4
-  interval: 100
+  batch_size: 2
+  interval: 10000
   first_step: 0
   per_graph_size: False
   enable_metrics: False
