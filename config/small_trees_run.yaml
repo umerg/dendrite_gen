@@ -57,7 +57,6 @@ ema:
 
 name: small_trees_run_1
 debugging: False
-debugging: False
 debugging_max_batches: 1
 debugging_dir: "small_trees_debug"
 
