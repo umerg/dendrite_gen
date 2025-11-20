@@ -21,10 +21,12 @@ seaborn==0.13.2
 setuptools==78.1.1
 skeleton_plot==0.1.0
 torch-geometric==2.6.1
-torch_cluster==1.6.3
-torch_scatter==2.1.2
-torch_sparse==0.6.18
-torch_spline_conv==1.2.2
+# torch_cluster==1.6.3
+# torch_scatter==2.1.2
+# torch_sparse==0.6.18
+# torch_spline_conv==1.2.2 need to be installed before to avoid isolated builds
+# pip install -f https://data.pyg.org/whl/torch-2.8.0+cu126.html \
+#   pyg-lib torch-scatter torch-sparse torch-cluster torch-spline-conv
 tqdm==4.67.1
 trimesh==4.8.2
 wheel==0.45.1
