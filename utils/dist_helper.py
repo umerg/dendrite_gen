@@ -3,7 +3,7 @@
 # Adapted from https://github.com/lrjconan/GRAN/ which in turn is adapted from https://github.com/JiaxuanYou/graph-generation
 #
 ###############################################################################
-import pyemd
+# import pyemd
 import numpy as np
 import networkx as nx
 import concurrent.futures
