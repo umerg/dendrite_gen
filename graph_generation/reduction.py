@@ -146,7 +146,7 @@ class CherryReducer:
             cr.leaf_mask = leaf_mask
             cr.leaf_expansion = np.ones_like(leaf_idx, dtype=np.int32)
             # parent indices for current leaves (use -1 for root / None)
-            # parent_idx_1b is constructed externally; omit leaf_parent_idx
+            # parent_idx_1b is constructed externally per full node list; leaf-specific parents no longer stored
             return cr
         
         # Choose cherries for this level
@@ -170,7 +170,9 @@ class CherryReducer:
             keep[np.fromiter(removed_leaves, dtype=int, count=len(removed_leaves))] = False
         survivors = np.nonzero(keep)[0]
         m = survivors.size  # coarse size
-
+        # Force plain Python ints for scipy
+        m_int = int(m)
+        n_int = int(self.n)
         # Map old -> new indices
         new_index = -np.ones(self.n, dtype=int)
         new_index[survivors] = np.arange(m, dtype=int)
@@ -193,7 +195,7 @@ class CherryReducer:
                 continue
             rows.append(new_index[s]); cols.append(s); data.append(1.0)
 
-        P = coo((data, (rows, cols)), shape=(m, self.n), dtype=np.float64)   # coarse x fine
+        P = coo((data, (rows, cols)), shape=(m_int, n_int), dtype=np.float64)   # coarse x fine
         P_inv = P.transpose().tocsr()                                       # fine x coarse
         P_inv.data[:] = 1.0  # binary membership
 

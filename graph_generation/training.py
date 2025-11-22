@@ -3,6 +3,8 @@ from pathlib import Path
 from time import time
 import logging
 
+import psutil
+
 import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
@@ -199,6 +201,7 @@ class Trainer:
 
         last_step = False
         while not last_step:
+            print(f"Starting step {self.step + 1}/{self.cfg.training.num_steps}")
             self.step += 1
             last_step = self.step == self.cfg.training.num_steps
 
@@ -245,6 +248,13 @@ class Trainer:
                 pickle.dump(test_results, f)
 
     def run_step(self, batch):
+        # print memory usage - for batch sizing etc
+        # print(f"Memory allocated before step: {th.cuda.memory_allocated(self.device) / 1024 ** 2:.2f} MB")
+        # print(f"Memory cached before step: {th.cuda.memory_reserved(self.device) / 1024 ** 2:.2f} MB")
+        # # print RAM usage
+        # process = psutil.Process()
+        # print(f"RAM usage before step: {process.memory_info().rss / 1024 ** 2:.2f} MB")
+
         batch = batch.to(self.device, non_blocking=True)
         loss, loss_terms = self.method.get_loss(
             batch=batch, model=self.model,

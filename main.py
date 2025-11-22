@@ -28,19 +28,22 @@ def get_expansion_items(cfg: DictConfig, train_graphs):
         root=cfg.reduction.root,
         contract_root=cfg.reduction.contract_root,
     ) # initialised cherry reduction factory
-
+    print(f"Extracting adjacency and position matrices for {len(train_graphs)} training graphs...")
     adjs = []
     poses = []
     for G in train_graphs:
         A, P, _ = nx_graph_to_adj_pos(G)
         adjs.append(A)
         poses.append(P)
+    print("Extraction done.")
 
+    print("Creating training reduction sequences...")
     train_dataset = gg.data.InfiniteRandRedDataset(
         adjs=adjs,
         poses=poses,
         red_factory=red_factory,
     ) # support only for infinite random reduction dataset for expansion
+    print("Training reduction sequences created.")
 
     # Dataloader
     is_mp = cfg.reduction.num_red_seqs < 0  # if infinite dataset
@@ -49,14 +52,14 @@ def get_expansion_items(cfg: DictConfig, train_graphs):
         train_dataset,
         batch_size=cfg.training.batch_size,
         shuffle=False,
-        pin_memory=True,
+        pin_memory=True, 
         collate_fn=Batch.from_data_list,
         num_workers=num_workers,
         multiprocessing_context="spawn" if num_workers > 0 else None,
     )
 
     # Model
-
+    print(f"Initializing model: {cfg.model.name}...")
     # features = 2 if cfg.diffusion.name == "discrete" else 1
     if cfg.model.name == "egnn": # PARAMS NOT DECIDED TODO
         model = gg.model.SO2_EGNN_Sparse_Network(
@@ -76,6 +79,7 @@ def get_expansion_items(cfg: DictConfig, train_graphs):
         )
     else:
         raise ValueError(f"Unknown model name: {cfg.model.name}")
+    print("Model initialized.")
 
     # Diffusion - Currently one shot
     # if cfg.diffusion.name == "discrete":
@@ -122,12 +126,16 @@ def main(cfg: DictConfig):
 
     # Graphs
     if cfg.dataset.load:  # load from SWC directory structure: data_dir/{train,val,test}
+        print("Loading dataset from SWC files...")
         data_root = Path(cfg.dataset.data_dir)
         if not data_root.exists():
             raise FileNotFoundError(f"Dataset directory not found: {data_root}")
         train_graphs = load_swc_graphs_from_dir(data_root / "train")
         validation_graphs = load_swc_graphs_from_dir(data_root / "val")
         test_graphs = load_swc_graphs_from_dir(data_root / "test")
+        print(f"Loaded {len(train_graphs)} train graphs, "
+              f"{len(validation_graphs)} validation graphs, "
+              f"{len(test_graphs)} test graphs.")
 
     elif cfg.dataset.name in ["tree_synthetic"]: # retaining synthetic graphs dataset if required for testing
         graph_generator = (
