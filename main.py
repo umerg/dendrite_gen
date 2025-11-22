@@ -102,6 +102,7 @@ def get_expansion_items(cfg: DictConfig, train_graphs):
         leaf_noise_sigma=cfg.method.leaf_noise_sigma,
         leaf_noise_clip=cfg.method.leaf_noise_clip,
         sibling_loss_weight=cfg.method.sibling_loss_weight,
+        use_sibling_matching=cfg.method.use_sibling_matching,
         debug=cfg.debugging,
         debug_max_batches=cfg.debugging_max_batches,
         debug_dir=cfg.debugging_dir,

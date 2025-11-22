@@ -201,7 +201,7 @@ class Trainer:
 
         last_step = False
         while not last_step:
-            print(f"Starting step {self.step + 1}/{self.cfg.training.num_steps}")
+            # print(f"Starting step {self.step + 1}/{self.cfg.training.num_steps}")
             self.step += 1
             last_step = self.step == self.cfg.training.num_steps
 

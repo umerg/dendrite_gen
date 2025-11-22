@@ -16,11 +16,12 @@ class Expansion_OneShot(Method):
 
     def __init__(
         self,
-        deterministic_expansion=False, # just sets seeding for reproducibility
-        red_threshold=0,
-        leaf_noise_sigma=0.05,           # <-- stddev of Gaussian around parent (same units as pos)
-        leaf_noise_clip=None,            # <-- optional radius clamp (float) or None
-        sibling_loss_weight: float = 0.8,  # weight for sibling distance regularizer
+        deterministic_expansion: bool = False,      # just sets seeding for reproducibility
+        red_threshold: int = 0,
+        leaf_noise_sigma: float = 0.05,             # <-- stddev of Gaussian around parent (same units as pos)
+        leaf_noise_clip: float | None = None,       # <-- optional radius clamp (float) or None
+        sibling_loss_weight: float = 0.8,           # weight for sibling distance regularizer
+        use_sibling_matching: bool = False,         # if True, use per-parent matching for positional loss
         debug: bool = False,
         debug_max_batches: int = 2,
         debug_dir: str | None = None,
@@ -31,6 +32,7 @@ class Expansion_OneShot(Method):
         self.leaf_noise_sigma = float(leaf_noise_sigma)
         self.leaf_noise_clip = leaf_noise_clip
         self.sibling_loss_weight = float(sibling_loss_weight)
+        self.use_sibling_matching = bool(use_sibling_matching)
         self.debug = debug
         self._debug_step = 0
         from pathlib import Path as _P
@@ -437,7 +439,87 @@ class Expansion_OneShot(Method):
         return pos_gt[leaf_idx] - parent_pos                 # [L,3]
 
     # ---------------------------------------------------------
-    # 3) Forward + loss (MSE on leaves only) assuming model → [N,3]
+    # 3) Optional permutation-aware positional loss via matching
+    # ---------------------------------------------------------
+    @staticmethod
+    def _greedy_min_cost_matching(cost: th.Tensor) -> th.Tensor:
+        """
+        Simple greedy min-cost one-to-one matching.
+
+        Args:
+            cost: [K, K] cost matrix (assumed detached from autograd).
+
+        Returns:
+            assignment: LongTensor[K], where assignment[i] is the index of the
+                        matched column (target) for row i (prediction).
+        """
+        K = int(cost.size(0))
+        if K == 0:
+            return cost.new_empty((0,), dtype=th.long)
+
+        work = cost.clone()
+        inf = (work.max().item() if work.numel() > 0 else 0.0) + 1.0
+        assignment = work.new_full((K,), -1, dtype=th.long)
+
+        for _ in range(K):
+            flat = work.view(-1)
+            _, idx = flat.min(dim=0)
+            row = int(idx // K)
+            col = int(idx % K)
+            assignment[row] = col
+            work[row, :] = inf
+            work[:, col] = inf
+
+        return assignment
+
+    def _compute_leaf_pos_loss_with_matching(
+        self,
+        pred_rel: th.Tensor,          # [L,3] predicted parent-relative offsets for leaves
+        tgt_rel: th.Tensor,           # [L,3] GT parent-relative offsets for leaves
+        leaf_parent_idx: th.Tensor,   # [L] parent index per leaf (0-based)
+    ) -> th.Tensor:
+        """
+        Per-parent permutation-invariant positional loss on leaves.
+
+        For each parent:
+          1) Collect its leaf children (pred_rel_group, tgt_rel_group),
+          2) Build a K×K squared-distance cost matrix in relative space,
+          3) Greedy min-cost matching,
+          4) Accumulate MSE over matched pairs normalised by total #leaves.
+        """
+        if pred_rel.numel() == 0:
+            return pred_rel.sum() * 0.0
+
+        unique_parents, inverse, counts = leaf_parent_idx.unique(
+            return_inverse=True, return_counts=True
+        )
+        total_loss = pred_rel.new_tensor(0.0)
+        total_count = 0
+
+        for parent, count in zip(unique_parents, counts):
+            mask = (leaf_parent_idx == parent)
+            idx = mask.nonzero(as_tuple=False).flatten()
+            k = int(idx.numel())
+            pred_group = pred_rel[idx]
+            tgt_group = tgt_rel[idx]
+            if k == 0:
+                continue
+            if k == 1:
+                total_loss = total_loss + F.mse_loss(pred_group, tgt_group, reduction="sum")
+                total_count += 1
+                continue
+            cost = (pred_group[:, None, :] - tgt_group[None, :, :]).pow(2).sum(dim=-1)
+            assignment = self._greedy_min_cost_matching(cost.detach())
+            matched_tgt = tgt_group[assignment]
+            total_loss = total_loss + F.mse_loss(pred_group, matched_tgt, reduction="sum")
+            total_count += k
+
+        if total_count == 0:
+            return pred_rel.sum() * 0.0
+        return total_loss / float(total_count)
+
+    # ---------------------------------------------------------
+    # 4) Forward + loss (positional + expansion + optional sibling regularizer)
     # ---------------------------------------------------------
     def get_loss(self, batch, model: th.nn.Module):
         """
@@ -673,7 +755,15 @@ class Expansion_OneShot(Method):
             metrics = {"leaf_pos_loss": 0.0, "leaf_expansion_loss": 0.0, "cumulative_loss": 0.0, "num_leaves": 0}
             return loss, metrics
 
-        leaf_pos_loss = F.mse_loss(pred_rel, tgt_rel)
+        # Positional loss on leaves (matching optional)
+        if getattr(self, "use_sibling_matching", False):
+            leaf_pos_loss = self._compute_leaf_pos_loss_with_matching(
+                pred_rel=pred_rel,
+                tgt_rel=tgt_rel,
+                leaf_parent_idx=leaf_parent_idx,
+            )
+        else:
+            leaf_pos_loss = F.mse_loss(pred_rel, tgt_rel)
         # Ensure dimension compatibility for expansion loss
         if pred_expansion.dim() == 1:
             pred_expansion = pred_expansion.unsqueeze(-1)  # [L] -> [L,1]
@@ -686,23 +776,14 @@ class Expansion_OneShot(Method):
             leaf_expansion.float(),
         )
         # --- sibling distance regularizer (prevents siblings collapsing) ---
-        # Work in absolute coordinates for leaves:
-        #   abs_gt_all   : GT leaf positions
-        #   abs_pred_all : predicted leaf positions (parent + predicted offset)
-        leaf_idx = batch.leaf_idx                          # [L]
-        abs_gt_all = pos_gt[leaf_idx]                      # [L,3]
-        parent_pos_in_all = pos_in[leaf_parent_idx]        # [L,3]
-        abs_pred_all = parent_pos_in_all + pred_rel        # [L,3]
-
-        sibling_dist_loss = abs_pred_all.sum() * 0.0  # default 0, preserves dtype/device
-
-        # Group leaves by parent; for parents with >=2 leaf children, build one pair (first two)
-        if leaf_idx.numel() > 1:
+        sibling_dist_loss = pred_rel.sum() * 0.0  # zero default
+        if self.sibling_loss_weight > 0.0 and leaf_idx.numel() > 1:
+            abs_gt_all = pos_gt[leaf_idx]
+            parent_pos_in_all = pos_in[leaf_parent_idx]
+            abs_pred_all = parent_pos_in_all + pred_rel
             unique_parents, inverse, counts = leaf_parent_idx.unique(
                 return_inverse=True, return_counts=True
-            )  # unique_parents[K], inverse[L], counts[K]
-
-            # parents that have at least two leaf children
+            )
             mask_multi = counts >= 2
             if mask_multi.any():
                 pair_indices = []
@@ -710,20 +791,15 @@ class Expansion_OneShot(Method):
                     leaf_pos_for_parent = (leaf_parent_idx == parent).nonzero(as_tuple=False).flatten()
                     if leaf_pos_for_parent.numel() < 2:
                         continue
-                    # take the first two as a sibling pair (arbitrary ordering)
                     pair_indices.append(leaf_pos_for_parent[:2])
-
                 if len(pair_indices) > 0:
-                    pair_indices = th.stack(pair_indices, dim=0)  # [S,2]
+                    pair_indices = th.stack(pair_indices, dim=0)
                     idx1 = pair_indices[:, 0]
                     idx2 = pair_indices[:, 1]
-
-                    v_gt = abs_gt_all[idx2] - abs_gt_all[idx1]        # [S,3]
-                    v_pred = abs_pred_all[idx2] - abs_pred_all[idx1]  # [S,3]
-
-                    d_gt = v_gt.norm(dim=-1)                          # [S]
-                    d_pred = v_pred.norm(dim=-1)                      # [S]
-
+                    v_gt = abs_gt_all[idx2] - abs_gt_all[idx1]
+                    v_pred = abs_pred_all[idx2] - abs_pred_all[idx1]
+                    d_gt = v_gt.norm(dim=-1)
+                    d_pred = v_pred.norm(dim=-1)
                     sibling_dist_loss = F.mse_loss(d_pred, d_gt)
 
         # combine losses with sibling regularizer
