@@ -350,7 +350,7 @@ class Expansion_OneShot(Method):
             features = [is_leaf_flag]
             feats_used = 1
             # feature 1: sibling left flag (persistent) if capacity permits
-            if feats_used < feats_dim:
+            if feats_used < feats_dim:                
                 so = sibling_order_next
                 sib_is_left = (so == 0).float().unsqueeze(-1)
                 sib_is_left = th.where(so.unsqueeze(-1) >= 0, sib_is_left, sib_is_left.new_zeros(sib_is_left.shape))
@@ -748,6 +748,14 @@ class Expansion_OneShot(Method):
 
         # -- target relative offsets from parents for leaves
         tgt_rel  = self._leaf_rel_targets(pos_gt, leaf_idx, leaf_parent_idx)  # [L,3]
+
+        # step_norm_gt   = tgt_rel.norm(dim=-1)      # [L]
+        # step_norm_pred = pred_rel.norm(dim=-1)     # [L]
+        # # print statistics
+        # print(f"[LossDebug] step_norm_gt: mean={step_norm_gt.mean().item():.4f} std={step_norm_gt.std().item():.4f} min={step_norm_gt.min().item():.4f} max={step_norm_gt.max().item():.4f}")
+        # print(f"[LossDebug] step_norm_pred: mean={step_norm_pred.mean().item():.4f} std={step_norm_pred.std().item():.4f} min={step_norm_pred.min().item():.4f} max={step_norm_pred.max().item():.4f}")
+        # print(f"[LossDebug] step_norm_diff: mean={(step_norm_pred - step_norm_gt).mean().item():.4f} std={(step_norm_pred - step_norm_gt).std().item():.4f} min={(step_norm_pred - step_norm_gt).min().item():.4f} max={(step_norm_pred - step_norm_gt).max().item():.4f}")
+        # print(f"Number of leaves: {leaf_idx.numel()}")
 
         # --- loss
         if pred_rel.numel() == 0:
