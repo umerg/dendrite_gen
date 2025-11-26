@@ -130,7 +130,7 @@ class Expansion_OneShot(Method):
                 sibling_order=sibling_order,
                 step=step,
                 ensure_progress=False,
-                map_threshold=0.4,
+                map_threshold=0.5,
             )
             step += 1
 
