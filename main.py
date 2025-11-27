@@ -58,15 +58,43 @@ def get_expansion_items(cfg: DictConfig, train_graphs):
         multiprocessing_context="spawn" if num_workers > 0 else None,
     )
 
+    # check if we augment the graph with extra edges
+    edge_embedding_nums = []
+    edge_embedding_dims = []
+    if cfg.method.name == "expansion_augmented":
+        edge_embedding_nums = [3]
+        edge_embedding_dims = [4]
+        print(f"Using augmented expansion with edge embeddings: nums {edge_embedding_nums}, dims {edge_embedding_dims}")
+
     # Model
     print(f"Initializing model: {cfg.model.name}...")
     # features = 2 if cfg.diffusion.name == "discrete" else 1
-    if cfg.model.name == "egnn": # PARAMS NOT DECIDED TODO
+    if cfg.model.name == "egnn": 
         model = gg.model.SO2_EGNN_Sparse_Network(
             n_layers=cfg.model.num_layers,
             feats_dim=cfg.model.feats_dim,
             pos_dim=3,
             m_dim=cfg.model.m_dim,
+            edge_embedding_nums=edge_embedding_nums,
+            edge_embedding_dims=edge_embedding_dims,
+            dropout=cfg.model.dropout,
+            norm_feats=cfg.model.norm_feats,
+            global_linear_attn_every=cfg.model.global_linear_attn_every,
+            global_linear_attn_heads=cfg.model.global_linear_attn_heads,
+            global_linear_attn_dim_head=cfg.model.global_linear_attn_dim_head,
+            num_global_tokens=cfg.model.num_global_tokens,
+            offset_head_hidden=cfg.model.offset_head_hidden,
+            # so2_axis=cfg.model.so2_axis,
+            use_global_fallback_frames=cfg.model.use_global_fallback_frames,
+        )
+    elif cfg.model.name == "egnn_multihead": 
+        model = gg.model.SO2_EGNN_Sparse_Network_MultiHead(
+            n_layers=cfg.model.num_layers,
+            feats_dim=cfg.model.feats_dim,
+            pos_dim=3,
+            m_dim=cfg.model.m_dim,
+            edge_embedding_nums=edge_embedding_nums,
+            edge_embedding_dims=edge_embedding_dims,
             dropout=cfg.model.dropout,
             norm_feats=cfg.model.norm_feats,
             global_linear_attn_every=cfg.model.global_linear_attn_every,
@@ -96,17 +124,32 @@ def get_expansion_items(cfg: DictConfig, train_graphs):
     #     raise ValueError(f"Unknown diffusion name: {cfg.diffusion.name}")
 
     # Method
-    method = gg.method.Expansion_OneShot(
-        deterministic_expansion=cfg.method.deterministic_expansion,
-        red_threshold=cfg.reduction.red_threshold,
-        leaf_noise_sigma=cfg.method.leaf_noise_sigma,
-        leaf_noise_clip=cfg.method.leaf_noise_clip,
-        sibling_loss_weight=cfg.method.sibling_loss_weight,
-        use_sibling_matching=cfg.method.use_sibling_matching,
-        debug=cfg.debugging,
-        debug_max_batches=cfg.debugging_max_batches,
-        debug_dir=cfg.debugging_dir,
-    ) # expansion with one-shot generation at every step
+    if cfg.method.name == "expansion":
+        method = gg.method.Expansion_OneShot(
+            deterministic_expansion=cfg.method.deterministic_expansion,
+            red_threshold=cfg.reduction.red_threshold,
+            leaf_noise_sigma=cfg.method.leaf_noise_sigma,
+            leaf_noise_clip=cfg.method.leaf_noise_clip,
+            sibling_loss_weight=cfg.method.sibling_loss_weight,
+            use_sibling_matching=cfg.method.use_sibling_matching,
+            debug=cfg.debugging,
+            debug_max_batches=cfg.debugging_max_batches,
+            debug_dir=cfg.debugging_dir,
+        ) # expansion with one-shot generation at every step
+    elif cfg.method.name == "expansion_augmented":
+        method = gg.method.Expansion_OneShot_Augmented(
+            deterministic_expansion=cfg.method.deterministic_expansion,
+            red_threshold=cfg.reduction.red_threshold,
+            leaf_noise_sigma=cfg.method.leaf_noise_sigma,
+            leaf_noise_clip=cfg.method.leaf_noise_clip,
+            sibling_loss_weight=cfg.method.sibling_loss_weight,
+            use_sibling_matching=cfg.method.use_sibling_matching,
+            debug=cfg.debugging,
+            debug_max_batches=cfg.debugging_max_batches,
+            debug_dir=cfg.debugging_dir,
+        ) # augmented expansion with one-shot generation at every step
+    else:
+        raise ValueError(f"Unknown method name: {cfg.method.name}")
 
     return {
         "train_dataloader": train_dataloader,
@@ -191,7 +234,7 @@ def main(cfg: DictConfig):
         ]
 
     # Method
-    if cfg.method.name == "expansion":
+    if cfg.method.name in ("expansion", "expansion_augmented"):
         method_items = get_expansion_items(cfg, train_graphs)
     else:
         raise ValueError(f"Unknown method name: {cfg.method.name}")

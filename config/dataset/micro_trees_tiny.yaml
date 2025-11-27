@@ -1,0 +1,3 @@
+name: micro_trees
+data_dir: "/Volumes/Seagate/graph generation/micro_trees"
+load: True
