@@ -15,20 +15,20 @@ reduction:
   red_threshold: 0
 
 training:
-  batch_size: 4
-  lr: 1e-5
-  num_steps: 500000 # ~100 epochs; considering 20 steps as 1 epoch taking roughly a little over 20 reductions for each graph
+  batch_size: 8192
+  lr: 5e-3
+  num_steps: 200 # ~200 epochs; considering 1 step = 1 batch
   max_num_workers: 0
-  log_interval: 10000 
-  save_checkpoint: False
+  log_interval: 2
+  save_checkpoint: True
   resume: False # if True, resume from last checkpoint, if number, resume from that step
   lr_scheduler: "cosine_annealing"              # Enable cosine annealing
   scheduler_T_max: ${training.num_steps}  # Optional: full cosine cycle length
-  scheduler_eta_min: 1.0e-8          # Optional: minimum learning rate
+  scheduler_eta_min: 1.0e-6          # Optional: minimum learning rate
 
 validation:
-  batch_size: 5
-  interval: 10000
+  batch_size: 10
+  interval: 10
   first_step: 0
   per_graph_size: False
   enable_metrics: False
@@ -38,9 +38,9 @@ testing: False # if True, only evaluate on test set
 
 model:
   name: egnn
-  num_layers: 5
-  feats_dim: 16
-  m_dim: 16
+  num_layers: 6
+  feats_dim: 32
+  m_dim: 32
   dropout: 0.1
   norm_feats: True
   global_linear_attn_every: 2
