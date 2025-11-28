@@ -53,6 +53,14 @@ def compute_branch_angles_parent_centric(
     gp = parent.new_full((N,), -1)
     gp[has_parent] = parent_idx[parent[has_parent]].clamp(min=-1)
 
+    # define global in-plane fallback axis for roots (projected reference vector)
+    ref = torch.tensor([1.0, 0.0, 0.0], dtype=coors.dtype, device=coors.device)
+    ref_proj = ref - (ref @ uhat) * uhat
+    if ref_proj.norm() <= eps:
+        ref = torch.tensor([0.0, 1.0, 0.0], dtype=coors.dtype, device=coors.device)
+        ref_proj = ref - (ref @ uhat) * uhat
+    global_e1 = ref_proj / (ref_proj.norm() + eps)
+
     # incoming direction at parent
     v_in = torch.zeros_like(coors)
     has_gp = gp >= 0
@@ -62,7 +70,7 @@ def compute_branch_angles_parent_centric(
     fallback_mask = has_parent & ~has_gp
     if fallback_mask.any():
         sel = fallback_mask.nonzero(as_tuple=False).flatten()
-        v_in[sel] = coors[sel] - coors[parent[sel]]
+        v_in[sel] = global_e1
 
     # outgoing direction parent -> child
     v_out = torch.zeros_like(coors)
@@ -116,6 +124,39 @@ def assign_branch_angles_to_edges(
         sin_edge[mask_child_to_parent] = sinpsi_node[child_idx]
 
     return cos_edge, sin_edge
+
+def compute_lr_mask_from_angles(
+    parent_idx: torch.Tensor,
+    cospsi_node: torch.Tensor,
+    sinpsi_node: torch.Tensor,
+    tol: float = 1e-6,
+) -> torch.Tensor:
+    """
+    Returns a boolean mask per node indicating geometric left/right assignment.
+    True => left (head 1), False => right (head 0).
+    """
+    device = parent_idx.device
+    lr_mask = torch.zeros(parent_idx.size(0), dtype=torch.bool, device=device)
+
+    unique_parents = parent_idx.unique()
+    for p in unique_parents.tolist():
+        if p < 0:
+            continue
+        children = (parent_idx == p).nonzero(as_tuple=False).flatten()
+        if children.numel() != 2:
+            continue
+        s = sinpsi_node[children, 0]
+        c = cospsi_node[children, 0]
+
+        if (s[0] * s[1] < -tol):
+            lr_mask[children[0]] = s[0] > 0
+            lr_mask[children[1]] = s[1] > 0
+        else:
+            theta = torch.atan2(s, c)
+            idx_left = children[torch.argmax(theta)]
+            lr_mask[idx_left] = True
+
+    return lr_mask
 
 # global linear attention
 
@@ -493,7 +534,7 @@ class SO2_EGNN_Sparse(MessagePassing):
         return "E(n)-GNN Layer for Graphs " + str(self.__dict__) 
 
 
-class SO2_EGNN_Sparse_Network_Simple(nn.Module):
+class SO2_EGNN_Sparse_Network_Geometry_Aware(nn.Module):
     r"""Sample GNN model architecture that uses the EGNN-Sparse
         message passing layer to learn over point clouds. 
         Main MPNN layer introduced in https://arxiv.org/abs/2102.09844v1
@@ -685,12 +726,11 @@ class SO2_EGNN_Sparse_Network_Simple(nn.Module):
         # NODES - Embedd each dim to its target dimensions:
         x = embedd_token(x, self.embedding_dims, self.emb_layers) # identity if no embedding layers
         class_feature = None
+        class_feature_idx = None
         if self.add_offset_head:
             class_feature_idx = self.pos_dim + 1  # second entry of the input feature vector
             if x.size(1) <= class_feature_idx:
                 raise ValueError("Expected at least two feature channels to extract class indicator.")
-            class_feature = x[:, class_feature_idx].clone()
-            # x[:, class_feature_idx] = 0.0  # zero-out the binary class indicator before message passing # dont zero out for diversity test
         # regulates wether to embedd edges each layer
         edges_need_embedding = True  
         # Precompute static geometry if coordinates will remain fixed (update_coors False in all layers)
@@ -698,6 +738,19 @@ class SO2_EGNN_Sparse_Network_Simple(nn.Module):
         static_coords = all((not getattr(L, 'update_coors', True)) for L in self._iter_egnn_layers()) # bit redundant for now as all layers same, but future-proof
         if parent_idx is not None and static_coords:
             pre_geom = self._compute_static_so2_geometry(x[:, :self.pos_dim], edge_index, parent_idx) # we will be precomputing in current set-up
+        if self.add_offset_head:
+            if parent_idx is None:
+                raise ValueError("parent_idx is required for geometry-aware class assignment.")
+            if pre_geom is not None:
+                cospsi_node = pre_geom['cospsi_node']
+                sinpsi_node = pre_geom['sinpsi_node']
+            else:
+                cospsi_node, sinpsi_node = compute_branch_angles_parent_centric(
+                    x[:, :self.pos_dim], parent_idx, self.uhat, eps=self.eps
+                )
+            lr_mask = compute_lr_mask_from_angles(parent_idx, cospsi_node, sinpsi_node)
+            class_feature = lr_mask.float()
+            x[:, class_feature_idx] = class_feature
 
         for i,layer in enumerate(self.mpnn_layers):
             

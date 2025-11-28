@@ -61,6 +61,7 @@ def get_expansion_items(cfg: DictConfig, train_graphs):
     # check if we augment the graph with extra edges
     edge_embedding_nums = [2]
     edge_embedding_dims = [4]
+    edge_attr_dim = 1  # initial edge attribute dimension - label category
     if cfg.method.name == "expansion_augmented":
         edge_embedding_nums = [3]
         edge_embedding_dims = [4]
@@ -77,6 +78,7 @@ def get_expansion_items(cfg: DictConfig, train_graphs):
             m_dim=cfg.model.m_dim,
             edge_embedding_nums=edge_embedding_nums,
             edge_embedding_dims=edge_embedding_dims,
+            edge_attr_dim=edge_attr_dim,
             dropout=cfg.model.dropout,
             norm_feats=cfg.model.norm_feats,
             global_linear_attn_every=cfg.model.global_linear_attn_every,
@@ -95,6 +97,7 @@ def get_expansion_items(cfg: DictConfig, train_graphs):
             m_dim=cfg.model.m_dim,
             edge_embedding_nums=edge_embedding_nums,
             edge_embedding_dims=edge_embedding_dims,
+            edge_attr_dim=edge_attr_dim,
             dropout=cfg.model.dropout,
             norm_feats=cfg.model.norm_feats,
             global_linear_attn_every=cfg.model.global_linear_attn_every,
@@ -113,6 +116,7 @@ def get_expansion_items(cfg: DictConfig, train_graphs):
             m_dim=cfg.model.m_dim,
             edge_embedding_nums=edge_embedding_nums,
             edge_embedding_dims=edge_embedding_dims,
+            edge_attr_dim=edge_attr_dim,
             dropout=cfg.model.dropout,
             norm_feats=cfg.model.norm_feats,
             global_linear_attn_every=cfg.model.global_linear_attn_every,
@@ -121,7 +125,24 @@ def get_expansion_items(cfg: DictConfig, train_graphs):
             num_global_tokens=cfg.model.num_global_tokens,
             offset_head_hidden=cfg.model.offset_head_hidden,
             # so2_axis=cfg.model.so2_axis,
-            use_global_fallback_frames=cfg.model.use_global_fallback_frames,
+        )
+    elif cfg.model.name == "egnn_geometry_aware":
+        model = gg.model.SO2_EGNN_Sparse_Network_Geometry_Aware(
+            n_layers=cfg.model.num_layers,
+            feats_dim=cfg.model.feats_dim,
+            pos_dim=3,
+            m_dim=cfg.model.m_dim,
+            edge_embedding_nums=edge_embedding_nums,
+            edge_embedding_dims=edge_embedding_dims,
+            edge_attr_dim=edge_attr_dim,
+            dropout=cfg.model.dropout,
+            norm_feats=cfg.model.norm_feats,
+            global_linear_attn_every=cfg.model.global_linear_attn_every,
+            global_linear_attn_heads=cfg.model.global_linear_attn_heads,
+            global_linear_attn_dim_head=cfg.model.global_linear_attn_dim_head,
+            num_global_tokens=cfg.model.num_global_tokens,
+            offset_head_hidden=cfg.model.offset_head_hidden,
+            # so2_axis=cfg.model.so2_axis,
         )
     else:
         raise ValueError(f"Unknown model name: {cfg.model.name}")

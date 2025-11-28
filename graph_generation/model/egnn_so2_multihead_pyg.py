@@ -641,7 +641,8 @@ class SO2_EGNN_Sparse_Network_MultiHead(nn.Module):
         for i in range( len(self.edge_embedding_dims) ):
             self.edge_emb_layers.append(nn.Embedding(num_embeddings = edge_embedding_nums[i],
                                                      embedding_dim  = edge_embedding_dims[i]))
-            edge_attr_dim += edge_embedding_dims[i]
+            edge_attr_dim += edge_embedding_dims[i] - 1
+        
         # rest
         self.mpnn_layers      = nn.ModuleList()
         self.feats_dim        = feats_dim

@@ -42,7 +42,7 @@ validation:
 testing: False # if True, only evaluate on test set
 
 model:
-  name: egnn_multihead
+  name: egnn_geometry_aware
   num_layers: 5
   feats_dim: 16
   m_dim: 16
