@@ -1,7 +1,6 @@
 import networkx as nx
 import torch as th
 from torch.nn import Module
-from torch_geometric.utils import to_edge_index
 import torch.nn.functional as F
 from torch_scatter import scatter
 from torch_sparse import SparseTensor
@@ -13,6 +12,9 @@ from .method import Method
 
 class Expansion_OneShot(Method):
     """Graph generation method generating graphs by local expansion."""
+
+    EDGE_PARENT_TO_CHILD = 0
+    EDGE_CHILD_TO_PARENT = 1
 
     def __init__(
         self,
@@ -57,6 +59,37 @@ class Expansion_OneShot(Method):
             scale = th.minimum(th.ones_like(norms), clip / norms)
             noise = noise * scale
         return noise
+
+    def _build_directed_edge_index(
+        self, parent_idx: th.Tensor
+    ) -> tuple[th.Tensor, th.Tensor]:
+        """Return (edge_index, edge_types) for explicit parent<->child directions."""
+        device = parent_idx.device
+        dtype = parent_idx.dtype
+        src_list: list[int] = []
+        dst_list: list[int] = []
+        type_list: list[int] = []
+
+        for child, parent in enumerate(parent_idx.tolist()):
+            if parent < 0:
+                continue
+            # parent -> child
+            src_list.append(parent)
+            dst_list.append(child)
+            type_list.append(self.EDGE_PARENT_TO_CHILD)
+            # child -> parent
+            src_list.append(child)
+            dst_list.append(parent)
+            type_list.append(self.EDGE_CHILD_TO_PARENT)
+
+        if src_list:
+            edge_index = th.tensor([src_list, dst_list], device=device, dtype=dtype)
+            edge_types = th.tensor(type_list, device=device, dtype=dtype)
+        else:
+            edge_index = parent_idx.new_zeros((2, 0))
+            edge_types = parent_idx.new_zeros((0,))
+
+        return edge_index, edge_types
     
     def sample_graphs(self, target_size: th.Tensor, model: Module):
         """Generate a batch of graphs starting from one root node per graph.
@@ -130,7 +163,7 @@ class Expansion_OneShot(Method):
                 sibling_order=sibling_order,
                 step=step,
                 ensure_progress=False,
-                map_threshold=0.5,
+                map_threshold=0.3,
             )
             step += 1
 
@@ -362,8 +395,12 @@ class Expansion_OneShot(Method):
             x_in = th.cat([pos_new[:, :pos_dim], node_feats], dim=-1)
         else:
             x_in = pos_new[:, :pos_dim]
-        edge_index, _ = to_edge_index(adj_new)
-        out = model(x=x_in, edge_index=edge_index, batch=batch_new, edge_attr=None, parent_idx=parent_idx_new_0b)
+        edge_index, edge_types = self._build_directed_edge_index(parent_idx_new_0b)
+        if edge_types.numel():
+            edge_attr = edge_types.unsqueeze(-1).to(x_in.dtype)
+        else:
+            edge_attr = x_in.new_zeros((0, 1))
+        out = model(x=x_in, edge_index=edge_index, batch=batch_new, edge_attr=edge_attr, parent_idx=parent_idx_new_0b)
         if not isinstance(out, dict) or 'rel_pred' not in out or 'expansion_pred' not in out:
             raise ValueError("Model must return dict with 'rel_pred' and 'expansion_pred'.")
         
@@ -578,7 +615,7 @@ class Expansion_OneShot(Method):
 
         # --- graph and positions
         pos_gt = batch.pos                             # [N,3] (absolute, untouched)
-        edge_index, _ = to_edge_index(batch.adj)       # (2,E)
+        edge_index, edge_types = self._build_directed_edge_index(parent_idx)
 
         # --- tracking of leaves
         if not hasattr(batch, "leaf_idx"):
@@ -729,11 +766,16 @@ class Expansion_OneShot(Method):
         else:
             x_in = pos_in[:, :pos_dim]
 
+        if edge_types.numel():
+            edge_attr = edge_types.unsqueeze(-1).to(x_in.dtype)
+        else:
+            edge_attr = x_in.new_zeros((0, 1))
+
         out = model(
             x=x_in,
             edge_index=edge_index,
             batch=batch.batch,
-            edge_attr=None,
+            edge_attr=edge_attr,
             parent_idx=parent_idx,
         )
         if isinstance(out, dict):

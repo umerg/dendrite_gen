@@ -34,79 +34,60 @@ except:
 
 from .egnn_pytorch import *
 
-# axis-aligned fallback helper
-def _axis_aligned_fallback_basis(uhat: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+def compute_branch_angles_parent_centric(
+    coors: torch.Tensor,
+    parent_idx: torch.Tensor,
+    uhat: torch.Tensor,
+    eps: float = 1e-8,
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Given a unit axis uhat that must be ±x, ±y or ±z, return a fixed orthonormal
-    basis (e1, e2) spanning the plane perpendicular to uhat.
-    Mapping (right-handed):
-      x -> (e1=y, e2=z)
-      y -> (e1=z, e2=x)
-      z -> (e1=x, e2=y)
+    Returns (cosψ, sinψ) per node i (> root), describing the angle of the branch
+    parent(i) -> i relative to the incoming direction at parent(i).
     """
-    dev = uhat.device
-    abs_u = uhat.abs()
-    basis = torch.tensor([[1.,0.,0.],[0.,1.,0.],[0.,0.,1.]], device=dev)
-    # check axis-aligned (ignore sign)
-    if not any(torch.allclose(abs_u, b, atol=1e-5) for b in basis):
-        raise AssertionError("SO2 axis must be aligned with ±x, ±y, or ±z.")
+    N = coors.size(0)
 
-    # choose e1 according to which coordinate is 1 in abs(uhat)
-    if torch.allclose(abs_u, basis[0], atol=1e-5):       # x-axis
-        e1 = torch.tensor([0.,1.,0.], device=dev)
-    elif torch.allclose(abs_u, basis[1], atol=1e-5):     # y-axis
-        e1 = torch.tensor([0.,0.,1.], device=dev)
-    else:                                                # z-axis
-        e1 = torch.tensor([1.,0.,0.], device=dev)
+    parent = parent_idx.clone()
+    has_parent = parent >= 0
 
-    # right-handed e2
-    e2 = torch.cross(uhat, e1, dim=-1)
-    # both are unit already, but be safe numerically
-    e1 = e1 / (e1.norm() + 1e-8)
-    e2 = e2 / (e2.norm() + 1e-8)
-    return e1, e2
+    # grandparent of each node
+    gp = parent.new_full((N,), -1)
+    gp[has_parent] = parent_idx[parent[has_parent]].clamp(min=-1)
 
-# --- NEW: per-node SO(2) in-plane frames built from projected parent direction ---
-def _build_so2_frames_from_parents(
-        coors: torch.Tensor,
-        uhat: torch.Tensor,
-        parent_idx: torch.Tensor,
-        eps: float = 1e-8,
-    ) -> torch.Tensor:
-        
-        """Return E: [N,2,3] with per-node in-plane frame (e1,e2).
-        e1 = normalized projection of parent->node onto plane ⟂ uhat (fallback to axis-aligned basis if degenerate/root)
-        e2 = uhat × e1
-        """
-        N = coors.size(0)
-        device = coors.device
+    # incoming direction at parent
+    v_in = torch.zeros_like(coors)
+    has_gp = gp >= 0
+    if has_gp.any():
+        sel = has_gp.nonzero(as_tuple=False).flatten()
+        v_in[sel] = coors[parent[sel]] - coors[gp[sel]]
+    fallback_mask = has_parent & ~has_gp
+    if fallback_mask.any():
+        sel = fallback_mask.nonzero(as_tuple=False).flatten()
+        v_in[sel] = coors[sel] - coors[parent[sel]]
 
-        # parent vectors v_t = x_t - x_parent(t); roots marked as -1
-        has_parent = parent_idx >= 0
-        parent = parent_idx.clamp(min=0)
-        v = coors - coors[parent]
-        v = torch.where(has_parent.view(-1,1), v, torch.zeros_like(v))
+    # outgoing direction parent -> child
+    v_out = torch.zeros_like(coors)
+    if has_parent.any():
+        sel = has_parent.nonzero(as_tuple=False).flatten()
+        v_out[sel] = coors[sel] - coors[parent[sel]]
 
-        # project to plane ⟂ u
-        du_p = (v @ uhat).unsqueeze(-1)                   # [N, 1] 
-        v_perp = v - du_p * uhat                          # [N, 3]
-        v_norm = v_perp.norm(dim=-1, keepdim=True)        # [N, 1]
+    # project onto plane orthogonal to axis
+    du_in = (v_in @ uhat).unsqueeze(-1)
+    du_out = (v_out @ uhat).unsqueeze(-1)
+    v_in_perp = v_in - du_in * uhat
+    v_out_perp = v_out - du_out * uhat
 
-        # deterministic global in-plane fallback from the axis-aligned helper
-        fb_e1, fb_e2 = _axis_aligned_fallback_basis(uhat)
-        fb_e1 = fb_e1.expand_as(v_perp)  # [N, 3]
-        fb_e2 = fb_e2.expand_as(v_perp)  # [N, 3]
+    nin = v_in_perp.norm(dim=-1, keepdim=True)
+    nout = v_out_perp.norm(dim=-1, keepdim=True)
+    v_in_unit = v_in_perp / (nin + eps)
+    v_out_unit = v_out_perp / (nout + eps)
 
-        need_fb = (~has_parent) | (v_norm.squeeze(-1) <= 1e-6)
-        e1 = torch.where(
-            need_fb.view(-1, 1),
-            fb_e1,                # global in-plane basis
-            v_perp / (v_norm + eps),
-        )
-        e2 = torch.cross(uhat.expand_as(e1), e1, dim=-1)  # [N, 3]
+    cospsi = (v_in_unit * v_out_unit).sum(dim=-1, keepdim=True)
+    cross = torch.cross(v_in_unit, v_out_unit, dim=-1)
+    sinpsi = (cross * uhat).sum(dim=-1, keepdim=True)
 
-        E = torch.stack([e1, e2], dim=1)  # [N,2,3]
-        return E
+    cospsi = torch.where(has_parent.view(-1, 1), cospsi, torch.ones_like(cospsi))
+    sinpsi = torch.where(has_parent.view(-1, 1), sinpsi, torch.zeros_like(sinpsi))
+    return cospsi, sinpsi
 
 # global linear attention
 
@@ -274,10 +255,8 @@ class SO2_EGNN_Sparse(MessagePassing):
         angle_weighted_mean: bool = True,
         rbf_k: int = 0,
         rbf_gamma: float = 10.0,
-        eps: float = 1e-8,
-        # DEBUG: force use of global fallback frames instead of per-parent frames
-        use_global_fallback_frames: bool = False,
-        **kwargs
+                 eps: float = 1e-8,
+                 **kwargs
     ):
         assert aggr in {'add', 'sum', 'max', 'mean'}, 'pool method must be a valid option'
         assert update_feats or update_coors, 'you must update either features, coordinates, or both'
@@ -300,11 +279,6 @@ class SO2_EGNN_Sparse(MessagePassing):
         self.register_buffer('uhat', u / (u.norm() + 1e-8))
         self.anisotropic = anisotropic
 
-        # NEW: assert axis-aligned and cache axis-aligned fallback basis
-        fb_e1, fb_e2 = _axis_aligned_fallback_basis(self.uhat)
-        self.register_buffer('fallback_e1', fb_e1)
-        self.register_buffer('fallback_e2', fb_e2)
-
         # NEW knobs
         self.add_local_angles = add_local_angles
         self.angle_weighted_mean = angle_weighted_mean
@@ -323,13 +297,11 @@ class SO2_EGNN_Sparse(MessagePassing):
             self.rbf_rho = RBF(self.rbf_k, 0.0, rho_max, self.rbf_gamma)
             self.rbf_du  = RBF(self.rbf_k, -du_max, du_max, self.rbf_gamma)
         self.eps = eps
-        # debug flag
-        self.use_global_fallback_frames = use_global_fallback_frames
 
-        # base edge scalars: rho, du, u_i, optionally cosφ/sinφ (+ option fourier)
+        # base edge scalars: rho, du, u_i, optionally cosψ/sinψ (+ option fourier)
         base_scalar_dim = (rbf_k if rbf_k > 0 else 1) * 2 + 1  # rho, du, u_i
         if self.add_local_angles:
-            base_scalar_dim += 2                               # cosφ, sinφ
+            base_scalar_dim += 2                               # cosψ, sinψ
         self.edge_input_dim = (fourier_features * 2) + edge_attr_dim + base_scalar_dim + (feats_dim * 2) # features for both nodes connected by edge
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
@@ -368,6 +340,35 @@ class SO2_EGNN_Sparse(MessagePassing):
 
         self.apply(self.init_)
 
+    @staticmethod
+    def _edge_branch_angles(
+        edge_index: torch.Tensor,
+        parent_idx: torch.Tensor,
+        cospsi_node: torch.Tensor,
+        sinpsi_node: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Assign node-level branch angles to directed edges."""
+        src, dst = edge_index
+        device = cospsi_node.device
+        dtype = cospsi_node.dtype
+        num_edges = src.size(0)
+        cos_edge = torch.zeros((num_edges, 1), device=device, dtype=dtype)
+        sin_edge = torch.zeros_like(cos_edge)
+
+        mask_parent_to_child = (parent_idx[dst] == src)
+        if mask_parent_to_child.any():
+            child_idx = dst[mask_parent_to_child]
+            cos_edge[mask_parent_to_child] = cospsi_node[child_idx]
+            sin_edge[mask_parent_to_child] = sinpsi_node[child_idx]
+
+        mask_child_to_parent = (parent_idx[src] == dst)
+        if mask_child_to_parent.any():
+            child_idx = src[mask_child_to_parent]
+            cos_edge[mask_child_to_parent] = cospsi_node[child_idx]
+            sin_edge[mask_child_to_parent] = sinpsi_node[child_idx]
+
+        return cos_edge, sin_edge
+
     def init_(self, module):
         if type(module) in {nn.Linear}:
             # seems to be needed to keep the network from exploding to NaN with greater depths
@@ -392,14 +393,12 @@ class SO2_EGNN_Sparse(MessagePassing):
         # If geometry was precomputed (static coordinates), reuse it.
         if pre_geom is not None:
             rel_coors = pre_geom['rel_coors']
-            row, col = edge_index
             r_perp = pre_geom['r_perp']
             rho = pre_geom['rho']
             du = pre_geom['du']
             u_i = pre_geom['u_i']
-            cosphi = pre_geom.get('cosphi', None)
-            sinphi = pre_geom.get('sinphi', None)
-            have_angles = cosphi is not None and sinphi is not None
+            cospsi_edge = pre_geom.get('cospsi_edge')
+            sinpsi_edge = pre_geom.get('sinpsi_edge')
         else:
             src, dst = edge_index
 
@@ -411,7 +410,17 @@ class SO2_EGNN_Sparse(MessagePassing):
             rho  = r_perp.norm(dim=-1, keepdim=True).clamp_min(self.eps)     # (E, 1)
             du = du[:, None]                                                 # (E, 1)
             u_i = (coors[dst] @ self.uhat)[:, None]                          # (E, 1)
-            have_angles = False  # will be set after computing angles
+            cospsi_edge = None
+            sinpsi_edge = None
+            if self.add_local_angles:
+                if parent_idx is None:
+                    raise ValueError("parent_idx must be provided when add_local_angles=True.")
+                cospsi_node, sinpsi_node = compute_branch_angles_parent_centric(
+                    coors, parent_idx, self.uhat, eps=self.eps
+                )
+                cospsi_edge, sinpsi_edge = self._edge_branch_angles(
+                    edge_index, parent_idx, cospsi_node, sinpsi_node
+                )
 
         if self.fourier_features > 0: # switched off for us
             rel_dist = (rel_coors ** 2).sum(dim=-1, keepdim=True)
@@ -428,44 +437,9 @@ class SO2_EGNN_Sparse(MessagePassing):
         base_feats.extend([rho_feat, du_feat, u_i])
 
         if self.add_local_angles:
-            if pre_geom is not None and have_angles:
-                base_feats.extend([cosphi, sinphi])
-            else:
-                if parent_idx is None:
-                    raise ValueError("parent_idx must be provided for local angle computation; received None.")
-                
-                # Compute local angles on-the-fly (coordinates may be changing if update_coors=True)
-                E = _build_so2_frames_from_parents(coors, self.uhat, parent_idx, eps=self.eps)  # [N,2,3]
-                if self.use_global_fallback_frames:
-                    # override all frames with global fallback basis
-                    N = coors.size(0)
-                    e1_all = self.fallback_e1.expand(N, 3)
-                    e2_all = self.fallback_e2.expand(N, 3)
-                    E = torch.stack([e1_all, e2_all], dim=1)
-
-                # choose frame based on hierarchy and define outward direction consistently
-                parent_mask = (src == parent_idx[dst])               # [E]
-                s = torch.where(parent_mask, 1.0, -1.0).unsqueeze(-1)  # parent edge: keep r=j->i; child edge: flip to i->child [E,1]
-                r_out = s * rel_coors                                 # [E,3]
-
-                # in-plane unit direction of r_out
-                du_out = (r_out @ self.uhat)                                   # [E]
-                r_out_par = du_out[:, None] * self.uhat                        # [E,3]
-                r_out_perp = r_out - r_out_par                                 # [E,3]
-                d2 = r_out_perp / (r_out_perp.norm(dim=-1, keepdim=True) + 1e-8)  # [E,3]
-
-
-                # select frame: parent’s for parent edge; receiver’s for child edge
-                E_parent = E[src]    # [E,2,3]
-                E_recv   = E[dst]    # [E,2,3]
-                E_use = torch.where(parent_mask.view(-1,1,1), E_parent, E_recv)
-                e1 = E_use[:,0,:]
-                e2 = E_use[:,1,:]
-
-                cosphi = (d2 * e1).sum(dim=-1, keepdim=True)
-                sinphi = (d2 * e2).sum(dim=-1, keepdim=True)
-
-                base_feats.extend([cosphi, sinphi])
+            if cospsi_edge is None or sinpsi_edge is None:
+                raise ValueError("Branch angles were not computed; check parent_idx input.")
+            base_feats.extend([cospsi_edge, sinpsi_edge])
 
         if exists(edge_attr):
             edge_attr_feats = torch.cat([edge_attr] + base_feats, dim=-1)
@@ -540,7 +514,7 @@ class SO2_EGNN_Sparse(MessagePassing):
         return "E(n)-GNN Layer for Graphs " + str(self.__dict__) 
 
 
-class SO2_EGNN_Sparse_Network_MultiHead(nn.Module):
+class SO2_EGNN_Sparse_Network_Simple(nn.Module):
     r"""Sample GNN model architecture that uses the EGNN-Sparse
         message passing layer to learn over point clouds. 
         Main MPNN layer introduced in https://arxiv.org/abs/2102.09844v1
@@ -616,8 +590,6 @@ class SO2_EGNN_Sparse_Network_MultiHead(nn.Module):
                  # offset head
                  add_offset_head=True,
                  offset_head_hidden=128,
-                 # DEBUG: force using global fallback frames everywhere
-                 use_global_fallback_frames: bool = False,
                  ):
         super().__init__()
 
@@ -659,16 +631,10 @@ class SO2_EGNN_Sparse_Network_MultiHead(nn.Module):
         self.coor_weights_clamp_value = coor_weights_clamp_value
         self.recalc           = recalc
         self.eps              = eps
-        self.use_global_fallback_frames = use_global_fallback_frames
 
         # axis buffer needed for decode
         u = torch.tensor(so2_axis, dtype=torch.float32)
         self.register_buffer('uhat', u / (u.norm() + 1e-8))
-
-        # cache axis-aligned fallback basis for decode path
-        fb_e1, fb_e2 = _axis_aligned_fallback_basis(self.uhat)
-        self.register_buffer('fallback_e1', fb_e1)
-        self.register_buffer('fallback_e2', fb_e2)
 
         # basis-coef head
         self.add_offset_head = add_offset_head
@@ -714,7 +680,6 @@ class SO2_EGNN_Sparse_Network_MultiHead(nn.Module):
                 rbf_k = rbf_k,
                 rbf_gamma = rbf_gamma,
                 eps = eps,
-                use_global_fallback_frames = use_global_fallback_frames,
             )
 
             # global attention case
@@ -796,40 +761,15 @@ class SO2_EGNN_Sparse_Network_MultiHead(nn.Module):
         if parent_idx is None:
             raise ValueError("parent_idx is required to decode parent-relative offsets.")
 
-        # Use precomputed node frames if available
-        if pre_geom is not None:
-            e1 = pre_geom['e1_node']
-            e2 = pre_geom['e2_node']
-        else:
-            raise NotImplementedError("Decoding with dynamic coordinates not implemented yet.")
-            # # OLD LOGIC - WRONG: takes current nodes frame instead of parent's
-            # parent = parent_idx.clamp(min=-1)
-            # has_parent = parent >= 0
-            # v = coors - coors[parent.clamp(min=0)]
-            # v = torch.where(has_parent.view(-1,1), v, torch.zeros_like(v))
-            # du_p = (v @ self.uhat).unsqueeze(-1)
-            # v_perp = v - du_p * self.uhat
-            # v_norm = v_perp.norm(dim=-1, keepdim=True)
-
-            # # NEW fixed fallback
-            # need_fb = (~has_parent) | (v_norm.squeeze(-1) <= 1e-6)
-            # e1 = torch.where(
-            #     need_fb.view(-1,1),
-            #     self.fallback_e1.expand_as(v_perp),
-            #     v_perp / (v_norm + 1e-8)
-            # )
-            # e2 = torch.cross(self.uhat.expand_as(e1), e1, dim=-1)
-
         # head
         if class_feature is None:
             raise ValueError("Class feature was not captured; cannot route to multi-head offset decoder.")
         class_mask = (class_feature > 0.5).unsqueeze(-1)  # True -> head 1, False -> head 0
         head0 = self.offset_head_class0(feats)
         head1 = self.offset_head_class1(feats)
-        abce = torch.where(class_mask, head1, head0)  # apply class-specific decoder head
-        a, b, c, e = abce[:,0:1], abce[:,1:2], abce[:,2:3], abce[:,3:4] # basis coeffs + expansion state
-        rel_pred = a*e1 + b*e2 + c*self.uhat
-        expansion_pred = e
+        offset_state = torch.where(class_mask, head1, head0)  # apply class-specific decoder head
+        rel_pred = offset_state[:, :3]
+        expansion_pred = offset_state[:, 3:4]
 
         return {"node_state": x, "rel_pred": rel_pred, "expansion_pred": expansion_pred}
 
@@ -849,141 +789,15 @@ class SO2_EGNN_Sparse_Network_MultiHead(nn.Module):
         du = du[:, None]
         u_i = (coors[dst] @ self.uhat)[:, None]
         
-        # compute local angles
         if parent_idx is None:
-            raise ValueError("parent_idx must be provided for local angle computation; received None.")
+            raise ValueError("parent_idx must be provided for branch angle computation; received None.")
 
-        # build per-node frames once
-        E = _build_so2_frames_from_parents(coors, self.uhat, parent_idx, eps=self.eps)  # [N,2,3]
-        if self.use_global_fallback_frames:
-            N_nodes = coors.size(0)
-            e1_all = self.fallback_e1.expand(N_nodes, 3)
-            e2_all = self.fallback_e2.expand(N_nodes, 3)
-            E = torch.stack([e1_all, e2_all], dim=1)
-
-            # choose frame based on hierarchy and define outward direction consistently
-            parent_mask = (src == parent_idx[dst])               # [E]
-            r_out = rel_coors                                 # [E,3]
-        else:
-            # choose frame based on hierarchy and define outward direction consistently
-            parent_mask = (src == parent_idx[dst])               # [E]
-            s = torch.where(parent_mask, 1.0, -1.0).unsqueeze(-1)  # parent edge: keep r=j->i; child edge: flip to i->child [E,1]
-            r_out = s * rel_coors                                 # [E,3]
-        
-        # in-plane unit direction of r_out
-        du_out = (r_out @ self.uhat)                                   # [E]
-        r_out_par = du_out[:, None] * self.uhat                        # [E,3]
-        r_out_perp = r_out - r_out_par                                 # [E,3]
-        d2 = r_out_perp / (r_out_perp.norm(dim=-1, keepdim=True) + self.eps)  # [E,3]
-
-
-        # select frame: parent’s for parent edge; receiver’s for child edge
-        E_src = E[src]    # [E,2,3]
-        E_dst   = E[dst]    # [E,2,3]
-        E_use = torch.where(parent_mask.view(-1,1,1), E_src, E_dst)
-        e1 = E_use[:,0,:]
-        e2 = E_use[:,1,:]
-
-        cosphi = (d2 * e1).sum(dim=-1, keepdim=True)
-        sinphi = (d2 * e2).sum(dim=-1, keepdim=True)
-
-        # parent frames for decoding step
-        if self.use_global_fallback_frames:
-            # simply broadcast global fallback frames for all nodes
-            e1_node = self.fallback_e1.expand(coors.size(0), 3)
-            e2_node = self.fallback_e2.expand(coors.size(0), 3)
-        else:
-            parent_frames = E[parent_idx.clamp(min=0)]  # [N,2,3]
-            need_fb = (parent_idx < 0).view(-1, 1, 1)   # [N,1,1]
-            fallback_frames = torch.stack(
-                [self.fallback_e1, self.fallback_e2], dim=0
-            ).unsqueeze(0)                               # [1,2,3]
-            E_parent = torch.where(need_fb, fallback_frames, parent_frames)  # [N,2,3]
-            e1_node = E_parent[:,0,:]
-            e2_node = E_parent[:,1,:]
-
-        # ---- DEBUG GEOMETRY VISUALIZATION (optional) ----
-        if os.environ.get("GEOM_DEBUG", "0") == "1":
-            try:
-                import random
-                from utils.debug_helpers import plot_geometry_debug
-                N = coors.size(0)
-                # prefer nodes with at least one incident edge for richer visualization
-                incident = ((src == dst) == False)  # dummy to ensure tensor exists
-                deg_counts = torch.zeros(N, dtype=torch.long, device=coors.device)
-                deg_counts.scatter_add_(0, src, torch.ones_like(src))
-                deg_counts.scatter_add_(0, dst, torch.ones_like(dst))
-                candidates = (deg_counts > 0).nonzero(as_tuple=False).flatten().tolist()
-                if not candidates:
-                    candidates = list(range(N))
-                node_id = random.choice(candidates)
-                parent_id = int(parent_idx[node_id].item()) if parent_idx[node_id] >= 0 else None
-
-                incoming_mask = (dst == node_id)
-                outgoing_mask = (src == node_id)
-                incoming_src = src[incoming_mask]
-                outgoing_dst = dst[outgoing_mask]
-
-                e1_self = E[node_id,0]
-                e2_self = E[node_id,1]
-                e1_par = E[parent_id,0] if parent_id is not None else None
-                e2_par = E[parent_id,1] if parent_id is not None else None
-
-                edge_vecs_in = []
-                edge_decomp_in = []
-                angles_in = []
-                for p in incoming_src.tolist():
-                    v = coors[node_id] - coors[p]
-                    du_local = torch.dot(v, self.uhat)
-                    r_par_local = du_local * self.uhat
-                    r_perp_local = v - r_par_local
-                    edge_vecs_in.append(v.detach().cpu())
-                    edge_decomp_in.append((r_par_local.detach().cpu(), r_perp_local.detach().cpu()))
-                    d2 = r_perp_local / (r_perp_local.norm() + 1e-8)
-                    c = torch.dot(d2, e1_self).item()
-                    s_ang = torch.dot(d2, e2_self).item()
-                    angles_in.append((c, s_ang))
-
-                edge_vecs_out = []
-                edge_decomp_out = []
-                angles_out = []
-                for c_idx in outgoing_dst.tolist():
-                    v = coors[c_idx] - coors[node_id]
-                    du_local = torch.dot(v, self.uhat)
-                    r_par_local = du_local * self.uhat
-                    r_perp_local = v - r_par_local
-                    edge_vecs_out.append(v.detach().cpu())
-                    edge_decomp_out.append((r_par_local.detach().cpu(), r_perp_local.detach().cpu()))
-                    d2 = r_perp_local / (r_perp_local.norm() + 1e-8)
-                    c = torch.dot(d2, e1_self).item()
-                    s_ang = torch.dot(d2, e2_self).item()
-                    angles_out.append((c, s_ang))
-
-                out_dir = Path(os.getcwd()) / "geometry_debug"
-                out_path = plot_geometry_debug(
-                    pos=coors.detach().cpu(),
-                    node_id=node_id,
-                    parent_id=parent_id,
-                    neighbor_in=incoming_src.tolist(),
-                    neighbor_out=outgoing_dst.tolist(),
-                    uhat=self.uhat.detach().cpu(),
-                    e1_node=e1_self.detach().cpu(),
-                    e2_node=e2_self.detach().cpu(),
-                    e1_parent=e1_par.detach().cpu() if e1_par is not None else None,
-                    e2_parent=e2_par.detach().cpu() if e2_par is not None else None,
-                    edge_vecs_in=edge_vecs_in,
-                    edge_vecs_out=edge_vecs_out,
-                    edge_decomp_in=edge_decomp_in,
-                    edge_decomp_out=edge_decomp_out,
-                    angles_in=angles_in,
-                    angles_out=angles_out,
-                    out_dir=out_dir,
-                    prefix="geom",
-                )
-                log.info(f"[GEOM_DEBUG] Saved geometry debug figure: {out_path}")
-            except Exception as e:
-                import traceback
-                log.warning(f"[GEOM_DEBUG] Failed to generate geometry debug plot: {e}\n{traceback.format_exc()}")
+        cospsi_node, sinpsi_node = compute_branch_angles_parent_centric(
+            coors, parent_idx, self.uhat, eps=self.eps
+        )
+        cospsi_edge, sinpsi_edge = self._edge_branch_angles(
+            edge_index, parent_idx, cospsi_node, sinpsi_node
+        )
 
         return {
             'rel_coors': rel_coors,
@@ -991,8 +805,8 @@ class SO2_EGNN_Sparse_Network_MultiHead(nn.Module):
             'rho': rho,
             'du': du,
             'u_i': u_i,
-            'e1_node': e1_node,
-            'e2_node': e2_node,
-            'cosphi': cosphi,
-            'sinphi': sinphi,
+            'cospsi_edge': cospsi_edge,
+            'sinpsi_edge': sinpsi_edge,
+            'cospsi_node': cospsi_node,
+            'sinpsi_node': sinpsi_node,
         }
