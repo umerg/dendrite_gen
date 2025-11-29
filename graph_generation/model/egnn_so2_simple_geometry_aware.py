@@ -34,15 +34,26 @@ except:
 
 from .egnn_pytorch import *
 
+def _global_inplane_basis(uhat: torch.Tensor, eps: float = 1e-8) -> tuple[torch.Tensor, torch.Tensor]:
+    ref = torch.tensor([1.0, 0.0, 0.0], dtype=uhat.dtype, device=uhat.device)
+    ref_proj = ref - (ref @ uhat) * uhat
+    if ref_proj.norm() <= eps:
+        ref = torch.tensor([0.0, 1.0, 0.0], dtype=uhat.dtype, device=uhat.device)
+        ref_proj = ref - (ref @ uhat) * uhat
+    e1 = ref_proj / (ref_proj.norm() + eps)
+    e2 = torch.cross(uhat, e1, dim=-1)
+    e2 = e2 / (e2.norm() + eps)
+    return e1, e2
+
 def compute_branch_angles_parent_centric(
     coors: torch.Tensor,
     parent_idx: torch.Tensor,
     uhat: torch.Tensor,
     eps: float = 1e-8,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    Returns (cosψ, sinψ) per node i (> root), describing the angle of the branch
-    parent(i) -> i relative to the incoming direction at parent(i).
+    Returns (cosψ, sinψ, e1_local, e2_local) per node describing the branch geometry
+    in a parent-centric frame.
     """
     N = coors.size(0)
 
@@ -53,13 +64,7 @@ def compute_branch_angles_parent_centric(
     gp = parent.new_full((N,), -1)
     gp[has_parent] = parent_idx[parent[has_parent]].clamp(min=-1)
 
-    # define global in-plane fallback axis for roots (projected reference vector)
-    ref = torch.tensor([1.0, 0.0, 0.0], dtype=coors.dtype, device=coors.device)
-    ref_proj = ref - (ref @ uhat) * uhat
-    if ref_proj.norm() <= eps:
-        ref = torch.tensor([0.0, 1.0, 0.0], dtype=coors.dtype, device=coors.device)
-        ref_proj = ref - (ref @ uhat) * uhat
-    global_e1 = ref_proj / (ref_proj.norm() + eps)
+    global_e1, global_e2 = _global_inplane_basis(uhat, eps=eps)
 
     # incoming direction at parent
     v_in = torch.zeros_like(coors)
@@ -69,8 +74,7 @@ def compute_branch_angles_parent_centric(
         v_in[sel] = coors[parent[sel]] - coors[gp[sel]]
     fallback_mask = has_parent & ~has_gp
     if fallback_mask.any():
-        sel = fallback_mask.nonzero(as_tuple=False).flatten()
-        v_in[sel] = global_e1
+        v_in[fallback_mask] = global_e1
 
     # outgoing direction parent -> child
     v_out = torch.zeros_like(coors)
@@ -89,13 +93,25 @@ def compute_branch_angles_parent_centric(
     v_in_unit = v_in_perp / (nin + eps)
     v_out_unit = v_out_perp / (nout + eps)
 
+    # local bases
+    e1_local = v_in_unit
+    degenerate = (nin <= eps) | (~has_parent).view(-1, 1)
+    if degenerate.any():
+        e1_local[degenerate.squeeze(-1)] = global_e1
+    e2_local = torch.cross(uhat.expand_as(e1_local), e1_local, dim=-1)
+    e2_norm = e2_local.norm(dim=-1, keepdim=True)
+    e2_local = e2_local / (e2_norm + eps)
+
     cospsi = (v_in_unit * v_out_unit).sum(dim=-1, keepdim=True)
     cross = torch.cross(v_in_unit, v_out_unit, dim=-1)
     sinpsi = (cross * uhat).sum(dim=-1, keepdim=True)
 
     cospsi = torch.where(has_parent.view(-1, 1), cospsi, torch.ones_like(cospsi))
     sinpsi = torch.where(has_parent.view(-1, 1), sinpsi, torch.zeros_like(sinpsi))
-    return cospsi, sinpsi
+    mask = has_parent.view(-1, 1)
+    e1_local = torch.where(mask, e1_local, global_e1.expand_as(e1_local))
+    e2_local = torch.where(mask, e2_local, global_e2.expand_as(e2_local))
+    return cospsi, sinpsi, e1_local, e2_local
 
 def assign_branch_angles_to_edges(
     edge_index: torch.Tensor,
@@ -411,6 +427,7 @@ class SO2_EGNN_Sparse(MessagePassing):
         coors, feats = x[:, :self.pos_dim], x[:, self.pos_dim:]
         
         # If geometry was precomputed (static coordinates), reuse it.
+        cospsi_node = sinpsi_node = e1_node = e2_node = None
         if pre_geom is not None:
             rel_coors = pre_geom['rel_coors']
             r_perp = pre_geom['r_perp']
@@ -419,6 +436,10 @@ class SO2_EGNN_Sparse(MessagePassing):
             u_i = pre_geom['u_i']
             cospsi_edge = pre_geom.get('cospsi_edge')
             sinpsi_edge = pre_geom.get('sinpsi_edge')
+            cospsi_node = pre_geom.get('cospsi_node')
+            sinpsi_node = pre_geom.get('sinpsi_node')
+            e1_node = pre_geom.get('e1_node')
+            e2_node = pre_geom.get('e2_node')
         else:
             src, dst = edge_index
 
@@ -435,7 +456,7 @@ class SO2_EGNN_Sparse(MessagePassing):
             if self.add_local_angles:
                 if parent_idx is None:
                     raise ValueError("parent_idx must be provided when add_local_angles=True.")
-                cospsi_node, sinpsi_node = compute_branch_angles_parent_centric(
+                cospsi_node, sinpsi_node, e1_node, e2_node = compute_branch_angles_parent_centric(
                     coors, parent_idx, self.uhat, eps=self.eps
                 )
                 cospsi_edge, sinpsi_edge = assign_branch_angles_to_edges(
@@ -735,17 +756,23 @@ class SO2_EGNN_Sparse_Network_Geometry_Aware(nn.Module):
         edges_need_embedding = True  
         # Precompute static geometry if coordinates will remain fixed (update_coors False in all layers)
         pre_geom = None
+        cospsi_node = sinpsi_node = e1_node = e2_node = None
         static_coords = all((not getattr(L, 'update_coors', True)) for L in self._iter_egnn_layers()) # bit redundant for now as all layers same, but future-proof
         if parent_idx is not None and static_coords:
             pre_geom = self._compute_static_so2_geometry(x[:, :self.pos_dim], edge_index, parent_idx) # we will be precomputing in current set-up
+            cospsi_node = pre_geom.get('cospsi_node')
+            sinpsi_node = pre_geom.get('sinpsi_node')
+            e1_node = pre_geom.get('e1_node')
+            e2_node = pre_geom.get('e2_node')
+            cospsi_node = pre_geom['cospsi_node']
+            sinpsi_node = pre_geom['sinpsi_node']
+            e1_node = pre_geom['e1_node']
+            e2_node = pre_geom['e2_node']
         if self.add_offset_head:
             if parent_idx is None:
                 raise ValueError("parent_idx is required for geometry-aware class assignment.")
-            if pre_geom is not None:
-                cospsi_node = pre_geom['cospsi_node']
-                sinpsi_node = pre_geom['sinpsi_node']
-            else:
-                cospsi_node, sinpsi_node = compute_branch_angles_parent_centric(
+            if cospsi_node is None or sinpsi_node is None or e1_node is None or e2_node is None:
+                cospsi_node, sinpsi_node, e1_node, e2_node = compute_branch_angles_parent_centric(
                     x[:, :self.pos_dim], parent_idx, self.uhat, eps=self.eps
                 )
             lr_mask = compute_lr_mask_from_angles(parent_idx, cospsi_node, sinpsi_node)
@@ -796,12 +823,18 @@ class SO2_EGNN_Sparse_Network_Geometry_Aware(nn.Module):
         # head
         if class_feature is None:
             raise ValueError("Class feature was not captured; cannot route to multi-head offset decoder.")
+        if e1_node is None or e2_node is None:
+            _, _, e1_node, e2_node = compute_branch_angles_parent_centric(
+                coors, parent_idx, self.uhat, eps=self.eps
+            )
         class_mask = (class_feature > 0.5).unsqueeze(-1)  # True -> head 1, False -> head 0
         head0 = self.offset_head_class0(feats)
         head1 = self.offset_head_class1(feats)
         offset_state = torch.where(class_mask, head1, head0)  # apply class-specific decoder head
-        rel_pred = offset_state[:, :3]
+        coeffs = offset_state[:, :3]
         expansion_pred = offset_state[:, 3:4]
+
+        rel_pred = coeffs[:, 0:1] * e1_node + coeffs[:, 1:2] * e2_node + coeffs[:, 2:3] * self.uhat.view(1, 3)
 
         return {"node_state": x, "rel_pred": rel_pred, "expansion_pred": expansion_pred}
 
@@ -824,7 +857,7 @@ class SO2_EGNN_Sparse_Network_Geometry_Aware(nn.Module):
         if parent_idx is None:
             raise ValueError("parent_idx must be provided for branch angle computation; received None.")
 
-        cospsi_node, sinpsi_node = compute_branch_angles_parent_centric(
+        cospsi_node, sinpsi_node, e1_node, e2_node = compute_branch_angles_parent_centric(
             coors, parent_idx, self.uhat, eps=self.eps
         )
         cospsi_edge, sinpsi_edge = assign_branch_angles_to_edges(
@@ -841,4 +874,6 @@ class SO2_EGNN_Sparse_Network_Geometry_Aware(nn.Module):
             'sinpsi_edge': sinpsi_edge,
             'cospsi_node': cospsi_node,
             'sinpsi_node': sinpsi_node,
+            'e1_node': e1_node,
+            'e2_node': e2_node,
         }
