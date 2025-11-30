@@ -127,17 +127,31 @@ def assign_branch_angles_to_edges(
     cos_edge = torch.zeros((num_edges, 1), device=device, dtype=dtype)
     sin_edge = torch.zeros_like(cos_edge)
 
-    mask_parent_to_child = (parent_idx[dst] == src)
+    parent_src = parent_idx[src]
+    parent_dst = parent_idx[dst]
+
+    mask_parent_to_child = (parent_dst == src)
     if mask_parent_to_child.any():
         child_idx = dst[mask_parent_to_child]
         cos_edge[mask_parent_to_child] = cospsi_node[child_idx]
         sin_edge[mask_parent_to_child] = sinpsi_node[child_idx]
 
-    mask_child_to_parent = (parent_idx[src] == dst)
+    mask_child_to_parent = (parent_src == dst)
     if mask_child_to_parent.any():
         child_idx = src[mask_child_to_parent]
         cos_edge[mask_child_to_parent] = cospsi_node[child_idx]
         sin_edge[mask_child_to_parent] = sinpsi_node[child_idx]
+
+    sibling_mask = (
+        (parent_src == parent_dst)
+        & (parent_src >= 0)
+        & (src != dst)
+        & (~mask_parent_to_child)
+        & (~mask_child_to_parent)
+    )
+    if sibling_mask.any():
+        cos_edge[sibling_mask] = 1.0
+        sin_edge[sibling_mask] = 0.0
 
     return cos_edge, sin_edge
 
@@ -145,6 +159,7 @@ def compute_lr_mask_from_angles(
     parent_idx: torch.Tensor,
     cospsi_node: torch.Tensor,
     sinpsi_node: torch.Tensor,
+    node_height: torch.Tensor,
     tol: float = 1e-6,
 ) -> torch.Tensor:
     """
@@ -163,6 +178,15 @@ def compute_lr_mask_from_angles(
             continue
         s = sinpsi_node[children, 0]
         c = cospsi_node[children, 0]
+
+        parent_is_root = parent_idx[p] < 0
+        if parent_is_root:
+            heights = node_height[children]
+            diff = heights[0] - heights[1]
+            if diff.abs() > tol:
+                idx_left = children[0] if diff > 0 else children[1]
+                lr_mask[idx_left] = True
+                continue
 
         if (s[0] * s[1] < -tol):
             lr_mask[children[0]] = s[0] > 0
@@ -775,7 +799,8 @@ class SO2_EGNN_Sparse_Network_Geometry_Aware(nn.Module):
                 cospsi_node, sinpsi_node, e1_node, e2_node = compute_branch_angles_parent_centric(
                     x[:, :self.pos_dim], parent_idx, self.uhat, eps=self.eps
                 )
-            lr_mask = compute_lr_mask_from_angles(parent_idx, cospsi_node, sinpsi_node)
+            node_height = x[:, :self.pos_dim] @ self.uhat
+            lr_mask = compute_lr_mask_from_angles(parent_idx, cospsi_node, sinpsi_node, node_height)
             class_feature = lr_mask.float()
             x[:, class_feature_idx] = class_feature
 

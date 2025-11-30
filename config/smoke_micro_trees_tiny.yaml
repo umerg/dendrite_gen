@@ -1,7 +1,7 @@
 defaults:
   - _self_
   - dataset: micro_trees_tiny
-  - method: expansion_oneshot
+  - method: expansion_oneshot_augmented
 
 dataset:
   train_size: 100
