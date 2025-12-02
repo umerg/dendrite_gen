@@ -5,7 +5,7 @@ defaults:
 
 reduction:
   mode: "stochastic"
-  cherry_p: 0.8
+  cherry_p: 1.0
   ensure_progress: True
   root: 0
   contract_root: False

@@ -50,6 +50,7 @@ class RandRedDataset(IterableDataset, ABC):
             leaf_expansion=np.ones_like(leaf0_idx, dtype=np.int32),
             parent_idx_1b=parent_idx_1b,
             sibling_order=graph.sibling_order_array,  # NEW
+            total_tree_size=graph.total_nodes,
         )
         data.append(rgd0)
 
@@ -81,6 +82,7 @@ class RandRedDataset(IterableDataset, ABC):
                 leaf_expansion=reduced_graph.leaf_expansion,  # {1,2}
                 parent_idx_1b=parent_idx_1b,
                 sibling_order=reduced_graph.sibling_order_array,  # NEW
+                total_tree_size=reduced_graph.total_nodes,
             )
             data.append(rgd)
 

@@ -61,6 +61,7 @@ class CherryReducer:
         weighted_reduction: bool = False,  # if True, coarsen via Laplacian
         contract_root: bool = True,        # if False, root is never contracted; smallest graph retains root+children
         rng=None,                          # numpy RNG for deterministic sibling order
+        total_nodes: Optional[int] = None,  # track original tree size for downstream bookkeeping
     ):
         # Normalize adjacency to CSR
         # Store adjacency as CSR
@@ -68,6 +69,7 @@ class CherryReducer:
         self.n = self.adj.shape[0]
         self.level = level
         self.weighted_reduction = weighted_reduction
+        self.total_nodes = int(total_nodes) if total_nodes is not None else self.n
 
         # Keep Laplacian only if weighted_reduction requested
         self._lap = None
@@ -132,6 +134,7 @@ class CherryReducer:
                 weighted_reduction=self.weighted_reduction,
                 contract_root=self.contract_root,
                 rng=self.rng,
+                total_nodes=self.total_nodes,
             )
             cr.did_contract = False
             # expose current leaves for completeness (labels default to 1)
@@ -290,6 +293,7 @@ class CherryReducer:
             weighted_reduction=self.weighted_reduction,
             contract_root=self.contract_root,
             rng=self.rng,
+            total_nodes=self.total_nodes,
         )
         next_cr.did_contract = True
 
