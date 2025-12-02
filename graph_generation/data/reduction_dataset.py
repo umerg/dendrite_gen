@@ -21,6 +21,52 @@ class RandRedDataset(IterableDataset, ABC):
         self.adjs = adjs  # list of scipy.sparse adjacency arrays (float64 okay)
         self.poses = poses  # list of np.ndarray, each of shape (n, 3) for 3D positions
 
+    def _build_reduced_graph_data(self, graph, pos):
+        """Helper: convert reducer state into ReducedGraphData."""
+        if graph.leaf_idx is not None:
+            leaf_idx = graph.leaf_idx
+            leaf_mask = graph.leaf_mask
+        else:
+            leaf_idx = np.array(sorted(graph._state.leaves - {graph._state.root}), dtype=np.int64)
+            leaf_mask = np.zeros(graph.n, dtype=bool)
+            if len(leaf_idx) > 0:
+                leaf_mask[leaf_idx] = True
+
+        if graph.leaf_expansion is not None:
+            leaf_expansion = graph.leaf_expansion
+        else:
+            leaf_expansion = np.ones_like(leaf_idx, dtype=np.int32)
+
+        parent_idx = np.array([
+            (graph._state.parent[u] if graph._state.parent[u] is not None else -1) for u in range(graph.n)
+        ], dtype=np.int64)
+        parent_idx_1b = parent_idx + 1
+
+        new_leaf_idx = getattr(graph, "new_leaves_from_next", None)
+        if new_leaf_idx is None:
+            new_leaf_idx = np.empty(0, dtype=np.int64)
+        new_leaf_idx = np.asarray(new_leaf_idx, dtype=np.int64)
+        new_leaf_mask = np.zeros(graph.n, dtype=bool)
+        if new_leaf_idx.size > 0:
+            new_leaf_mask[new_leaf_idx] = True
+
+        adj = graph.adj.astype(bool).astype(np.float32) if sp.sparse.issparse(graph.adj) else graph.adj
+
+        return ReducedGraphData(
+            target_size=graph.n,
+            reduction_level=graph.level,
+            adj=adj,
+            pos=pos,
+            leaf_idx=leaf_idx,
+            leaf_mask=leaf_mask,
+            leaf_expansion=leaf_expansion,
+            parent_idx_1b=parent_idx_1b,
+            sibling_order=graph.sibling_order_array,
+            total_tree_size=graph.total_nodes,
+            new_leaf_idx_from_next=new_leaf_idx,
+            new_leaf_mask_from_next=new_leaf_mask,
+        )
+
     def get_random_reduction_sequence(self, graph, pos, rng):
         """
         Generate one full sequence of (fine -> coarse) steps
@@ -29,63 +75,16 @@ class RandRedDataset(IterableDataset, ABC):
         data = []
 
         pos = pos.astype(np.float32)
-        # G_0: initial graph; leaves from current state; labels = 1
-        leaf0_idx = np.array(sorted(graph._state.leaves - {graph._state.root}), dtype=np.int64)
-        leaf0_mask = np.zeros(graph.n, dtype=bool)
-        if len(leaf0_idx) > 0:
-            leaf0_mask[leaf0_idx] = True
-        # parent indices for initial leaves
-        # Build parent_idx_1b (length N): 1-based parent indices; roots become 0.
-        parent_idx = np.array([
-            (graph._state.parent[u] if graph._state.parent[u] is not None else -1) for u in range(graph.n)
-        ], dtype=np.int64)
-        parent_idx_1b = parent_idx + 1  # shift so root becomes 0
-        rgd0 = ReducedGraphData(
-            target_size=graph.n,
-            reduction_level=graph.level,
-            adj=graph.adj.astype(bool).astype(np.float32) if sp.sparse.issparse(graph.adj) else graph.adj,
-            pos=pos,  # initial positions
-            leaf_idx=leaf0_idx,
-            leaf_mask=leaf0_mask,
-            leaf_expansion=np.ones_like(leaf0_idx, dtype=np.int32),
-            parent_idx_1b=parent_idx_1b,
-            sibling_order=graph.sibling_order_array,  # NEW
-            total_tree_size=graph.total_nodes,
-        )
-        data.append(rgd0)
-
         while True:
             reduced_graph = graph.get_reduced_graph()  # use the reducer's internal RNG
 
-            # Stop if no reduction happened (terminal step)
-            if not reduced_graph.did_contract: # this happens before root is added to the sequence
-                # hence, ensures lowest graph in sequence is root + children
-                break
-            
-            reduced_pos = pos[reduced_graph.survivor_mask]  # update positions to surviving nodes
-
-            # Parent mapping for the reduced graph state
-            parent_idx = np.array([
-                (reduced_graph._state.parent[u] if reduced_graph._state.parent[u] is not None else -1)
-                for u in range(reduced_graph.n)
-            ], dtype=np.int64)
-            parent_idx_1b = parent_idx + 1
-
-            rgd = ReducedGraphData(
-                target_size=reduced_graph.n,
-                reduction_level=reduced_graph.level,
-                adj=reduced_graph.adj.astype(bool).astype(np.float32)
-                    if sp.sparse.issparse(reduced_graph.adj) else reduced_graph.adj,
-                pos=reduced_pos,  # updated positions
-                leaf_idx=reduced_graph.leaf_idx,
-                leaf_mask=reduced_graph.leaf_mask,
-                leaf_expansion=reduced_graph.leaf_expansion,  # {1,2}
-                parent_idx_1b=parent_idx_1b,
-                sibling_order=reduced_graph.sibling_order_array,  # NEW
-                total_tree_size=reduced_graph.total_nodes,
-            )
+            rgd = self._build_reduced_graph_data(graph, pos)
             data.append(rgd)
 
+            if not reduced_graph.did_contract:  # terminal: smallest graph already recorded
+                break
+
+            pos = pos[reduced_graph.survivor_mask]  # update positions to surviving nodes
             graph = reduced_graph  # advance to next level
 
         return data

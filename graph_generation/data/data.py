@@ -21,6 +21,8 @@ class ReducedGraphData(Data):
     Optional fields we now supply:
       - sibling_order:     LongTensor shape [N] with -1 for roots, else 0..k-1
       - total_tree_size:   scalar int giving the node count of the original tree
+      - new_leaf_idx_from_next: LongTensor indices of nodes considered "new leaves" when expanding from next level
+      - new_leaf_mask_from_next: BoolTensor mask aligned with nodes for the above
     """
     def __init__(self, **kwargs):
         super().__init__()
@@ -66,7 +68,7 @@ class ReducedGraphData(Data):
 
     def __inc__(self, key, value, *args, **kwargs):
         # Offset indices correctly when batching
-        if key in ("leaf_idx", "parent_idx_1b"):
+        if key in ("leaf_idx", "parent_idx_1b", "new_leaf_idx_from_next"):
             return self.num_nodes
         return super().__inc__(key, value, *args, **kwargs)
 

@@ -87,6 +87,7 @@ class CherryReducer:
         self.root = root
         self.rng = rng if rng is not None else np.random.default_rng()
         self._state = state if state is not None else self._build_initial_state()
+        self.new_leaves_from_next = np.empty(0, dtype=np.int64)
 
         # Outputs for dataset consumption
         self.survivor_mask = None      # np.ndarray[int64], shape (m,), indices of surviving nodes
@@ -121,6 +122,7 @@ class CherryReducer:
         if not self.contract_root:
             cherries_all = [u for u in cherries_all if u != S.root]
 
+        self.new_leaves_from_next = np.empty(0, dtype=np.int64)
         if not cherries_all or self.n <= 1:
             # No further contraction; return a "no-op" next level
             cr = CherryReducer(
@@ -166,6 +168,11 @@ class CherryReducer:
         removed_leaves: Set[Node] = set()
         for u in chosen_parents:
             removed_leaves.update(S.children[u])
+        if removed_leaves:
+            removed_leaves_arr = np.array(sorted(removed_leaves), dtype=np.int64)
+        else:
+            removed_leaves_arr = np.empty(0, dtype=np.int64)
+        self.new_leaves_from_next = removed_leaves_arr
 
         # Survivors = all nodes except removed leaves (parents survive)
         keep = np.ones(self.n, dtype=bool)

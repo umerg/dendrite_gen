@@ -1,5 +1,7 @@
 Samples: 40000 (leaves=448852), overall frac leaf_expansion=2: 0.3117
 
+New leaves total=252330 overall frac leaf_expansion=2 in new leaves: 0.4411
+
 By reduction level:
   level=   0 | leaves=103596 | frac= 0.0000
   level=   1 | leaves= 82256 | frac= 0.4877
@@ -14,6 +16,20 @@ By reduction level:
   level=  10 | leaves=  1445 | frac= 0.4851
   level=  11 | leaves=   164 | frac= 0.4756
   level=  12 | leaves=    16 | frac= 0.5000
+
+By reduction level (new leaves only):
+  level=   0 | new_leaves= 67776 | frac= 0.0000
+  level=   1 | new_leaves= 47500 | frac= 0.6553
+  level=   2 | new_leaves= 36572 | frac= 0.6148
+  level=   3 | new_leaves= 28398 | frac= 0.5981
+  level=   4 | new_leaves= 22210 | frac= 0.5819
+  level=   5 | new_leaves= 17382 | frac= 0.5692
+  level=   6 | new_leaves= 13806 | frac= 0.5608
+  level=   7 | new_leaves= 11166 | frac= 0.5502
+  level=   8 | new_leaves=  5940 | frac= 0.5392
+  level=   9 | new_leaves=  1408 | frac= 0.5135
+  level=  10 | new_leaves=   156 | frac= 0.5000
+  level=  11 | new_leaves=    16 | frac= 0.5000
 
 By current_n:
   current_n=   3 | leaves=  9420 | frac= 0.5240
@@ -330,3 +346,179 @@ By remaining capacity (total_size - current_n):
   remaining= 368 | leaves=     7 | frac= 0.8571
   remaining= 372 | leaves=     3 | frac= 0.6667
   remaining= 374 | leaves=     2 | frac= 0.5000
+
+By remaining capacity (new leaves only):
+  remaining=   0 | new_leaves= 67776 | frac= 0.0000
+  remaining=   2 | new_leaves=    78 | frac= 0.5000
+  remaining=   4 | new_leaves=   382 | frac= 0.5602
+  remaining=   6 | new_leaves=   742 | frac= 0.5822
+  remaining=   8 | new_leaves=  1198 | frac= 0.5793
+  remaining=  10 | new_leaves=  1752 | frac= 0.5793
+  remaining=  12 | new_leaves=  2636 | frac= 0.5941
+  remaining=  14 | new_leaves=  3018 | frac= 0.6080
+  remaining=  16 | new_leaves=  3288 | frac= 0.5912
+  remaining=  18 | new_leaves=  3876 | frac= 0.5900
+  remaining=  20 | new_leaves=  4050 | frac= 0.6030
+  remaining=  22 | new_leaves=  4314 | frac= 0.5902
+  remaining=  24 | new_leaves=  4768 | frac= 0.6034
+  remaining=  26 | new_leaves=  4556 | frac= 0.6084
+  remaining=  28 | new_leaves=  4496 | frac= 0.5983
+  remaining=  30 | new_leaves=  4508 | frac= 0.6007
+  remaining=  32 | new_leaves=  4796 | frac= 0.6024
+  remaining=  34 | new_leaves=  4704 | frac= 0.6091
+  remaining=  36 | new_leaves=  4748 | frac= 0.6078
+  remaining=  38 | new_leaves=  4640 | frac= 0.6140
+  remaining=  40 | new_leaves=  4452 | frac= 0.6051
+  remaining=  42 | new_leaves=  4288 | frac= 0.6094
+  remaining=  44 | new_leaves=  4338 | frac= 0.6116
+  remaining=  46 | new_leaves=  3714 | frac= 0.6037
+  remaining=  48 | new_leaves=  4076 | frac= 0.6087
+  remaining=  50 | new_leaves=  3738 | frac= 0.6033
+  remaining=  52 | new_leaves=  4004 | frac= 0.6046
+  remaining=  54 | new_leaves=  3422 | frac= 0.6037
+  remaining=  56 | new_leaves=  3220 | frac= 0.6134
+  remaining=  58 | new_leaves=  3638 | frac= 0.6039
+  remaining=  60 | new_leaves=  3446 | frac= 0.6036
+  remaining=  62 | new_leaves=  2906 | frac= 0.6001
+  remaining=  64 | new_leaves=  3192 | frac= 0.5896
+  remaining=  66 | new_leaves=  3168 | frac= 0.6098
+  remaining=  68 | new_leaves=  2648 | frac= 0.6095
+  remaining=  70 | new_leaves=  2420 | frac= 0.5967
+  remaining=  72 | new_leaves=  2716 | frac= 0.6079
+  remaining=  74 | new_leaves=  2872 | frac= 0.6048
+  remaining=  76 | new_leaves=  2316 | frac= 0.6092
+  remaining=  78 | new_leaves=  2218 | frac= 0.5969
+  remaining=  80 | new_leaves=  2712 | frac= 0.6095
+  remaining=  82 | new_leaves=  2060 | frac= 0.5961
+  remaining=  84 | new_leaves=  2302 | frac= 0.6082
+  remaining=  86 | new_leaves=  1884 | frac= 0.6046
+  remaining=  88 | new_leaves=  1878 | frac= 0.6049
+  remaining=  90 | new_leaves=  1684 | frac= 0.6015
+  remaining=  92 | new_leaves=  1756 | frac= 0.5957
+  remaining=  94 | new_leaves=  1764 | frac= 0.6100
+  remaining=  96 | new_leaves=  1542 | frac= 0.6044
+  remaining=  98 | new_leaves=  1508 | frac= 0.6021
+  remaining= 100 | new_leaves=  1398 | frac= 0.5887
+  remaining= 102 | new_leaves=  1586 | frac= 0.6021
+  remaining= 104 | new_leaves=  1512 | frac= 0.6019
+  remaining= 106 | new_leaves=  1490 | frac= 0.6101
+  remaining= 108 | new_leaves=  1486 | frac= 0.6063
+  remaining= 110 | new_leaves=  1168 | frac= 0.6036
+  remaining= 112 | new_leaves=  1156 | frac= 0.5908
+  remaining= 114 | new_leaves=  1384 | frac= 0.6236
+  remaining= 116 | new_leaves=   996 | frac= 0.5813
+  remaining= 118 | new_leaves=  1090 | frac= 0.6119
+  remaining= 120 | new_leaves=  1020 | frac= 0.6108
+  remaining= 122 | new_leaves=   834 | frac= 0.6127
+  remaining= 124 | new_leaves=   948 | frac= 0.6097
+  remaining= 126 | new_leaves=   660 | frac= 0.5939
+  remaining= 128 | new_leaves=  1036 | frac= 0.6014
+  remaining= 130 | new_leaves=   828 | frac= 0.5954
+  remaining= 132 | new_leaves=   962 | frac= 0.6133
+  remaining= 134 | new_leaves=   732 | frac= 0.5847
+  remaining= 136 | new_leaves=   542 | frac= 0.5756
+  remaining= 138 | new_leaves=   488 | frac= 0.6045
+  remaining= 140 | new_leaves=   718 | frac= 0.5864
+  remaining= 142 | new_leaves=   576 | frac= 0.5816
+  remaining= 144 | new_leaves=   582 | frac= 0.5911
+  remaining= 146 | new_leaves=   574 | frac= 0.6045
+  remaining= 148 | new_leaves=   382 | frac= 0.5628
+  remaining= 150 | new_leaves=   588 | frac= 0.6122
+  remaining= 152 | new_leaves=   554 | frac= 0.5866
+  remaining= 154 | new_leaves=   388 | frac= 0.5928
+  remaining= 156 | new_leaves=   478 | frac= 0.6088
+  remaining= 158 | new_leaves=   418 | frac= 0.6411
+  remaining= 160 | new_leaves=   348 | frac= 0.6121
+  remaining= 162 | new_leaves=   340 | frac= 0.6294
+  remaining= 164 | new_leaves=   372 | frac= 0.5941
+  remaining= 166 | new_leaves=   398 | frac= 0.6080
+  remaining= 168 | new_leaves=   248 | frac= 0.5887
+  remaining= 170 | new_leaves=   290 | frac= 0.6276
+  remaining= 172 | new_leaves=   292 | frac= 0.6130
+  remaining= 174 | new_leaves=   198 | frac= 0.6061
+  remaining= 176 | new_leaves=   346 | frac= 0.6272
+  remaining= 178 | new_leaves=   312 | frac= 0.5769
+  remaining= 180 | new_leaves=   394 | frac= 0.6371
+  remaining= 182 | new_leaves=   224 | frac= 0.6116
+  remaining= 184 | new_leaves=   226 | frac= 0.6239
+  remaining= 186 | new_leaves=   262 | frac= 0.5878
+  remaining= 188 | new_leaves=   166 | frac= 0.5422
+  remaining= 190 | new_leaves=   190 | frac= 0.6105
+  remaining= 192 | new_leaves=   114 | frac= 0.6579
+  remaining= 194 | new_leaves=   232 | frac= 0.5819
+  remaining= 196 | new_leaves=   220 | frac= 0.6227
+  remaining= 198 | new_leaves=   114 | frac= 0.6053
+  remaining= 200 | new_leaves=   158 | frac= 0.6519
+  remaining= 202 | new_leaves=   216 | frac= 0.6343
+  remaining= 204 | new_leaves=   254 | frac= 0.6063
+  remaining= 206 | new_leaves=   152 | frac= 0.5987
+  remaining= 208 | new_leaves=   210 | frac= 0.5952
+  remaining= 210 | new_leaves=   140 | frac= 0.5786
+  remaining= 212 | new_leaves=    54 | frac= 0.5926
+  remaining= 214 | new_leaves=   172 | frac= 0.6279
+  remaining= 216 | new_leaves=    96 | frac= 0.5521
+  remaining= 218 | new_leaves=    72 | frac= 0.5278
+  remaining= 220 | new_leaves=   132 | frac= 0.6364
+  remaining= 222 | new_leaves=   168 | frac= 0.5952
+  remaining= 224 | new_leaves=   168 | frac= 0.6310
+  remaining= 226 | new_leaves=   130 | frac= 0.6462
+  remaining= 228 | new_leaves=    88 | frac= 0.6136
+  remaining= 230 | new_leaves=    70 | frac= 0.5571
+  remaining= 232 | new_leaves=    48 | frac= 0.6042
+  remaining= 234 | new_leaves=   124 | frac= 0.5806
+  remaining= 236 | new_leaves=    44 | frac= 0.6364
+  remaining= 238 | new_leaves=    82 | frac= 0.5732
+  remaining= 240 | new_leaves=    76 | frac= 0.6447
+  remaining= 242 | new_leaves=    24 | frac= 0.6667
+  remaining= 244 | new_leaves=    66 | frac= 0.6667
+  remaining= 246 | new_leaves=    66 | frac= 0.5303
+  remaining= 248 | new_leaves=    94 | frac= 0.6277
+  remaining= 250 | new_leaves=    54 | frac= 0.6296
+  remaining= 252 | new_leaves=   122 | frac= 0.6148
+  remaining= 254 | new_leaves=    54 | frac= 0.6296
+  remaining= 256 | new_leaves=    52 | frac= 0.5577
+  remaining= 258 | new_leaves=    20 | frac= 0.6500
+  remaining= 260 | new_leaves=    48 | frac= 0.6250
+  remaining= 262 | new_leaves=    64 | frac= 0.6719
+  remaining= 264 | new_leaves=    92 | frac= 0.5652
+  remaining= 266 | new_leaves=    18 | frac= 0.6667
+  remaining= 268 | new_leaves=    26 | frac= 0.6538
+  remaining= 270 | new_leaves=    34 | frac= 0.6471
+  remaining= 272 | new_leaves=    22 | frac= 0.5455
+  remaining= 274 | new_leaves=    38 | frac= 0.6316
+  remaining= 276 | new_leaves=    88 | frac= 0.6818
+  remaining= 278 | new_leaves=    32 | frac= 0.6562
+  remaining= 280 | new_leaves=    20 | frac= 0.5500
+  remaining= 282 | new_leaves=    42 | frac= 0.5952
+  remaining= 284 | new_leaves=    30 | frac= 0.5667
+  remaining= 286 | new_leaves=    26 | frac= 0.6538
+  remaining= 288 | new_leaves=    16 | frac= 0.5000
+  remaining= 290 | new_leaves=    32 | frac= 0.6562
+  remaining= 292 | new_leaves=    52 | frac= 0.6154
+  remaining= 294 | new_leaves=     6 | frac= 0.5000
+  remaining= 296 | new_leaves=    28 | frac= 0.5714
+  remaining= 298 | new_leaves=    22 | frac= 0.5000
+  remaining= 300 | new_leaves=     4 | frac= 0.5000
+  remaining= 302 | new_leaves=    12 | frac= 0.5000
+  remaining= 304 | new_leaves=     4 | frac= 0.5000
+  remaining= 306 | new_leaves=    44 | frac= 0.5682
+  remaining= 308 | new_leaves=    34 | frac= 0.6765
+  remaining= 310 | new_leaves=    24 | frac= 0.5833
+  remaining= 314 | new_leaves=     4 | frac= 0.5000
+  remaining= 316 | new_leaves=    28 | frac= 0.7143
+  remaining= 318 | new_leaves=    18 | frac= 0.6667
+  remaining= 320 | new_leaves=     4 | frac= 0.5000
+  remaining= 322 | new_leaves=    14 | frac= 0.5714
+  remaining= 324 | new_leaves=    30 | frac= 0.6333
+  remaining= 326 | new_leaves=     8 | frac= 1.0000
+  remaining= 332 | new_leaves=     8 | frac= 0.6250
+  remaining= 336 | new_leaves=    16 | frac= 0.7500
+  remaining= 340 | new_leaves=     4 | frac= 0.7500
+  remaining= 342 | new_leaves=    10 | frac= 0.7000
+  remaining= 344 | new_leaves=    22 | frac= 0.7727
+  remaining= 348 | new_leaves=     2 | frac= 0.5000
+  remaining= 352 | new_leaves=     8 | frac= 0.5000
+  remaining= 360 | new_leaves=    12 | frac= 0.8333
+  remaining= 364 | new_leaves=     4 | frac= 0.5000
+  remaining= 368 | new_leaves=     4 | frac= 0.7500
+  remaining= 372 | new_leaves=     2 | frac= 0.5000

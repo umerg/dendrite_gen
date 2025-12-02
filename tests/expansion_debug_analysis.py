@@ -141,13 +141,51 @@ def update_bins(bins, key, labels: th.Tensor) -> None:
     bucket["two"] += num_twos
 
 
+def extract_new_leaf_labels(data, leaf_labels: th.Tensor) -> th.Tensor | None:
+    new_leaf_mask = getattr(data, "new_leaf_mask_from_next", None)
+    if new_leaf_mask is None:
+        return None
+
+    if isinstance(new_leaf_mask, th.Tensor):
+        node_mask = new_leaf_mask.to(dtype=th.bool)
+    else:
+        node_mask = th.as_tensor(new_leaf_mask, dtype=th.bool)
+
+    if node_mask.numel() == 0 or not node_mask.any():
+        return None
+
+    leaf_idx = getattr(data, "leaf_idx", None)
+    if leaf_idx is None:
+        return None
+    if isinstance(leaf_idx, th.Tensor):
+        leaf_idx_long = leaf_idx.to(dtype=th.long)
+    else:
+        leaf_idx_long = th.as_tensor(leaf_idx, dtype=th.long)
+    if leaf_idx_long.numel() == 0:
+        return None
+
+    max_idx = int(leaf_idx_long.max().item())
+    if max_idx >= node_mask.numel():
+        # Safety guard in case mask length mismatches node count.
+        return None
+
+    new_leaf_mask_for_leaves = node_mask[leaf_idx_long]
+    if new_leaf_mask_for_leaves.numel() == 0 or not new_leaf_mask_for_leaves.any():
+        return None
+    return leaf_labels[new_leaf_mask_for_leaves]
+
+
 def compute_stats(dataloader: DataLoader, num_iterations: int) -> dict:
     by_level = defaultdict(lambda: {"two": 0, "total": 0})
     by_size = defaultdict(lambda: {"two": 0, "total": 0})
     by_remaining_capacity = defaultdict(lambda: {"two": 0, "total": 0})
+    new_by_level = defaultdict(lambda: {"two": 0, "total": 0})
+    new_by_remaining_capacity = defaultdict(lambda: {"two": 0, "total": 0})
     total_samples = 0
     total_leaves = 0
     total_twos = 0
+    total_new_leaves = 0
+    total_new_twos = 0
 
     loader_iter = iter(dataloader)
     for idx in range(num_iterations):
@@ -171,10 +209,18 @@ def compute_stats(dataloader: DataLoader, num_iterations: int) -> dict:
                 total_size = int(total_size_attr.item())
                 remaining_capacity = max(total_size - current_n, 0)
 
+            new_labels = extract_new_leaf_labels(data, labels)
+
             update_bins(by_level, level, labels)
             update_bins(by_size, current_n, labels)
             if remaining_capacity is not None:
                 update_bins(by_remaining_capacity, remaining_capacity, labels)
+            if new_labels is not None and new_labels.numel() > 0:
+                total_new_leaves += int(new_labels.numel())
+                total_new_twos += int((new_labels == 2).sum().item())
+                update_bins(new_by_level, level, new_labels)
+                if remaining_capacity is not None:
+                    update_bins(new_by_remaining_capacity, remaining_capacity, new_labels)
 
         if (idx + 1) % max(1, num_iterations // 10) == 0:
             print(f"[{idx + 1}/{num_iterations}] iterations processed...")
@@ -183,9 +229,13 @@ def compute_stats(dataloader: DataLoader, num_iterations: int) -> dict:
         "by_level": by_level,
         "by_size": by_size,
         "by_remaining_capacity": by_remaining_capacity,
+        "new_by_level": new_by_level,
+        "new_by_remaining_capacity": new_by_remaining_capacity,
         "total_samples": total_samples,
         "total_leaves": total_leaves,
         "total_twos": total_twos,
+        "total_new_leaves": total_new_leaves,
+        "total_new_twos": total_new_twos,
     }
 
 
@@ -237,6 +287,8 @@ def write_logs(output_dir: Path, results: dict, cfg) -> None:
     level_stats = bins_to_sorted_list(results["by_level"])
     size_stats = bins_to_sorted_list(results["by_size"])
     capacity_stats = bins_to_sorted_list(results["by_remaining_capacity"])
+    new_level_stats = bins_to_sorted_list(results["new_by_level"])
+    new_capacity_stats = bins_to_sorted_list(results["new_by_remaining_capacity"])
 
     summary = {
         "config": OmegaConf.to_container(cfg, resolve=True),
@@ -245,12 +297,21 @@ def write_logs(output_dir: Path, results: dict, cfg) -> None:
         "total_samples": results["total_samples"],
         "total_leaves": results["total_leaves"],
         "total_leaf_expansion_two": results["total_twos"],
+        "total_new_leaves": results["total_new_leaves"],
+        "total_new_leaf_expansion_two": results["total_new_twos"],
         "overall_fraction_two": (
             results["total_twos"] / results["total_leaves"] if results["total_leaves"] else 0.0
+        ),
+        "overall_fraction_two_new_leaves": (
+            results["total_new_twos"] / results["total_new_leaves"]
+            if results["total_new_leaves"]
+            else 0.0
         ),
         "fraction_by_reduction_level": level_stats,
         "fraction_by_current_n": size_stats,
         "fraction_by_remaining_capacity": capacity_stats,
+        "fraction_by_reduction_level_new_leaves": new_level_stats,
+        "fraction_by_remaining_capacity_new_leaves": new_capacity_stats,
     }
 
     json_path = output_dir / "leaf_expansion_stats.json"
@@ -264,10 +325,21 @@ def write_logs(output_dir: Path, results: dict, cfg) -> None:
             f"Samples: {summary['total_samples']} (leaves={summary['total_leaves']}), "
             f"overall frac leaf_expansion=2: {summary['overall_fraction_two']:.4f}\n\n"
         )
+        f.write(
+            f"New leaves total={summary['total_new_leaves']} "
+            f"overall frac leaf_expansion=2 in new leaves: "
+            f"{summary['overall_fraction_two_new_leaves']:.4f}\n\n"
+        )
         f.write("By reduction level:\n")
         for entry in level_stats:
             f.write(
                 f"  level={entry['value']:4d} | leaves={entry['total_leaves']:6d} "
+                f"| frac= {entry['fraction_leaf_expansion_two']:.4f}\n"
+            )
+        f.write("\nBy reduction level (new leaves only):\n")
+        for entry in new_level_stats:
+            f.write(
+                f"  level={entry['value']:4d} | new_leaves={entry['total_leaves']:6d} "
                 f"| frac= {entry['fraction_leaf_expansion_two']:.4f}\n"
             )
         f.write("\nBy current_n:\n")
@@ -282,6 +354,12 @@ def write_logs(output_dir: Path, results: dict, cfg) -> None:
                 f"  remaining={entry['value']:4d} | leaves={entry['total_leaves']:6d} "
                 f"| frac= {entry['fraction_leaf_expansion_two']:.4f}\n"
             )
+        f.write("\nBy remaining capacity (new leaves only):\n")
+        for entry in new_capacity_stats:
+            f.write(
+                f"  remaining={entry['value']:4d} | new_leaves={entry['total_leaves']:6d} "
+                f"| frac= {entry['fraction_leaf_expansion_two']:.4f}\n"
+            )
     print(f"Wrote text log to {txt_path}")
 
     save_plot(level_stats, "Reduction level", output_dir / "fraction_by_reduction_level.png")
@@ -290,6 +368,16 @@ def write_logs(output_dir: Path, results: dict, cfg) -> None:
         capacity_stats,
         "Remaining capacity (total tree size - current_n)",
         output_dir / "fraction_by_remaining_capacity.png",
+    )
+    save_plot(
+        new_level_stats,
+        "Reduction level (new leaves only)",
+        output_dir / "fraction_by_reduction_level_new_leaves.png",
+    )
+    save_plot(
+        new_capacity_stats,
+        "Remaining capacity (new leaves only)",
+        output_dir / "fraction_by_remaining_capacity_new_leaves.png",
     )
 
 
