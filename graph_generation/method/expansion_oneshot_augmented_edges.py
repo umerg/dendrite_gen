@@ -111,6 +111,54 @@ class Expansion_OneShot_Augmented(Method):
             edge_types = parent_idx.new_zeros((0,))
         return edge_index, edge_types
     
+    def _graph_target_sizes_from_batch(self, batch, device: th.device) -> th.Tensor | None:
+        """Extract per-graph target sizes from a batched PyG Data object."""
+        target_attr = getattr(batch, "target_size", None)
+        if target_attr is None:
+            return None
+        target_tensor = target_attr if isinstance(target_attr, th.Tensor) else th.as_tensor(target_attr)
+        target_tensor = target_tensor.to(device=device, dtype=th.float32).view(-1)
+        if target_tensor.numel() == 0:
+            return None
+        batch_vec = getattr(batch, "batch", None)
+        if batch_vec is None or batch_vec.numel() == 0:
+            return target_tensor
+        batch_vec = batch_vec.to(device)
+        num_graphs = int(batch_vec.max().item()) + 1
+        if target_tensor.numel() == num_graphs:
+            return target_tensor
+        if target_tensor.numel() == batch_vec.numel():
+            ones = target_tensor.new_ones(batch_vec.size(0))
+            sum_per = scatter(target_tensor, batch_vec, dim=0, dim_size=num_graphs)
+            counts = scatter(ones, batch_vec, dim=0, dim_size=num_graphs).clamp_min(1.0)
+            return sum_per / counts
+        if target_tensor.numel() == 1:
+            return target_tensor.repeat(num_graphs)
+        if target_tensor.numel() > num_graphs:
+            return target_tensor[:num_graphs]
+        pad = target_tensor.new_full((num_graphs - target_tensor.numel(),), target_tensor[-1])
+        return th.cat([target_tensor, pad], dim=0)
+
+    def _size_ratio_feature_from_batch(
+        self,
+        batch,
+        device: th.device,
+        dtype: th.dtype,
+    ) -> th.Tensor | None:
+        """Compute per-node (current_size / target_size) feature for a batch."""
+        batch_vec = getattr(batch, "batch", None)
+        if batch_vec is None or batch_vec.numel() == 0:
+            return None
+        batch_vec = batch_vec.to(device)
+        target_sizes = self._graph_target_sizes_from_batch(batch, device)
+        if target_sizes is None:
+            return None
+        num_graphs = int(target_sizes.numel())
+        ones = target_sizes.new_ones(batch_vec.size(0))
+        graph_counts = scatter(ones, batch_vec, dim=0, dim_size=num_graphs)
+        ratio_graph = graph_counts / target_sizes.clamp_min(1.0)
+        return ratio_graph[batch_vec].to(dtype).unsqueeze(-1)
+    
     def sample_graphs(self, target_size: th.Tensor, model: Module):
         """Generate a batch of graphs starting from one root node per graph.
 
@@ -391,6 +439,14 @@ class Expansion_OneShot_Augmented(Method):
         if leaf_idx_next.numel() == 0:
             return adj_new, pos_new, leaf_idx_next, leaf_idx_next.new_empty((0,), dtype=leaf_expansion.dtype), parent_idx_1b_new, batch_new, sibling_order_next, True
 
+        num_graphs_total = int(target_size.numel())
+        node_counts_per_graph = scatter(
+            th.ones_like(batch_new),
+            batch_new,
+            dim=0,
+            dim_size=num_graphs_total,
+        )
+
         # ----- POSITION REFINEMENT FOR LEAVES & NEXT EXPANSION PREDICTION -----
 
         # 10) Model forward to refine child positions & predict next expansion states
@@ -408,6 +464,19 @@ class Expansion_OneShot_Augmented(Method):
                 sib_is_left = (so == 0).float().unsqueeze(-1)
                 sib_is_left = th.where(so.unsqueeze(-1) >= 0, sib_is_left, sib_is_left.new_zeros(sib_is_left.shape))
                 features.append(sib_is_left)
+                feats_used += 1
+            # feature 2: indicator for freshly created leaves this step
+            if feats_used < feats_dim:
+                new_leaf_flag = pos_new.new_zeros((pos_new.size(0), 1))
+                new_leaf_flag[leaf_idx_next] = 1.0
+                features.append(new_leaf_flag)
+                feats_used += 1
+            # feature 3: per-node size ratio (current size / target size)
+            if feats_used < feats_dim:
+                target_size_float = target_size.to(pos_new.dtype)
+                ratio_graph = node_counts_per_graph.to(pos_new.dtype) / target_size_float.clamp_min(1.0)
+                ratio_nodes = ratio_graph[batch_new].unsqueeze(-1)
+                features.append(ratio_nodes)
                 feats_used += 1
             if feats_used < feats_dim:
                 features.append(pos_new.new_zeros((pos_new.size(0), feats_dim - feats_used)))
@@ -442,8 +511,7 @@ class Expansion_OneShot_Augmented(Method):
         leaf_expansion_next = (expansion_prob > map_threshold).long() + 1
 
         # 11) Termination condition for next step
-        size_per_graph_new = scatter(th.ones_like(batch_new), batch_new)
-        remaining_capacity_new = target_size.to(device) - size_per_graph_new
+        remaining_capacity_new = target_size.to(device) - node_counts_per_graph
         terminated = (remaining_capacity_new < 2).all() or leaf_idx_next.numel() == 0
 
         return adj_new, pos_new, leaf_idx_next, leaf_expansion_next, parent_idx_1b_new, batch_new, sibling_order_next, terminated
@@ -772,7 +840,35 @@ class Expansion_OneShot_Augmented(Method):
                         logger.warning("Unequal number of left/right siblings in batch; check data integrity.")
                 features.append(sib_is_left)
                 feats_used += 1
-            
+
+            # Add indicator for nodes marked as newly expanded leaves (when provided)
+            if hasattr(batch, "new_leaf_mask_from_next") and feats_used < feats_dim:
+                new_mask = batch.new_leaf_mask_from_next
+                if isinstance(new_mask, th.Tensor):
+                    new_mask_tensor = new_mask.to(pos_in.device, dtype=pos_in.dtype)
+                else:
+                    new_mask_tensor = pos_in.new_tensor(new_mask, dtype=pos_in.dtype)
+                new_mask_tensor = new_mask_tensor.view(-1)
+                if new_mask_tensor.numel() != pos_in.size(0):
+                    aligned = pos_in.new_zeros(pos_in.size(0))
+                    count = min(new_mask_tensor.numel(), pos_in.size(0))
+                    if count > 0:
+                        aligned[:count] = new_mask_tensor[:count]
+                    new_mask_tensor = aligned
+                features.append(new_mask_tensor.unsqueeze(-1))
+                feats_used += 1
+
+            # Graph size ratio feature per node (current size / target size)
+            if feats_used < feats_dim:
+                size_ratio = self._size_ratio_feature_from_batch(
+                    batch=batch,
+                    device=pos_in.device,
+                    dtype=pos_in.dtype,
+                )
+                if size_ratio is not None:
+                    features.append(size_ratio)
+                    feats_used += 1
+
             # Fill remaining dimensions with zeros if needed
             if feats_used < feats_dim:
                 extra = pos_in.new_zeros((pos_in.size(0), feats_dim - feats_used))
