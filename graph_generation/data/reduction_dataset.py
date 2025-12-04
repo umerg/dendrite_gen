@@ -21,7 +21,7 @@ class RandRedDataset(IterableDataset, ABC):
         self.adjs = adjs  # list of scipy.sparse adjacency arrays (float64 okay)
         self.poses = poses  # list of np.ndarray, each of shape (n, 3) for 3D positions
 
-    def _build_reduced_graph_data(self, graph, pos):
+    def _build_reduced_graph_data(self, graph, pos, forced_new_leaf_idx=None):
         """Helper: convert reducer state into ReducedGraphData."""
         if graph.leaf_idx is not None:
             leaf_idx = graph.leaf_idx
@@ -42,10 +42,13 @@ class RandRedDataset(IterableDataset, ABC):
         ], dtype=np.int64)
         parent_idx_1b = parent_idx + 1
 
-        new_leaf_idx = getattr(graph, "new_leaves_from_next", None)
-        if new_leaf_idx is None:
-            new_leaf_idx = np.empty(0, dtype=np.int64)
-        new_leaf_idx = np.asarray(new_leaf_idx, dtype=np.int64)
+        if forced_new_leaf_idx is not None:
+            new_leaf_idx = np.asarray(forced_new_leaf_idx, dtype=np.int64)
+        else:
+            new_leaf_idx = getattr(graph, "new_leaves_from_next", None)
+            if new_leaf_idx is None:
+                new_leaf_idx = np.empty(0, dtype=np.int64)
+            new_leaf_idx = np.asarray(new_leaf_idx, dtype=np.int64)
         new_leaf_mask = np.zeros(graph.n, dtype=bool)
         if new_leaf_idx.size > 0:
             new_leaf_mask[new_leaf_idx] = True
@@ -78,7 +81,14 @@ class RandRedDataset(IterableDataset, ABC):
         while True:
             reduced_graph = graph.get_reduced_graph()  # use the reducer's internal RNG
 
-            rgd = self._build_reduced_graph_data(graph, pos)
+            forced_new = None
+            if not reduced_graph.did_contract:
+                root = graph._state.root
+                children = graph._state.children.get(root, []) if root is not None else []
+                if children:
+                    forced_new = np.array(children, dtype=np.int64)
+
+            rgd = self._build_reduced_graph_data(graph, pos, forced_new_leaf_idx=forced_new)
             data.append(rgd)
 
             if not reduced_graph.did_contract:  # terminal: smallest graph already recorded
