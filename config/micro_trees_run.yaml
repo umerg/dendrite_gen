@@ -1,11 +1,11 @@
 defaults:
   - _self_
   - dataset: micro_trees
-  - method: expansion_oneshot
+  - method: expansion_oneshot_augmented
 
 reduction:
   mode: "stochastic"
-  cherry_p: 0.8
+  cherry_p: 1.0
   ensure_progress: True
   root: 0
   contract_root: False
@@ -37,7 +37,7 @@ validation:
 testing: False # if True, only evaluate on test set
 
 model:
-  name: egnn
+  name: egnn_multihead
   num_layers: 6
   feats_dim: 32
   m_dim: 32
@@ -55,7 +55,7 @@ ema:
   gamma: 1.0
   power: 1.0
 
-name: micro_trees_run_1
+name: micro_trees_run_2
 debugging: False
 debugging_max_batches: 1
 debugging_dir: "micro_trees_debug"
