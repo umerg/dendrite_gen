@@ -144,3 +144,12 @@ dataloading_tests/
 debug_graphs/
 expansion_test_plots/
 expansion_debug_test/
+
+# weights
+
+*.pt
+*.pth
+
+# artifacts
+
+sampling_experiments/artifacts/

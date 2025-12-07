@@ -1,0 +1,6 @@
+# Placeholder config for interactive sampling overrides.
+# TODO: populate with Hydra-compatible defaults mirroring main config.
+method:
+  name: expansion
+model:
+  name: egnn
