@@ -102,6 +102,13 @@ def _plot_sequence(sequence: Sequence, out_dir: Path, plt) -> None:
     for idx, data in enumerate(sequence):
         positions = _to_numpy(data.pos)
         new_leaf_mask = _to_numpy(data.new_leaf_mask_from_next).astype(bool)
+        leaf_mask_raw = getattr(data, "leaf_mask", None)
+        leaf_mask = _to_numpy(leaf_mask_raw).astype(bool) if leaf_mask_raw is not None else np.zeros(
+            positions.shape[0], dtype=bool
+        )
+        if leaf_mask.shape[0] != positions.shape[0]:
+            # Leaf mask should align with positions; fall back to empty mask if not.
+            leaf_mask = np.zeros(positions.shape[0], dtype=bool)
         parent_idx = _to_numpy(data.parent_idx_1b).astype(np.int64) - 1
         root_mask = parent_idx == -1
         edges = _edges_from_adj(data.adj)
@@ -116,14 +123,17 @@ def _plot_sequence(sequence: Sequence, out_dir: Path, plt) -> None:
 
         colors = np.full(positions.shape[0], "steelblue", dtype=object)
         sizes = np.full(positions.shape[0], 25, dtype=np.float64)
+        colors[leaf_mask] = "#2ca02c"
+        sizes[leaf_mask] = 45
         colors[new_leaf_mask] = "crimson"
-        sizes[new_leaf_mask] = 60
+        sizes[new_leaf_mask] = 65
         colors[root_mask] = "gold"
         sizes[root_mask] = 90
         ax.scatter(positions[:, 0], positions[:, 1], positions[:, 2], c=colors, s=sizes)
 
         ax.set_title(
-            f"Level {int(_to_numpy(data.reduction_level))} | N={positions.shape[0]} | new={int(new_leaf_mask.sum())}"
+            f"Level {int(_to_numpy(data.reduction_level))} | N={positions.shape[0]}"
+            f" | leaves={int(leaf_mask.sum())} | new={int(new_leaf_mask.sum())}"
         )
         ax.set_xticks([])
         ax.set_yticks([])

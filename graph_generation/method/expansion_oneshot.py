@@ -142,6 +142,139 @@ class Expansion_OneShot(Method):
         ratio_graph = graph_counts / target_sizes.clamp_min(1.0)
         ratio_nodes = ratio_graph[batch_vec].to(dtype).unsqueeze(-1)
         return ratio_nodes
+
+    @staticmethod
+    def _global_inplane_basis(uhat: th.Tensor, eps: float = 1e-8) -> tuple[th.Tensor, th.Tensor]:
+        ref = th.tensor([1.0, 0.0, 0.0], dtype=uhat.dtype, device=uhat.device)
+        ref_proj = ref - (ref @ uhat) * uhat
+        if ref_proj.norm() <= eps:
+            ref = th.tensor([0.0, 1.0, 0.0], dtype=uhat.dtype, device=uhat.device)
+            ref_proj = ref - (ref @ uhat) * uhat
+        e1 = ref_proj / (ref_proj.norm() + eps)
+        e2 = th.cross(uhat, e1)
+        e2 = e2 / (e2.norm() + eps)
+        return e1, e2
+
+    def _compute_geo_lr_mask(
+        self,
+        pos: th.Tensor,
+        parent_idx: th.Tensor,
+        eps: float = 1e-8,
+        tol: float = 1e-6,
+    ) -> th.Tensor:
+        """Return boolean mask marking the geometrically-defined left child per parent."""
+        if pos.numel() == 0:
+            return pos.new_zeros((0,), dtype=th.bool)
+        device = pos.device
+        dtype = pos.dtype
+        N = pos.size(0)
+        parent = parent_idx.to(device=device)
+        has_parent = parent >= 0
+
+        gp = parent.new_full((N,), -1)
+        if has_parent.any():
+            parents = parent[has_parent]
+            gp_values = parent.new_full((parents.numel(),), -1)
+            positive_mask = parents >= 0
+            if positive_mask.any():
+                gp_values[positive_mask] = parent[parents[positive_mask]].clamp(min=-1)
+            gp[has_parent] = gp_values
+
+        uhat = pos.new_zeros((pos.size(1),), dtype=dtype)
+        uhat[-1] = 1.0
+        global_e1, _ = self._global_inplane_basis(uhat, eps=eps)
+        uhat_vec = uhat.view(1, -1)
+
+        v_in = th.zeros((N, pos.size(1)), device=device, dtype=dtype)
+        has_gp_mask = gp >= 0
+        if has_gp_mask.any():
+            sel = has_gp_mask.nonzero(as_tuple=False).flatten()
+            v_in[sel] = pos[parent[sel]] - pos[gp[sel]]
+        fallback_mask = has_parent & ~has_gp_mask
+        if fallback_mask.any():
+            v_in[fallback_mask] = global_e1.view(1, -1)
+
+        v_out = th.zeros((N, pos.size(1)), device=device, dtype=dtype)
+        if has_parent.any():
+            sel = has_parent.nonzero(as_tuple=False).flatten()
+            v_out[sel] = pos[sel] - pos[parent[sel]]
+
+        du_in = (v_in * uhat_vec).sum(dim=-1, keepdim=True)
+        du_out = (v_out * uhat_vec).sum(dim=-1, keepdim=True)
+        v_in_perp = v_in - du_in * uhat_vec
+        v_out_perp = v_out - du_out * uhat_vec
+
+        nin = v_in_perp.norm(dim=-1, keepdim=True)
+        nout = v_out_perp.norm(dim=-1, keepdim=True)
+        v_in_unit = v_in_perp / (nin + eps)
+        degenerate = (nin <= eps) | (~has_parent).view(-1, 1)
+        if degenerate.any():
+            v_in_unit = v_in_unit.clone()
+            v_in_unit[degenerate.squeeze(-1)] = global_e1
+        v_out_unit = v_out_perp / (nout + eps)
+
+        cospsi = (v_in_unit * v_out_unit).sum(dim=-1, keepdim=True)
+        cross = th.cross(v_in_unit, v_out_unit, dim=-1)
+        sinpsi = (cross * uhat_vec).sum(dim=-1, keepdim=True)
+        mask = has_parent.view(-1, 1)
+        cospsi = th.where(mask, cospsi, cospsi.new_ones(cospsi.shape))
+        sinpsi = th.where(mask, sinpsi, sinpsi.new_zeros(sinpsi.shape))
+
+        lr_mask = th.zeros((N,), dtype=th.bool, device=device)
+        unique_parents = parent.unique()
+        for p in unique_parents.tolist():
+            if p < 0:
+                continue
+            child_idx = (parent == p).nonzero(as_tuple=False).flatten()
+            if child_idx.numel() != 2:
+                continue
+            s = sinpsi[child_idx, 0]
+            c = cospsi[child_idx, 0]
+            if (s[0] * s[1] < -tol):
+                lr_mask[child_idx[0]] = bool(s[0] > 0)
+                lr_mask[child_idx[1]] = bool(s[1] > 0)
+            else:
+                theta = th.atan2(s, c)
+                idx_left = child_idx[int(th.argmax(theta))]
+                lr_mask[idx_left] = True
+
+        if getattr(self, "debug", False):
+            for p in unique_parents.tolist():
+                if p < 0:
+                    continue
+                child_idx = (parent == p).nonzero(as_tuple=False).flatten()
+                if child_idx.numel() != 2:
+                    continue
+                left_count = int(lr_mask[child_idx].sum().item())
+                if left_count != 1:
+                    logger.warning(f"[GeoLR] Parent {p} has {left_count} left assignments (expected 1).")
+
+        return lr_mask
+
+    def _select_training_leaf_indices(self, batch) -> th.Tensor:
+        """Return indices of leaves that should contribute to masking/loss."""
+        base = getattr(batch, "leaf_idx", None)
+        if base is None:
+            raise ValueError("Expected batch.leaf_idx to select leaves for training.")
+        candidate = getattr(batch, "new_leaf_idx_from_next", None)
+        if candidate is None:
+            return base
+        if isinstance(candidate, th.Tensor):
+            new_idx = candidate.to(device=base.device, dtype=base.dtype)
+        else:
+            new_idx = th.as_tensor(candidate, device=base.device, dtype=base.dtype)
+        if new_idx.numel() == 0:
+            return new_idx
+        leaf_mask = getattr(batch, "leaf_mask", None)
+        if leaf_mask is not None:
+            if isinstance(leaf_mask, th.Tensor):
+                lm = leaf_mask.to(device=new_idx.device)
+                if lm.dtype != th.bool:
+                    lm = lm.bool()
+                valid = lm[new_idx]
+                if not valid.all():
+                    new_idx = new_idx[valid]
+        return new_idx
     
     def sample_graphs(self, target_size: th.Tensor, model: Module):
         """Generate a batch of graphs starting from one root node per graph.
@@ -643,42 +776,6 @@ class Expansion_OneShot(Method):
           - "node_state": [N, pos_dim + feats_dim]
           - "rel_pred"  : [N, 3]  (predicted parent-relative offsets for ALL nodes)
         """
-        
-        # --- DEBUG: Print detailed batch information ---
-        if getattr(self, 'debug', False):
-            print(f"\n[BatchDebug] step={self._debug_step} ============================")
-            print(f"[BatchDebug] Batch attributes: {[attr for attr in dir(batch) if not attr.startswith('_')]}")
-            
-            if hasattr(batch, 'batch'):
-                unique_graphs = batch.batch.unique().tolist()
-                print(f"[BatchDebug] Graphs in batch: {unique_graphs} (total: {len(unique_graphs)})")
-                for g_id in unique_graphs:
-                    mask = (batch.batch == g_id)
-                    print(f"[BatchDebug] Graph {g_id}: {mask.sum().item()} nodes")
-            
-            if hasattr(batch, 'pos'):
-                print(f"[BatchDebug] pos.shape: {batch.pos.shape}, dtype: {batch.pos.dtype}")
-                print(f"[BatchDebug] pos range: [{batch.pos.min().item():.4f}, {batch.pos.max().item():.4f}]")
-            
-            if hasattr(batch, 'adj'):
-                print(f"[BatchDebug] adj.shape: {batch.adj.sizes()}, nnz: {batch.adj.nnz()}")
-            
-            if hasattr(batch, 'leaf_idx'):
-                print(f"[BatchDebug] leaf_idx: {batch.leaf_idx.tolist()} (count: {len(batch.leaf_idx)})")
-            
-            if hasattr(batch, 'leaf_expansion'):
-                print(f"[BatchDebug] leaf_expansion: {batch.leaf_expansion.tolist()}")
-                expansion_counts = {}
-                for exp in batch.leaf_expansion.tolist():
-                    expansion_counts[exp] = expansion_counts.get(exp, 0) + 1
-                print(f"[BatchDebug] expansion counts: {expansion_counts}")
-            
-            if hasattr(batch, 'parent_idx_1b'):
-                print(f"[BatchDebug] parent_idx_1b: {batch.parent_idx_1b.tolist()}")
-                root_mask = (batch.parent_idx_1b == 0)
-                print(f"[BatchDebug] Root nodes (parent_idx_1b==0): {th.nonzero(root_mask, as_tuple=False).flatten().tolist()}")
-            
-            print(f"[BatchDebug] ==========================================\n")
 
         # --- parent indices (1-based in Data for safe batching) -> shift back to 0-based with -1 for roots
         if not hasattr(batch, "parent_idx_1b"):
@@ -692,117 +789,42 @@ class Expansion_OneShot(Method):
         # --- tracking of leaves
         if not hasattr(batch, "leaf_idx"):
             raise ValueError("Expected batch.leaf_idx (leaf node indices). Please update dataloader.")
-        
+        leaf_idx_all = batch.leaf_idx
+
         # --- expansion state for leaves
         if not hasattr(batch, "leaf_expansion"):
             raise ValueError("Expected batch.leaf_expansion (leaf expansion states). Please update dataloader.")
-        leaf_expansion = batch.leaf_expansion - 1       # [L] in {0,1}
-        # leaf_expansion = leaf_expansion.float() * 2 - 1 # map to {-1,1} for regression
+        leaf_expansion_all = batch.leaf_expansion - 1       # [L_total] in {0,1}
 
-        # derive leaf -> parent mapping from global parent_idx
-        leaf_parent_idx = parent_idx[batch.leaf_idx]
-        assert (leaf_parent_idx >= 0).all(), "Leaf with no valid parent encountered."
+        leaf_idx_train = self._select_training_leaf_indices(batch)
+        if leaf_idx_train.numel() == 0:
+            leaf_parent_idx = parent_idx.new_empty((0,), dtype=parent_idx.dtype)
+        else:
+            leaf_parent_idx = parent_idx[leaf_idx_train]
+            assert (leaf_parent_idx >= 0).all(), "Leaf with no valid parent encountered."
+
+        # map per-node expansion labels so new leaves can be indexed directly
+        leaf_targets_per_node = leaf_expansion_all.new_full((pos_gt.size(0),), -1)
+        if leaf_idx_all.numel() > 0:
+            leaf_targets_per_node[leaf_idx_all] = leaf_expansion_all.view(-1)
+        leaf_expansion = leaf_targets_per_node[leaf_idx_train]
+        if leaf_expansion.numel() > 0:
+            valid_mask = leaf_expansion >= 0
+            if not valid_mask.all():
+                leaf_idx_train = leaf_idx_train[valid_mask]
+                leaf_parent_idx = leaf_parent_idx[valid_mask]
+                leaf_expansion = leaf_expansion[valid_mask]
 
         # --- prepare masked input positions for leaves
         pos_in = self._make_masked_positions(
             pos=pos_gt,
-            leaf_idx=batch.leaf_idx,
+            leaf_idx=leaf_idx_train,
             leaf_parent_idx=leaf_parent_idx,
             sigma=self.leaf_noise_sigma,
             clip=self.leaf_noise_clip,
         )                                              # [N,3]
-
-        # --- Enhanced debug plotting (GT vs masked) with root/leaf coloring ---
-        if getattr(self, 'debug', False):
-            from utils.debug_helpers import plot_gt_and_masked_enhanced  # enhanced plotting function
-            batch_vec = batch.batch if hasattr(batch, 'batch') else None
-            if batch_vec is not None:
-                unique_graphs = batch_vec.unique().tolist()
-                plotted = 0
-                for b_id in unique_graphs:
-                    if plotted >= self.debug_max_batches:
-                        break
-                    node_mask = (batch_vec == b_id)
-                    if node_mask.sum() == 0:
-                        continue
-                    try:
-                        sub_indices = node_mask.nonzero(as_tuple=False).flatten()
-                        pos_gt_sub = pos_gt[sub_indices]
-                        pos_in_sub = pos_in[sub_indices]
-                        
-                        # Enhanced debug info for this graph
-                        print(f"[PlotDebug] Graph {b_id}: processing {sub_indices.numel()} nodes")
-                        print(f"[PlotDebug] Graph {b_id} node indices: {sub_indices.tolist()}")
-                        
-                        row, col, val = batch.adj.coo()
-                        keep = node_mask[row] & node_mask[col]
-                        row_sub = row[keep]
-                        col_sub = col[keep]
-                        val_sub = val[keep]
-                        
-                        print(f"[PlotDebug] Graph {b_id}: {len(row_sub)} edges after filtering")
-                        
-                        import torch as _t
-                        from torch_sparse import SparseTensor as _ST
-                        mapping = {int(gidx.item()): i for i, gidx in enumerate(sub_indices)}
-                        
-                        # Reindex edges
-                        try:
-                            if row_sub.numel() == 0:
-                                row_mapped = _t.empty((0,), dtype=_t.long, device=row_sub.device)
-                                col_mapped = _t.empty((0,), dtype=_t.long, device=row_sub.device)
-                                val_mapped = _t.empty((0,), dtype=val_sub.dtype, device=val_sub.device)
-                            else:
-                                row_mapped = _t.tensor([mapping[int(r.item())] for r in row_sub], device=row_sub.device, dtype=_t.long)
-                                col_mapped = _t.tensor([mapping[int(c.item())] for c in col_sub], device=col_sub.device, dtype=_t.long)
-                                val_mapped = val_sub
-                        except KeyError as ke:
-                            logger.warning(f"Reindex KeyError graph={b_id}: {ke}; skipping plot")
-                            continue
-                            
-                        # Build sparse tensor safely
-                        adj_sub = _ST(row=row_mapped, col=col_mapped, value=val_mapped, sparse_sizes=(sub_indices.numel(), sub_indices.numel()))
-                        
-                        # Enhanced node type identification
-                        leaf_global = set(batch.leaf_idx.tolist())
-                        leaf_local_idx = [mapping[gidx] for gidx in sub_indices.tolist() if gidx in leaf_global]
-                        
-                        # Find root nodes (parent_idx_1b == 0)
-                        root_global = set(th.nonzero(batch.parent_idx_1b == 0, as_tuple=False).flatten().tolist())
-                        root_local_idx = [mapping[gidx] for gidx in sub_indices.tolist() if gidx in root_global]
-                        
-                        # Build expansion mapping
-                        leaf_expansion_map = {}
-                        for g_leaf, lab in zip(batch.leaf_idx.tolist(), batch.leaf_expansion.tolist()):
-                            if g_leaf in mapping:
-                                leaf_expansion_map[mapping[g_leaf]] = lab
-                        leaf_expansion_local = [leaf_expansion_map[i] for i in leaf_local_idx]
-                        
-                        print(f"[PlotDebug] Graph {b_id}: roots={root_local_idx}, leaves={leaf_local_idx}")
-                        print(f"[PlotDebug] Graph {b_id}: leaf_expansion={leaf_expansion_local}")
-                        
-                        gt_file, masked_file = plot_gt_and_masked_enhanced(
-                            adj_sub,
-                            pos_gt_sub,
-                            pos_in_sub,
-                            self.debug_dir,
-                            prefix=f"trainstep{self._debug_step}",
-                            step=self._debug_step,
-                            batch_id=b_id,
-                            leaf_local_idx=leaf_local_idx,
-                            leaf_expansion=leaf_expansion_local,
-                            root_local_idx=root_local_idx,
-                        )
-                        logger.info(
-                            f"[ExpansionDebug] step={self._debug_step} graph={b_id} nodes={sub_indices.numel()} roots={len(root_local_idx)} leaves={len(leaf_local_idx)} saved: {gt_file.name}, {masked_file.name}"
-                        )
-                        plotted += 1
-                    except Exception as e_plot:
-                        import traceback, sys
-                        tb = ''.join(traceback.format_exception(type(e_plot), e_plot, e_plot.__traceback__))
-                        logger.error(f"Plot failure step={self._debug_step} graph={b_id}: {e_plot}\n{tb}")
-                self._debug_step += 1
-
+        geo_lr_mask = self._compute_geo_lr_mask(pos_gt, parent_idx)
+         
         # --- prepare EGNN input (positions + minimal node features)
         feats_dim = getattr(model, 'feats_dim', 0)
         pos_dim   = getattr(model, 'pos_dim', 3)
@@ -814,18 +836,10 @@ class Expansion_OneShot(Method):
             features = [is_leaf]
             feats_used = 1
 
-            # Add sibling order as binary feature for left child in binary trees
-            if hasattr(batch, "sibling_order") and feats_used < feats_dim:
-                so = batch.sibling_order.to(pos_in.device)
-                sib_is_left = (so == 0).float().unsqueeze(-1)
-                # Clamp roots (-1) to 0 for network stability as specified
-                sib_is_left = th.where(so.unsqueeze(-1) >= 0, sib_is_left, th.zeros_like(sib_is_left))
-
-                # check that number of left siblings == number of right siblings
-                if getattr(self, 'debug', False):
-                    if (so == 0).sum().item() != (so == 1).sum().item():
-                        logger.warning("Unequal number of left/right siblings in batch; check data integrity.")
-                features.append(sib_is_left)
+            # Geometry-derived left/right bit for siblings
+            if feats_used < feats_dim:
+                geo_left = geo_lr_mask.to(device=pos_in.device, dtype=pos_in.dtype).unsqueeze(-1)
+                features.append(geo_left)
                 feats_used += 1
 
             # Add indicator for nodes flagged as newly expanded leaves (when provided)
@@ -884,25 +898,22 @@ class Expansion_OneShot(Method):
         else:
             raise ValueError("Network must return a dict with 'rel_pred' and 'expansion_pred'.")
 
-        leaf_idx = batch.leaf_idx
-        pred_rel = pred_rel_all[leaf_idx]                           # [L,3]
-        pred_expansion = pred_expansion_all[leaf_idx]               # [L,1] or [L]
+        pred_rel = pred_rel_all[leaf_idx_train]                           # [L,3]
+        pred_expansion = pred_expansion_all[leaf_idx_train]               # [L,1] or [L]
 
         # -- target relative offsets from parents for leaves
-        tgt_rel  = self._leaf_rel_targets(pos_gt, leaf_idx, leaf_parent_idx)  # [L,3]
-
-        # step_norm_gt   = tgt_rel.norm(dim=-1)      # [L]
-        # step_norm_pred = pred_rel.norm(dim=-1)     # [L]
-        # # print statistics
-        # print(f"[LossDebug] step_norm_gt: mean={step_norm_gt.mean().item():.4f} std={step_norm_gt.std().item():.4f} min={step_norm_gt.min().item():.4f} max={step_norm_gt.max().item():.4f}")
-        # print(f"[LossDebug] step_norm_pred: mean={step_norm_pred.mean().item():.4f} std={step_norm_pred.std().item():.4f} min={step_norm_pred.min().item():.4f} max={step_norm_pred.max().item():.4f}")
-        # print(f"[LossDebug] step_norm_diff: mean={(step_norm_pred - step_norm_gt).mean().item():.4f} std={(step_norm_pred - step_norm_gt).std().item():.4f} min={(step_norm_pred - step_norm_gt).min().item():.4f} max={(step_norm_pred - step_norm_gt).max().item():.4f}")
-        # print(f"Number of leaves: {leaf_idx.numel()}")
+        tgt_rel  = self._leaf_rel_targets(pos_gt, leaf_idx_train, leaf_parent_idx)  # [L,3]
 
         # --- loss
         if pred_rel.numel() == 0:
             loss = pred_rel_all.sum() * 0.0
-            metrics = {"leaf_pos_loss": 0.0, "leaf_expansion_loss": 0.0, "cumulative_loss": 0.0, "num_leaves": 0}
+            metrics = {
+                "leaf_pos_loss": 0.0,
+                "leaf_expansion_loss": 0.0,
+                "cumulative_loss": 0.0,
+                "num_leaves": int(leaf_idx_train.numel()),
+                "num_total_leaves": int(leaf_idx_all.numel()),
+            }
             return loss, metrics
 
         # Positional loss on leaves (matching optional)
@@ -927,8 +938,8 @@ class Expansion_OneShot(Method):
         )
         # --- sibling distance regularizer (prevents siblings collapsing) ---
         sibling_dist_loss = pred_rel.sum() * 0.0  # zero default
-        if self.sibling_loss_weight > 0.0 and leaf_idx.numel() > 1:
-            abs_gt_all = pos_gt[leaf_idx]
+        if self.sibling_loss_weight > 0.0 and leaf_idx_train.numel() > 1:
+            abs_gt_all = pos_gt[leaf_idx_train]
             parent_pos_in_all = pos_in[leaf_parent_idx]
             abs_pred_all = parent_pos_in_all + pred_rel
             unique_parents, inverse, counts = leaf_parent_idx.unique(
@@ -964,7 +975,8 @@ class Expansion_OneShot(Method):
             "leaf_expansion_loss": float(leaf_expansion_loss.item()),
             "sibling_dist_loss": float(sibling_dist_loss.item()),
             "cumulative_loss": float(loss.item()),
-            "num_leaves": int(leaf_idx.numel()),
+            "num_leaves": int(leaf_idx_train.numel()),
+            "num_total_leaves": int(leaf_idx_all.numel()),
             # "abs_pred_mean_norm": float(abs_pred.norm(dim=-1).mean().item()),
         }
         return loss, metrics
