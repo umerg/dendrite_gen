@@ -1,7 +1,11 @@
 defaults:
   - _self_
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
   - dataset: tree
+=======
+  - dataset: single_tree
+>>>>>>> Stashed changes
 =======
   - dataset: single_tree
 >>>>>>> Stashed changes
@@ -60,7 +64,11 @@ ema:
   power: 1.0
 
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
 name: expansion_prob_improvement_run_w_sibling_edge
+=======
+name: geo_method_single_tree
+>>>>>>> Stashed changes
 =======
 name: geo_method_single_tree
 >>>>>>> Stashed changes
