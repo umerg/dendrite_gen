@@ -1,6 +1,10 @@
 defaults:
   - _self_
+<<<<<<< Updated upstream
   - dataset: tree
+=======
+  - dataset: single_tree
+>>>>>>> Stashed changes
   - method: expansion_oneshot
 
 reduction:
@@ -27,7 +31,7 @@ training:
   scheduler_eta_min: 1.0e-8          # Optional: minimum learning rate
 
 validation:
-  batch_size: 100
+  batch_size: 1
   interval: 50
   first_step: 0
   per_graph_size: False
@@ -37,7 +41,7 @@ validation:
 testing: False # if True, only evaluate on test set
 
 model:
-  name: egnn_geometry_aware
+  name: egnn_simple
   num_layers: 6
   feats_dim: 32
   m_dim: 32
@@ -55,7 +59,11 @@ ema:
   gamma: 1.0
   power: 1.0
 
+<<<<<<< Updated upstream
 name: expansion_prob_improvement_run_w_sibling_edge
+=======
+name: geo_method_single_tree
+>>>>>>> Stashed changes
 debugging: False
 debugging_max_batches: 1
 debugging_dir: "small_trees_debug"

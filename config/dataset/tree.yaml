@@ -1,3 +1,3 @@
 name: tree_dataset
-data_dir: /Volumes/Seagate/small_trees
+data_dir: /scratch/guptau/small_trees
 load: True
