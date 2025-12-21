@@ -221,9 +221,25 @@ class Expansion_OneShot(Method):
         sinpsi = th.where(mask, sinpsi, sinpsi.new_zeros(sinpsi.shape))
 
         lr_mask = th.zeros((N,), dtype=th.bool, device=device)
+
+        # Special-case: children whose parent is a root (parent idx == -1) lack a
+        # grandparent, so assign left/right purely from +/- z relative to the root.
+        handled_parents = th.zeros((N,), dtype=th.bool, device=device)
+        root_nodes = (parent == -1).nonzero(as_tuple=False).flatten()
+        for r in root_nodes.tolist():
+            child_idx = (parent == r).nonzero(as_tuple=False).flatten()
+            if child_idx.numel() == 0:
+                continue
+            parent_z = pos[r, -1]
+            child_z = pos[child_idx, -1]
+            lr_mask[child_idx] = child_z >= parent_z
+            handled_parents[r] = True
+
         unique_parents = parent.unique()
         for p in unique_parents.tolist():
             if p < 0:
+                continue
+            if handled_parents[p]:
                 continue
             child_idx = (parent == p).nonzero(as_tuple=False).flatten()
             if child_idx.numel() != 2:
