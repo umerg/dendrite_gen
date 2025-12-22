@@ -235,7 +235,15 @@ class Expansion_OneShot(Method):
                     continue
                 parent_z = pos[r, -1]
                 child_z = pos[child_idx, -1]
-                lr_mask[child_idx] = child_z >= parent_z
+                override = child_z >= parent_z
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "[GeoLR] Override root %d: child_z=%s, assigned=%s",
+                        r,
+                        child_z.tolist(),
+                        override.tolist(),
+                    )
+                lr_mask[child_idx] = override
                 handled_parents[r] = True
 
         unique_parents = parent.unique()
