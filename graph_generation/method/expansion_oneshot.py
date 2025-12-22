@@ -227,7 +227,7 @@ class Expansion_OneShot(Method):
         handled_parents = th.zeros((N,), dtype=th.bool, device=device)
         root_nodes = (parent == -1).nonzero(as_tuple=False).flatten()
         if not root_nodes.numel():
-            logger.info("[GeoLR] No root with parent==-1 found; override skipped for this graph.")
+            logger.warning("[GeoLR] No root with parent==-1 found; override skipped for this graph.")
         else:
             for r in root_nodes.tolist():
                 child_idx = (parent == r).nonzero(as_tuple=False).flatten()
@@ -235,16 +235,8 @@ class Expansion_OneShot(Method):
                     continue
                 parent_z = pos[r, -1]
                 child_z = pos[child_idx, -1]
-                override = child_z >= parent_z
-                logger.info(
-                    "[GeoLR] Override root %d: child_z=%s, assigned=%s",
-                    r,
-                    child_z.tolist(),
-                    override.tolist(),
-                )
-                lr_mask[child_idx] = override
+                lr_mask[child_idx] = child_z >= parent_z
                 handled_parents[r] = True
-            logger.info("[GeoLR] Roots processed this call: %d", int(root_nodes.numel()))
 
         unique_parents = parent.unique()
         for p in unique_parents.tolist():
