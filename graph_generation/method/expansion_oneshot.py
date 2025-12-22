@@ -279,8 +279,6 @@ class Expansion_OneShot(Method):
         """Capture debug artifacts for graphs reduced to root + two children."""
         if not getattr(self, "debug", False):
             return
-        if self._debug_step >= getattr(self, "debug_max_batches", 0):
-            return
         batch_vec = getattr(batch, "batch", None)
         if batch_vec is None:
             return
@@ -295,10 +293,13 @@ class Expansion_OneShot(Method):
         new_leaf_idx = getattr(batch, "new_leaf_idx_from_next", None)
         new_leaf_set = set(new_leaf_idx.tolist()) if new_leaf_idx is not None else set()
 
+        limit = getattr(self, "debug_max_batches", None)
+        if limit is not None and limit < 0:
+            limit = None
+
+        matches = []
         unique_graphs = batch_vec.unique(sorted=True)
         for graph_id in unique_graphs.tolist():
-            if self._debug_step >= self.debug_max_batches:
-                break
             graph_mask = (batch_vec == graph_id)
             node_idx = graph_mask.nonzero(as_tuple=False).flatten()
             if node_idx.numel() != 3:
@@ -350,22 +351,56 @@ class Expansion_OneShot(Method):
                 sparse_sizes=(len(node_ids), len(node_ids)),
             )
 
+            matches.append(
+                {
+                    "graph_id": graph_id,
+                    "node_ids": node_ids,
+                    "parent_local": parent_local_tensor.detach().cpu(),
+                    "pos_gt": pos_gt_local.detach().cpu(),
+                    "pos_masked": pos_mask_local.detach().cpu(),
+                    "geo_lr_mask": geo_local.detach().cpu(),
+                    "leaf_mask": leaf_mask_local.detach().cpu(),
+                    "leaf_train_mask": leaf_train_mask_local.detach().cpu(),
+                    "new_leaf_mask": new_leaf_mask_local.detach().cpu()
+                    if new_leaf_mask_local is not None
+                    else None,
+                    "adj": adj_local.cpu(),
+                }
+            )
+
+        total_matches = len(matches)
+        if total_matches == 0:
+            return
+
+        logged_this_call = 0
+        for item in matches:
+            if limit is not None and self._debug_step >= limit:
+                break
             log_root_children_debug(
                 out_dir=self.debug_dir / "root_children",
                 step=self._debug_step,
                 batch_index=int(self._debug_step),
-                graph_index=graph_id,
-                node_ids=node_ids,
-                parent_local=parent_local_tensor.detach().cpu(),
-                pos_gt=pos_gt_local.detach().cpu(),
-                pos_masked=pos_mask_local.detach().cpu(),
-                geo_lr_mask=geo_local.detach().cpu(),
-                leaf_mask=leaf_mask_local.detach().cpu(),
-                leaf_train_mask=leaf_train_mask_local.detach().cpu(),
-                new_leaf_mask=new_leaf_mask_local.detach().cpu() if new_leaf_mask_local is not None else None,
-                adj=adj_local.cpu(),
+                graph_index=item["graph_id"],
+                node_ids=item["node_ids"],
+                parent_local=item["parent_local"],
+                pos_gt=item["pos_gt"],
+                pos_masked=item["pos_masked"],
+                geo_lr_mask=item["geo_lr_mask"],
+                leaf_mask=item["leaf_mask"],
+                leaf_train_mask=item["leaf_train_mask"],
+                new_leaf_mask=item["new_leaf_mask"],
+                adj=item["adj"],
             )
             self._debug_step += 1
+            logged_this_call += 1
+
+        logger.info(
+            "[RootChildrenDebug] size-3 graphs this batch: %d, logged: %d (limit=%s, total_logged=%d)",
+            total_matches,
+            logged_this_call,
+            "∞" if limit is None else str(limit),
+            self._debug_step,
+        )
 
     def _select_training_leaf_indices(self, batch) -> th.Tensor:
         """Return indices of leaves that should contribute to masking/loss."""
