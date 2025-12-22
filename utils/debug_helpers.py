@@ -238,6 +238,72 @@ def plot_nx_3d_enhanced(G: nx.Graph, out_file: Path, elev: int = 20, azim: int =
 	plt.close(fig)
 
 
+def log_root_children_debug(
+	out_dir: Path,
+	*,
+	step: int,
+	batch_index: int,
+	graph_index: int,
+	node_ids: Sequence[int],
+	parent_local: th.Tensor,
+	pos_gt: th.Tensor,
+	pos_masked: th.Tensor,
+	geo_lr_mask: th.Tensor,
+	leaf_mask: th.Tensor,
+	leaf_train_mask: th.Tensor,
+	new_leaf_mask: th.Tensor | None = None,
+	adj: SparseTensor | None = None,
+) -> Path:
+	"""Persist a textual + visual snapshot for a root+children graph."""
+	out_dir = Path(out_dir)
+	out_dir.mkdir(parents=True, exist_ok=True)
+	text_file = out_dir / f"root_children_step{step}_b{batch_index}_g{graph_index}.txt"
+
+	root_local_idx = (parent_local < 0).nonzero(as_tuple=False).flatten().tolist()
+	child_local_idx = [
+		i
+		for i, p in enumerate(parent_local.tolist())
+		if p >= 0 and root_local_idx and p == root_local_idx[0]
+	]
+
+	with text_file.open("w") as fp:
+		fp.write(f"Graph {graph_index} (debug batch {batch_index}, step {step})\n")
+		fp.write(f"Global -> local node ids: {list(zip(node_ids, range(len(node_ids))))}\n")
+		fp.write(f"Root local indices: {root_local_idx}\n")
+		fp.write(f"Child local indices: {child_local_idx}\n\n")
+		fp.write("Per-node summary:\n")
+		for local_idx, global_idx in enumerate(node_ids):
+			pos_abs = pos_gt[local_idx].detach().cpu().numpy().tolist()
+			pos_mask = pos_masked[local_idx].detach().cpu().numpy().tolist()
+			fp.write(
+				f"  node(local={local_idx}, global={global_idx}): "
+				f"parent_local={int(parent_local[local_idx].item())}, "
+				f"geo_left={bool(geo_lr_mask[local_idx].item())}, "
+				f"is_leaf={bool(leaf_mask[local_idx].item())}, "
+				f"is_train_leaf={bool(leaf_train_mask[local_idx].item())}, "
+			)
+			if new_leaf_mask is not None and new_leaf_mask.numel() == leaf_mask.numel():
+				fp.write(f"is_new_leaf={bool(new_leaf_mask[local_idx].item())}, ")
+			fp.write(f"pos_gt={pos_abs}, pos_masked={pos_mask}\n")
+
+	if adj is not None:
+		root_idx_list = root_local_idx if root_local_idx else None
+		plot_gt_and_masked_enhanced(
+			adj=adj,
+			pos_gt=pos_gt,
+			pos_masked=pos_masked,
+			out_dir=out_dir,
+			prefix=f"root_children_step{step}_g{graph_index}",
+			step=step,
+			batch_id=batch_index,
+			leaf_local_idx=[i for i, flag in enumerate(leaf_mask.tolist()) if flag],
+			leaf_expansion=None,
+			root_local_idx=root_idx_list,
+		)
+
+	return text_file
+
+
 def plot_geometry_debug(
 	pos: th.Tensor,
 	node_id: int,

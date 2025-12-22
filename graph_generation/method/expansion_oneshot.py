@@ -267,6 +267,106 @@ class Expansion_OneShot(Method):
 
         return lr_mask
 
+    def _maybe_debug_root_children(
+        self,
+        batch,
+        parent_idx: th.Tensor,
+        geo_lr_mask: th.Tensor,
+        leaf_idx_train: th.Tensor,
+        pos_gt: th.Tensor,
+        pos_masked: th.Tensor,
+    ) -> None:
+        """Capture debug artifacts for graphs reduced to root + two children."""
+        if not getattr(self, "debug", False):
+            return
+        if self._debug_step >= getattr(self, "debug_max_batches", 0):
+            return
+        batch_vec = getattr(batch, "batch", None)
+        if batch_vec is None:
+            return
+        try:
+            from utils.debug_helpers import log_root_children_debug
+        except Exception:
+            return
+
+        leaf_idx_all = getattr(batch, "leaf_idx", None)
+        leaf_all_set = set(leaf_idx_all.tolist()) if leaf_idx_all is not None else set()
+        leaf_train_set = set(leaf_idx_train.tolist()) if leaf_idx_train.numel() > 0 else set()
+        new_leaf_idx = getattr(batch, "new_leaf_idx_from_next", None)
+        new_leaf_set = set(new_leaf_idx.tolist()) if new_leaf_idx is not None else set()
+
+        unique_graphs = batch_vec.unique(sorted=True)
+        for graph_id in unique_graphs.tolist():
+            if self._debug_step >= self.debug_max_batches:
+                break
+            graph_mask = (batch_vec == graph_id)
+            node_idx = graph_mask.nonzero(as_tuple=False).flatten()
+            if node_idx.numel() != 3:
+                continue
+            node_ids = node_idx.tolist()
+            global_to_local = {int(g): i for i, g in enumerate(node_ids)}
+            parent_global = parent_idx[node_idx].tolist()
+            parent_local = [-1 if p < 0 else global_to_local.get(int(p), -1) for p in parent_global]
+            parent_local_tensor = th.tensor(parent_local, dtype=th.long, device=parent_idx.device)
+            root_local_mask = parent_local_tensor < 0
+            if root_local_mask.sum().item() != 1:
+                continue
+            root_local = int(root_local_mask.nonzero(as_tuple=False)[0].item())
+            child_count = int((parent_local_tensor == root_local).sum().item())
+            if child_count != 2:
+                continue
+
+            geo_local = geo_lr_mask[node_idx]
+            pos_gt_local = pos_gt[node_idx]
+            pos_mask_local = pos_masked[node_idx]
+
+            def _build_mask(id_set):
+                return th.tensor(
+                    [gid in id_set for gid in node_ids],
+                    dtype=th.bool,
+                    device=parent_idx.device,
+                )
+
+            leaf_mask_local = _build_mask(leaf_all_set) if leaf_idx_all is not None else th.zeros(
+                len(node_ids), dtype=th.bool, device=parent_idx.device
+            )
+            leaf_train_mask_local = _build_mask(leaf_train_set) if leaf_train_set else th.zeros(
+                len(node_ids), dtype=th.bool, device=parent_idx.device
+            )
+            new_leaf_mask_local = _build_mask(new_leaf_set) if new_leaf_set else None
+
+            edges = []
+            for child_local, parent_local_idx in enumerate(parent_local):
+                if parent_local_idx >= 0:
+                    edges.append((child_local, parent_local_idx))
+                    edges.append((parent_local_idx, child_local))
+            if edges:
+                edge_index = th.tensor(edges, dtype=th.long, device=parent_idx.device).t()
+            else:
+                edge_index = th.empty((2, 0), dtype=th.long, device=parent_idx.device)
+            adj_local = SparseTensor(
+                row=edge_index[0],
+                col=edge_index[1],
+                sparse_sizes=(len(node_ids), len(node_ids)),
+            )
+
+            log_root_children_debug(
+                out_dir=self.debug_dir / "root_children",
+                step=self._debug_step,
+                batch_index=int(self._debug_step),
+                graph_index=graph_id,
+                node_ids=node_ids,
+                parent_local=parent_local_tensor.detach().cpu(),
+                pos_gt=pos_gt_local.detach().cpu(),
+                pos_masked=pos_mask_local.detach().cpu(),
+                geo_lr_mask=geo_local.detach().cpu(),
+                leaf_mask=leaf_mask_local.detach().cpu(),
+                leaf_train_mask=leaf_train_mask_local.detach().cpu(),
+                new_leaf_mask=new_leaf_mask_local.detach().cpu() if new_leaf_mask_local is not None else None,
+                adj=adj_local.cpu(),
+            )
+            self._debug_step += 1
+
     def _select_training_leaf_indices(self, batch) -> th.Tensor:
         """Return indices of leaves that should contribute to masking/loss."""
         base = getattr(batch, "leaf_idx", None)
@@ -840,6 +940,14 @@ class Expansion_OneShot(Method):
             clip=self.leaf_noise_clip,
         )                                              # [N,3]
         geo_lr_mask = self._compute_geo_lr_mask(pos_gt, parent_idx)
+        self._maybe_debug_root_children(
+            batch=batch,
+            parent_idx=parent_idx,
+            geo_lr_mask=geo_lr_mask,
+            leaf_idx_train=leaf_idx_train,
+            pos_gt=pos_gt,
+            pos_masked=pos_in,
+        )
          
         # --- prepare EGNN input (positions + minimal node features)
         feats_dim = getattr(model, 'feats_dim', 0)
