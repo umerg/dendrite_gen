@@ -244,6 +244,7 @@ class Expansion_OneShot(Method):
                 )
                 lr_mask[child_idx] = override
                 handled_parents[r] = True
+            logger.info("[GeoLR] Roots processed this call: %d", int(root_nodes.numel()))
 
         unique_parents = parent.unique()
         for p in unique_parents.tolist():
@@ -276,6 +277,25 @@ class Expansion_OneShot(Method):
                     logger.warning(f"[GeoLR] Parent {p} has {left_count} left assignments (expected 1).")
 
         return lr_mask
+
+    @staticmethod
+    def _decode_parent_indices(batch) -> th.Tensor:
+        """Convert batched parent_idx_1b -> 0-based with -1 for roots, even after PyG offsets."""
+        parent_idx_1b = batch.parent_idx_1b
+        if not isinstance(parent_idx_1b, th.Tensor):
+            parent_idx_1b = th.as_tensor(parent_idx_1b)
+        parent_idx = parent_idx_1b - 1
+        batch_vec = getattr(batch, "batch", None)
+        ptr = getattr(batch, "ptr", None)
+        if batch_vec is not None and ptr is not None:
+            offsets = ptr[batch_vec]
+            root_mask = parent_idx_1b == offsets
+        else:
+            root_mask = parent_idx_1b == 0
+        if root_mask.any():
+            parent_idx = parent_idx.clone()
+            parent_idx[root_mask] = -1
+        return parent_idx
 
     def _maybe_debug_root_children(
         self,
@@ -958,7 +978,7 @@ class Expansion_OneShot(Method):
         # --- parent indices (1-based in Data for safe batching) -> shift back to 0-based with -1 for roots
         if not hasattr(batch, "parent_idx_1b"):
             raise ValueError("Expected batch.parent_idx_1b (1-based parent indices). Please update dataloader.")
-        parent_idx = batch.parent_idx_1b - 1                      # [N], -1 for roots
+        parent_idx = self._decode_parent_indices(batch)           # [N], -1 for roots
 
         # --- graph and positions
         pos_gt = batch.pos                             # [N,3] (absolute, untouched)
