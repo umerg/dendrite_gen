@@ -226,14 +226,17 @@ class Expansion_OneShot(Method):
         # grandparent, so assign left/right purely from +/- z relative to the root.
         handled_parents = th.zeros((N,), dtype=th.bool, device=device)
         root_nodes = (parent == -1).nonzero(as_tuple=False).flatten()
-        for r in root_nodes.tolist():
-            child_idx = (parent == r).nonzero(as_tuple=False).flatten()
-            if child_idx.numel() == 0:
-                continue
-            parent_z = pos[r, -1]
-            child_z = pos[child_idx, -1]
-            lr_mask[child_idx] = child_z >= parent_z
-            handled_parents[r] = True
+        if not root_nodes.numel():
+            logger.warning("[GeoLR] No root with parent==-1 found; override skipped for this graph.")
+        else:
+            for r in root_nodes.tolist():
+                child_idx = (parent == r).nonzero(as_tuple=False).flatten()
+                if child_idx.numel() == 0:
+                    continue
+                parent_z = pos[r, -1]
+                child_z = pos[child_idx, -1]
+                lr_mask[child_idx] = child_z >= parent_z
+                handled_parents[r] = True
 
         unique_parents = parent.unique()
         for p in unique_parents.tolist():
