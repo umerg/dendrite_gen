@@ -149,6 +149,7 @@ def plot_gt_and_masked_enhanced(
 	leaf_local_idx: list[int] | None = None,
 	leaf_expansion: list[int] | None = None,
 	root_local_idx: list[int] | None = None,
+	node_labels: list[str] | None = None,
 ):
 	"""Enhanced helper to plot ground-truth vs masked input graphs in 3D with root/leaf coloring.
 	
@@ -173,14 +174,14 @@ def plot_gt_and_masked_enhanced(
 	colors_enhanced = _make_enhanced_node_colors(G_gt.number_of_nodes(), leaf_local_idx, leaf_expansion, root_local_idx)
 	
 	# Create plots with larger node sizes and enhanced styling
-	plot_nx_3d_enhanced(G_gt, gt_file, node_colors=colors_enhanced, title=f"GT Graph {batch_id} (Step {step})")
-	plot_nx_3d_enhanced(G_masked, masked_file, node_colors=colors_enhanced, title=f"Masked Graph {batch_id} (Step {step})")
+	plot_nx_3d_enhanced(G_gt, gt_file, node_colors=colors_enhanced, title=f"GT Graph {batch_id} (Step {step})", node_labels=node_labels)
+	plot_nx_3d_enhanced(G_masked, masked_file, node_colors=colors_enhanced, title=f"Masked Graph {batch_id} (Step {step})", node_labels=node_labels)
 	
 	return gt_file, masked_file
 
 
 def plot_nx_3d_enhanced(G: nx.Graph, out_file: Path, elev: int = 20, azim: int = 45, 
-                       node_colors: list[str] | None = None, title: str = ""):
+                       node_colors: list[str] | None = None, title: str = "", node_labels: list[str] | None = None):
 	"""Enhanced 3D plot with better styling and node size differentiation.
 	
 	node_colors: optional list of hex/HTML colors length == num nodes.
@@ -225,7 +226,8 @@ def plot_nx_3d_enhanced(G: nx.Graph, out_file: Path, elev: int = 20, azim: int =
 	# Add node labels for small graphs
 	if len(xs) <= 10:
 		for i, (x, y, z) in enumerate(zip(xs, ys, zs)):
-			ax.text(x, y, z, f'  {i}', fontsize=8, color='black', weight='bold')
+			label = node_labels[i] if node_labels and i < len(node_labels) else f'{i}'
+			ax.text(x, y, z, f'  {label}', fontsize=8, color='black', weight='bold')
 
 	ax.view_init(elev=elev, azim=azim)
 	ax.set_axis_off()
@@ -249,10 +251,12 @@ def log_root_children_debug(
 	pos_gt: th.Tensor,
 	pos_masked: th.Tensor,
 	geo_lr_mask: th.Tensor,
+	sibling_order: th.Tensor | None = None,
 	leaf_mask: th.Tensor,
 	leaf_train_mask: th.Tensor,
 	new_leaf_mask: th.Tensor | None = None,
 	adj: SparseTensor | None = None,
+	graph_size: int | None = None,
 ) -> Path:
 	"""Persist a textual + visual snapshot for a root+children graph."""
 	out_dir = Path(out_dir)
@@ -271,10 +275,21 @@ def log_root_children_debug(
 		fp.write(f"Global -> local node ids: {list(zip(node_ids, range(len(node_ids))))}\n")
 		fp.write(f"Root local indices: {root_local_idx}\n")
 		fp.write(f"Child local indices: {child_local_idx}\n\n")
+		if graph_size is not None:
+			fp.write(f"Graph size: {graph_size}\n\n")
 		fp.write("Per-node summary:\n")
+		node_labels: list[str] = []
 		for local_idx, global_idx in enumerate(node_ids):
 			pos_abs = pos_gt[local_idx].detach().cpu().numpy().tolist()
 			pos_mask = pos_masked[local_idx].detach().cpu().numpy().tolist()
+			if parent_local[local_idx].item() < 0:
+				label = f"{local_idx}:root"
+			else:
+				is_left = bool(geo_lr_mask[local_idx].item())
+				label = f"{local_idx}:{'L' if is_left else 'R'}"
+				if sibling_order is not None and sibling_order.numel() == len(node_ids):
+					label += f"(sib={int(sibling_order[local_idx].item())})"
+			node_labels.append(label)
 			fp.write(
 				f"  node(local={local_idx}, global={global_idx}): "
 				f"parent_local={int(parent_local[local_idx].item())}, "
@@ -284,11 +299,13 @@ def log_root_children_debug(
 			)
 			if new_leaf_mask is not None and new_leaf_mask.numel() == leaf_mask.numel():
 				fp.write(f"is_new_leaf={bool(new_leaf_mask[local_idx].item())}, ")
+			if sibling_order is not None and sibling_order.numel() == len(node_ids):
+				fp.write(f"sibling_order={int(sibling_order[local_idx].item())}, ")
 			fp.write(f"pos_gt={pos_abs}, pos_masked={pos_mask}\n")
 
 	if adj is not None:
 		root_idx_list = root_local_idx if root_local_idx else None
-		plot_gt_and_masked_enhanced(
+	plot_gt_and_masked_enhanced(
 			adj=adj,
 			pos_gt=pos_gt,
 			pos_masked=pos_masked,
@@ -299,6 +316,7 @@ def log_root_children_debug(
 			leaf_local_idx=[i for i, flag in enumerate(leaf_mask.tolist()) if flag],
 			leaf_expansion=None,
 			root_local_idx=root_idx_list,
+			node_labels=node_labels,
 		)
 
 	return text_file

@@ -287,6 +287,8 @@ class Expansion_OneShot(Method):
         except Exception:
             return
 
+        sibling_order = getattr(batch, "sibling_order", None)
+        sibling_order = sibling_order.to(parent_idx.device) if sibling_order is not None else None
         leaf_idx_all = getattr(batch, "leaf_idx", None)
         leaf_all_set = set(leaf_idx_all.tolist()) if leaf_idx_all is not None else set()
         leaf_train_set = set(leaf_idx_train.tolist()) if leaf_idx_train.numel() > 0 else set()
@@ -297,12 +299,14 @@ class Expansion_OneShot(Method):
         if limit is not None and limit < 0:
             limit = None
 
+        matches_by_size = {}
         matches = []
         unique_graphs = batch_vec.unique(sorted=True)
         for graph_id in unique_graphs.tolist():
             graph_mask = (batch_vec == graph_id)
             node_idx = graph_mask.nonzero(as_tuple=False).flatten()
-            if node_idx.numel() != 3:
+            graph_size = int(node_idx.numel())
+            if graph_size < 3 or graph_size > 7:
                 continue
             node_ids = node_idx.tolist()
             global_to_local = {int(g): i for i, g in enumerate(node_ids)}
@@ -314,7 +318,7 @@ class Expansion_OneShot(Method):
                 continue
             root_local = int(root_local_mask.nonzero(as_tuple=False)[0].item())
             child_count = int((parent_local_tensor == root_local).sum().item())
-            if child_count != 2:
+            if graph_size == 3 and child_count != 2:
                 continue
 
             geo_local = geo_lr_mask[node_idx]
@@ -351,6 +355,14 @@ class Expansion_OneShot(Method):
                 sparse_sizes=(len(node_ids), len(node_ids)),
             )
 
+            sibling_local = (
+                sibling_order[node_idx].detach().cpu()
+                if sibling_order is not None
+                else th.full((graph_size,), -1, dtype=th.long)
+            )
+
+            matches_by_size.setdefault(graph_size, 0)
+            matches_by_size[graph_size] += 1
             matches.append(
                 {
                     "graph_id": graph_id,
@@ -364,7 +376,10 @@ class Expansion_OneShot(Method):
                     "new_leaf_mask": new_leaf_mask_local.detach().cpu()
                     if new_leaf_mask_local is not None
                     else None,
+                    "geo_lr_mask": geo_local.detach().cpu(),
+                    "sibling_order": sibling_local,
                     "adj": adj_local.cpu(),
+                    "graph_size": graph_size,
                 }
             )
 
@@ -386,17 +401,19 @@ class Expansion_OneShot(Method):
                 pos_gt=item["pos_gt"],
                 pos_masked=item["pos_masked"],
                 geo_lr_mask=item["geo_lr_mask"],
+                sibling_order=item["sibling_order"],
                 leaf_mask=item["leaf_mask"],
                 leaf_train_mask=item["leaf_train_mask"],
                 new_leaf_mask=item["new_leaf_mask"],
                 adj=item["adj"],
+                graph_size=item["graph_size"],
             )
             self._debug_step += 1
             logged_this_call += 1
 
         logger.info(
-            "[RootChildrenDebug] size-3 graphs this batch: %d, logged: %d (limit=%s, total_logged=%d)",
-            total_matches,
+            "[RootChildrenDebug] small-graph counts this batch: %s; logged: %d (limit=%s, total_logged=%d)",
+            ", ".join(f"{size}:{count}" for size, count in sorted(matches_by_size.items())),
             logged_this_call,
             "∞" if limit is None else str(limit),
             self._debug_step,
