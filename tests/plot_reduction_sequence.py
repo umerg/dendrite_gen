@@ -174,7 +174,7 @@ def main():
     parser.add_argument("--out", default="reduction_plots", help="Directory to store per-step plots")
     parser.add_argument("--seed", type=int, default=0, help="RNG seed for reducer randomness")
     parser.add_argument("--mode", choices=["stochastic", "deterministic"], default="stochastic")
-    parser.add_argument("--cherry-p", type=float, default=0.8, dest="cherry_p", help="Contraction probability")
+    parser.add_argument("--cherry-p", type=float, default=1.0, dest="cherry_p", help="Contraction probability")
     parser.add_argument("--contract-root", action="store_true", help="Allow contracting the root as well")
     parser.add_argument(
         "--reducer",
