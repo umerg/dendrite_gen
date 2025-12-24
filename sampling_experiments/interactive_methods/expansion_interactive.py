@@ -74,7 +74,6 @@ class InteractiveExpansionOneShot(Expansion_OneShot):
         max_steps = int(target_size.max().item() * 2)
 
         traces: list[list[GraphStepTrace]] = [[] for _ in range(num_graphs)]
-        self._last_leaf_probs = None
 
         # capture the initial state as step 0
         initial_traces = self._capture_step_traces(
@@ -358,8 +357,6 @@ class InteractiveExpansionOneShot(Expansion_OneShot):
         leaf_batch = batch_reduced[leaf_idx]
 
         spawn_counts_final = spawn_counts.clone()
-        prob_source = getattr(self, "_last_leaf_probs", None)
-        probs_valid = isinstance(prob_source, th.Tensor) and prob_source.numel() == leaf_idx.numel()
         for g in target_size.nonzero().flatten():
             g_int = int(g.item())
             cap = int(remaining_capacity[g_int].item())
@@ -393,19 +390,12 @@ class InteractiveExpansionOneShot(Expansion_OneShot):
                 if (spawn_counts_final[mask_g] == 2).any():
                     continue
                 leaf_indices_g = th.nonzero(mask_g, as_tuple=False).flatten()
-                if probs_valid:
-                    probs_g = prob_source[leaf_indices_g]
-                    forced_leaf = leaf_indices_g[probs_g.argmax()]
-                elif self.deterministic_expansion:
+                if self.deterministic_expansion:
                     forced_leaf = leaf_indices_g[0]
                 else:
                     rand_idx = th.randint(low=0, high=leaf_indices_g.numel(), size=(1,), device=leaf_indices_g.device)
                     forced_leaf = leaf_indices_g[rand_idx]
                 spawn_counts_final[forced_leaf] = 2
-
-        keep_mask = spawn_counts_final == 0
-        leaf_idx_persistent = leaf_idx[keep_mask]
-        persistent_count = int(leaf_idx_persistent.numel())
 
         total_new_children = int(spawn_counts_final.sum().item())
         if total_new_children == 0:
@@ -488,8 +478,7 @@ class InteractiveExpansionOneShot(Expansion_OneShot):
             row_all, col_all, val_all = row_old.to(device), col_old.to(device), val_old.to(device)
         adj_new = SparseTensor(row=row_all, col=col_all, value=val_all, sparse_sizes=(pos_new.size(0), pos_new.size(0)))
 
-        new_leaf_idx = th.arange(base_N, base_N + total_new_children, device=device, dtype=leaf_idx.dtype)
-        leaf_idx_next = th.cat([leaf_idx_persistent, new_leaf_idx], dim=0)
+        leaf_idx_next = th.arange(base_N, base_N + total_new_children, device=device, dtype=leaf_idx.dtype)
         if leaf_idx_next.numel() == 0:
             result = (
                 adj_new,
@@ -528,7 +517,7 @@ class InteractiveExpansionOneShot(Expansion_OneShot):
                 feats_used += 1
             if feats_used < feats_dim:
                 new_leaf_flag = pos_new.new_zeros((pos_new.size(0), 1))
-                new_leaf_flag[new_leaf_idx] = 1.0
+                new_leaf_flag[leaf_idx_next] = 1.0
                 features.append(new_leaf_flag)
                 feats_used += 1
             if feats_used < feats_dim:
@@ -559,18 +548,11 @@ class InteractiveExpansionOneShot(Expansion_OneShot):
         expansion_pred_leaves = expansion_pred_all[leaf_idx_next]
         if expansion_pred_leaves.dim() == 1:
             expansion_pred_leaves = expansion_pred_leaves.unsqueeze(-1)
-        if leaf_idx_next.numel() > 0:
-            leaf_parent_idx = parent_idx_new_0b[leaf_idx_next]
-            valid_parent_mask = leaf_parent_idx >= 0
-            if valid_parent_mask.any():
-                parent_pos_for_leaves = pos_new[leaf_parent_idx[valid_parent_mask]]
-                pos_new[leaf_idx_next[valid_parent_mask]] = (
-                    parent_pos_for_leaves + rel_pred_leaves[valid_parent_mask]
-                )
+        parent_pos_for_children = pos_new[parent_idx_new_0b[leaf_idx_next]]
+        pos_new[leaf_idx_next] = parent_pos_for_children + rel_pred_leaves
 
         expansion_prob = expansion_pred_leaves.squeeze(-1).sigmoid()
         leaf_expansion_next = (expansion_prob > map_threshold).long() + 1
-        self._last_leaf_probs = expansion_prob.detach()
 
         remaining_capacity_new = target_size.to(device) - node_counts_per_graph
         terminated = (remaining_capacity_new < 2).all() or leaf_idx_next.numel() == 0
@@ -588,9 +570,7 @@ class InteractiveExpansionOneShot(Expansion_OneShot):
 
         if return_debug_payload:
             if noise_records:
-                noise_new = th.cat(noise_records, dim=0)
-                noise_payload = pos_new.new_zeros((leaf_idx_next.numel(), noise_new.size(-1)))
-                noise_payload[persistent_count:] = noise_new
+                noise_payload = th.cat(noise_records, dim=0)
             else:
                 noise_payload = None
             payload = self._build_debug_payload(

@@ -21,13 +21,25 @@ import graph_generation as gg
 def get_expansion_items(cfg: DictConfig, train_graphs):
 
     # Train Dataset
-    red_factory = gg.reduction.ReductionFactory(
+    reduction_type = getattr(cfg.reduction, "type", "cherry")
+    if reduction_type == "depth":
+        factory_cls = gg.depth_reduction.DepthReductionFactory
+    elif reduction_type == "cherry":
+        factory_cls = gg.reduction.ReductionFactory
+    else:
+        raise ValueError(f"Unknown reduction type '{reduction_type}'. Expected 'cherry' or 'depth'.")
+
+    factory_kwargs = dict(
         mode=cfg.reduction.mode,
         cherry_p=cfg.reduction.cherry_p,
         ensure_progress=cfg.reduction.ensure_progress,
         root=cfg.reduction.root,
         contract_root=cfg.reduction.contract_root,
-    ) # initialised cherry reduction factory
+    )
+    if hasattr(cfg.reduction, "weighted_reduction"):
+        factory_kwargs["weighted_reduction"] = cfg.reduction.weighted_reduction
+
+    red_factory = factory_cls(**factory_kwargs) # initialised cherry/depth reduction factory
     print(f"Extracting adjacency and position matrices for {len(train_graphs)} training graphs...")
     adjs = []
     poses = []

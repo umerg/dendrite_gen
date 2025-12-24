@@ -144,6 +144,7 @@ dataloading_tests/
 debug_graphs/
 expansion_test_plots/
 expansion_debug_test/
+weights/
 
 # weights
 
