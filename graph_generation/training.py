@@ -256,6 +256,16 @@ class Trainer:
         # print(f"RAM usage before step: {process.memory_info().rss / 1024 ** 2:.2f} MB")
 
         batch = batch.to(self.device, non_blocking=True)
+
+        if getattr(self.cfg, "debugging", False):
+            batch_vec = getattr(batch, "batch", None)
+            if batch_vec is not None and batch_vec.numel() > 0:
+                sizes = th.bincount(batch_vec.detach().cpu())
+                sizes = sizes[sizes > 0]
+                if sizes.numel() > 0:
+                    unique_sizes = sorted({int(size) for size in sizes.tolist()})
+                    print(f"[Debug] Unique graph sizes this batch: {unique_sizes}")
+
         loss, loss_terms = self.method.get_loss(
             batch=batch, model=self.model,
         )
