@@ -4,6 +4,7 @@ defaults:
   - method: expansion_oneshot_augmented
 
 reduction:
+  type: "cherry"
   mode: "stochastic"
   cherry_p: 1.0
   ensure_progress: True

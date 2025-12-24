@@ -18,7 +18,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import Sequence
+from typing import Optional, Sequence
 
 import numpy as np
 import torch
@@ -31,6 +31,7 @@ if str(_ROOT) not in sys.path:
 
 from utils.data_loading import load_swc_graph, nx_graph_to_adj_pos  # noqa: E402
 from graph_generation.reduction import ReductionFactory  # noqa: E402
+from graph_generation.depth_reduction import DepthReductionFactory  # noqa: E402
 from graph_generation.data.reduction_dataset import RandRedDataset  # noqa: E402
 
 
@@ -88,8 +89,27 @@ class _SeqRunner(RandRedDataset):
         raise NotImplementedError("Iteration not supported in plotting helper")
 
 
-def _run_reduction(adj, pos, seed: int, contract_root: bool, cherry_p: float, mode: str):
-    red_factory = ReductionFactory(mode=mode, cherry_p=cherry_p, contract_root=contract_root)
+_FACTORY_REGISTRY = {
+    "cherry": ReductionFactory,
+    "depth": DepthReductionFactory,
+}
+
+
+def _run_reduction(
+    adj,
+    pos,
+    seed: int,
+    contract_root: bool,
+    cherry_p: float,
+    mode: str,
+    reducer: str,
+    root_idx: Optional[int],
+):
+    factory_cls = _FACTORY_REGISTRY[reducer]
+    factory_kwargs = dict(mode=mode, cherry_p=cherry_p, contract_root=contract_root)
+    if root_idx is not None:
+        factory_kwargs["root"] = int(root_idx)
+    red_factory = factory_cls(**factory_kwargs)
     dataset = _SeqRunner([adj], [pos], red_factory)
     rng = np.random.default_rng(seed)
     reducer = red_factory(adj.copy(), rng=rng)
@@ -121,6 +141,8 @@ def _plot_sequence(sequence: Sequence, out_dir: Path, plt) -> None:
             pv = positions[v]
             ax.plot([pu[0], pv[0]], [pu[1], pv[1]], [pu[2], pv[2]], color="lightgray", linewidth=0.8, alpha=0.8)
 
+        new_leaf_idx = _to_numpy(getattr(data, "new_leaf_idx_from_next", None)).astype(np.int64)
+
         colors = np.full(positions.shape[0], "steelblue", dtype=object)
         sizes = np.full(positions.shape[0], 25, dtype=np.float64)
         colors[leaf_mask] = "#2ca02c"
@@ -139,6 +161,8 @@ def _plot_sequence(sequence: Sequence, out_dir: Path, plt) -> None:
         ax.set_yticks([])
         ax.set_zticks([])
         ax.view_init(elev=20, azim=30)
+        new_leaf_label = ", ".join(map(str, new_leaf_idx.tolist())) if new_leaf_idx.size > 0 else "None"
+        fig.text(0.02, 0.01, f"New leaf indices: {new_leaf_label}", fontsize=8)
         fig.tight_layout()
         fig.savefig(out_dir / f"reduction_step_{idx:02d}.png", dpi=200)
         plt.close(fig)
@@ -150,8 +174,14 @@ def main():
     parser.add_argument("--out", default="reduction_plots", help="Directory to store per-step plots")
     parser.add_argument("--seed", type=int, default=0, help="RNG seed for reducer randomness")
     parser.add_argument("--mode", choices=["stochastic", "deterministic"], default="stochastic")
-    parser.add_argument("--cherry-p", type=float, default=0.8, dest="cherry_p", help="Contraction probability")
+    parser.add_argument("--cherry-p", type=float, default=1.0, dest="cherry_p", help="Contraction probability")
     parser.add_argument("--contract-root", action="store_true", help="Allow contracting the root as well")
+    parser.add_argument(
+        "--reducer",
+        choices=list(_FACTORY_REGISTRY.keys()),
+        default="depth",
+        help="Which reduction algorithm to visualize",
+    )
     args = parser.parse_args()
 
     rng = np.random.default_rng(args.seed)
@@ -159,9 +189,24 @@ def main():
     print(f"Using SWC file: {swc_path}")
 
     graph = load_swc_graph(swc_path)
-    adj, pos, _ = nx_graph_to_adj_pos(graph)
+    adj, pos, node_order = nx_graph_to_adj_pos(graph)
+    root_idx = None
+    if "root" in graph.graph:
+        root_id = graph.graph["root"]
+        matches = np.where(node_order == root_id)[0]
+        if matches.size > 0:
+            root_idx = int(matches[0])
 
-    sequence = _run_reduction(adj, pos, args.seed, args.contract_root, args.cherry_p, args.mode)
+    sequence = _run_reduction(
+        adj,
+        pos,
+        args.seed,
+        args.contract_root,
+        args.cherry_p,
+        args.mode,
+        args.reducer,
+        root_idx,
+    )
     print(f"Generated {len(sequence)} reduction steps")
 
     plt = _load_matplotlib()

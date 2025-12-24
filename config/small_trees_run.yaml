@@ -4,6 +4,7 @@ defaults:
   - method: expansion_oneshot
 
 reduction:
+  type: "cherry"
   mode: "stochastic"
   cherry_p: 1.0 # imp now with new leaves tracking?
   ensure_progress: True

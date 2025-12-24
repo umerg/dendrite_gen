@@ -9,6 +9,7 @@ dataset:
   test_size: 5
 
 reduction:
+  type: "cherry"
   mode: "stochastic"
   cherry_p: 1.0
   ensure_progress: True
