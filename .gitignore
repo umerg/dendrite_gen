@@ -144,12 +144,9 @@ dataloading_tests/
 debug_graphs/
 expansion_test_plots/
 expansion_debug_test/
-<<<<<<< HEAD
 single_tree_debug/
 small_trees_debug/
-=======
 weights/
->>>>>>> ebec469fa2b07dd34784d820549b5f9936a84c32
 
 # weights
 
