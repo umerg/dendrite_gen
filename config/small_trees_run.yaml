@@ -56,9 +56,9 @@ ema:
   power: 1.0
 
 name: geo_method_single_tree
-debugging: False
-debugging_max_batches: 1
-debugging_dir: "small_trees_debug"
+debugging: True
+debugging_max_batches: 50
+debugging_dir: "single_tree_debug"
 
 wandb:
   logging: False
