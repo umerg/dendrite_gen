@@ -255,6 +255,7 @@ def log_root_children_debug(
 	leaf_mask: th.Tensor,
 	leaf_train_mask: th.Tensor,
 	new_leaf_mask: th.Tensor | None = None,
+	leaf_expansion_state: th.Tensor | None = None,
 	adj: SparseTensor | None = None,
 	graph_size: int | None = None,
 ) -> Path:
@@ -287,8 +288,12 @@ def log_root_children_debug(
 			else:
 				is_left = bool(geo_lr_mask[local_idx].item())
 				label = f"{local_idx}:{'L' if is_left else 'R'}"
-				if sibling_order is not None and sibling_order.numel() == len(node_ids):
-					label += f"(sib={int(sibling_order[local_idx].item())})"
+			expansion_label = None
+			if leaf_expansion_state is not None and leaf_expansion_state.numel() == len(node_ids):
+				exp_val = int(leaf_expansion_state[local_idx].item())
+				if exp_val >= 0:
+					expansion_label = exp_val
+					label += f"[{exp_val}]"
 			node_labels.append(label)
 			fp.write(
 				f"  node(local={local_idx}, global={global_idx}): "
@@ -301,6 +306,8 @@ def log_root_children_debug(
 				fp.write(f"is_new_leaf={bool(new_leaf_mask[local_idx].item())}, ")
 			if sibling_order is not None and sibling_order.numel() == len(node_ids):
 				fp.write(f"sibling_order={int(sibling_order[local_idx].item())}, ")
+			if expansion_label is not None:
+				fp.write(f"leaf_expansion_state={expansion_label}, ")
 			fp.write(f"pos_gt={pos_abs}, pos_masked={pos_mask}\n")
 
 	if adj is not None:

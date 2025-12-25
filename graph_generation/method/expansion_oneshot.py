@@ -313,6 +313,20 @@ class Expansion_OneShot(Method):
         sibling_order = sibling_order.to(parent_idx.device) if sibling_order is not None else None
         leaf_idx_all = getattr(batch, "leaf_idx", None)
         leaf_all_set = set(leaf_idx_all.tolist()) if leaf_idx_all is not None else set()
+        leaf_expansion_all = getattr(batch, "leaf_expansion", None)
+        leaf_expansion_per_node = None
+        if leaf_idx_all is not None and leaf_expansion_all is not None:
+            leaf_idx_tensor = leaf_idx_all.to(device=parent_idx.device, dtype=th.long)
+            if isinstance(leaf_expansion_all, th.Tensor):
+                leaf_expansion_tensor = leaf_expansion_all.to(device=parent_idx.device)
+            else:
+                leaf_expansion_tensor = th.as_tensor(leaf_expansion_all).to(device=parent_idx.device)
+            leaf_expansion_tensor = leaf_expansion_tensor.view(-1)
+            if leaf_idx_tensor.numel() == leaf_expansion_tensor.numel():
+                leaf_expansion_per_node = leaf_expansion_tensor.new_full(
+                    (parent_idx.size(0),), -1
+                )
+                leaf_expansion_per_node[leaf_idx_tensor] = leaf_expansion_tensor
         leaf_train_set = set(leaf_idx_train.tolist()) if leaf_idx_train.numel() > 0 else set()
         new_leaf_idx = getattr(batch, "new_leaf_idx_from_next", None)
         new_leaf_set = set(new_leaf_idx.tolist()) if new_leaf_idx is not None else set()
@@ -328,7 +342,7 @@ class Expansion_OneShot(Method):
             graph_mask = (batch_vec == graph_id)
             node_idx = graph_mask.nonzero(as_tuple=False).flatten()
             graph_size = int(node_idx.numel())
-            if graph_size < 3 or graph_size > 7:
+            if graph_size < 7 or graph_size > 11: # chnage debug graph size range here
                 continue
             node_ids = node_idx.tolist()
             global_to_local = {int(g): i for i, g in enumerate(node_ids)}
@@ -346,6 +360,11 @@ class Expansion_OneShot(Method):
             geo_local = geo_lr_mask[node_idx]
             pos_gt_local = pos_gt[node_idx]
             pos_mask_local = pos_masked[node_idx]
+            leaf_expansion_local = (
+                leaf_expansion_per_node[node_idx].detach().cpu()
+                if leaf_expansion_per_node is not None
+                else None
+            )
 
             def _build_mask(id_set):
                 return th.tensor(
@@ -400,6 +419,7 @@ class Expansion_OneShot(Method):
                     else None,
                     "geo_lr_mask": geo_local.detach().cpu(),
                     "sibling_order": sibling_local,
+                    "leaf_expansion_state": leaf_expansion_local,
                     "adj": adj_local.cpu(),
                     "graph_size": graph_size,
                 }
@@ -427,6 +447,7 @@ class Expansion_OneShot(Method):
                 leaf_mask=item["leaf_mask"],
                 leaf_train_mask=item["leaf_train_mask"],
                 new_leaf_mask=item["new_leaf_mask"],
+                leaf_expansion_state=item["leaf_expansion_state"],
                 adj=item["adj"],
                 graph_size=item["graph_size"],
             )
