@@ -1,72 +1,190 @@
-import numpy as np
+import math
+
 import torch as th
+import torch.nn.functional as F
 from torch.nn import Module
 
+
 class DenoisingDiffusionModel(Module):
+    """Noise-conditioned diffusion loss for training-time denoising."""
+
     P_mean = -1.2
     P_std = 1.2
-    sigma_data = 0.5
     sigma_min = 0.002
-    sigma_max = 80
-    rho = 7
-    S_min = 0.05
-    S_max = 50
-    S_noise = 1.003
-    S_churn = 40
+    sigma_max = 80.0
+    cond_dim = 2  # e_t feature + log_sigma feature per node
 
-    def __init__(self, num_steps):
+    def __init__(self, num_steps: int = 1):
+        super().__init__()
         self.num_steps = num_steps
 
-    @property
-    def device(self):
-        assert hasattr(self, "_device")
-        return self._device
+    def forward(
+        self,
+        *,
+        node_feats: th.Tensor | None,
+        edge_index: th.Tensor,
+        batch: th.Tensor,
+        edge_attr: th.Tensor,
+        P_0: th.Tensor,
+        C_0: th.Tensor,
+        parent_idx: th.Tensor,
+        leaf_idx_train: th.Tensor,
+        leaf_expansion: th.Tensor,
+        leaf_parent_idx: th.Tensor,
+        model: Module,
+    ) -> tuple[th.Tensor, th.Tensor]:
+        """Compute σ-conditioned denoising losses for positional + expansion targets."""
+        device = P_0.device
+        num_leaves = leaf_idx_train.numel()
+        if node_feats is None:
+            node_feats = P_0.new_zeros((P_0.size(0), 0))
 
-    def to(self, device):
-        self._device = device
-        self.model_wrapper.to(device)
-        return self
+        if num_leaves == 0:
+            zero = P_0.new_zeros(())
+            return zero, zero
 
-    def get_loss(self, node_feats, edge_index, batch, edge_attr, P_0, C_0, parent_idx, leaf_idx_train, leaf_expansion, leaf_parent_idx, model):
-        # rescale expansion from {1,2} to {-1, 1}
-        leaf_expansion = (leaf_expansion - 1) * 2 - 1
+        leaf_expansion = leaf_expansion.to(dtype=P_0.dtype).view(-1, 1)
+        e_0 = 2.0 * leaf_expansion - 1.0
 
-        # sample noise level
-        num_graphs = batch.max().item() + 1
-        rnd_normal = th.randn((num_graphs,), device=self.device)
-        t = (rnd_normal * self.P_std + self.P_mean).exp() # change to matrix level TODO
+        if batch.numel() == 0:
+            raise ValueError("Batch vector is empty; cannot sample σ.")
+        num_graphs = int(batch.max().item()) + 1
+        sigma_graph = (
+            th.randn((num_graphs,), device=device) * self.P_std + self.P_mean
+        ).exp()
+        sigma_graph = sigma_graph.clamp(self.sigma_min, self.sigma_max)
+        log_sigma_graph = sigma_graph.log()
 
-        # sample noise
-        expansion_noise = th.randn_like(leaf_expansion) * t[batch]
-        position_noise = th.randn_like(C_0) * t[batch]
+        leaf_batch = batch[leaf_idx_train]
+        sigma_leaf = sigma_graph[leaf_batch].view(-1, 1)
 
-        # add noise
-        e_t = leaf_expansion + expansion_noise  # update e_0 with noisy leaf expansion to make e_t
-        C_t = C_0 + position_noise
+        eps_pos = th.randn_like(C_0)
+        eps_exp = th.randn_like(e_0)
+        C_t = C_0 + sigma_leaf * eps_pos
+        e_t = e_0 + sigma_leaf * eps_exp
 
-        # update P_0 with noisy leaf position to make P_t
+        P_t = P_0.clone()
+        P_t[leaf_idx_train] = P_0[leaf_parent_idx] + C_t
 
-        # update node_feats to include e_t
+        N = P_0.size(0)
+        e_feat = P_0.new_zeros((N, 1))
+        e_feat[leaf_idx_train] = e_t
+        log_sigma_node = log_sigma_graph[batch].view(N, 1)
+        node_feats_t = th.cat([node_feats, e_feat, log_sigma_node], dim=-1)
 
-        # create input features as x_in as concat of P_t and node_feats
-
-        # make prediction - SKIPPING EDM FOR NOW AND USING BASIC DIFFUSION MODEL
-        expansion_pred, pos_pred = self.model(
+        x_in = th.cat([P_t, node_feats_t], dim=-1)
+        out = model(
+            x=x_in,
             edge_index=edge_index,
             batch=batch,
-            x_in=x_in,
             edge_attr=edge_attr,
             parent_idx=parent_idx,
         )
+        if not isinstance(out, dict):
+            raise ValueError("Model must return dict with 'rel_pred' and 'expansion_pred'.")
+        rel_pred_all = out["rel_pred"]
+        exp_pred_all = out["expansion_pred"]
 
-        # compute loss
-        weight = (t**2 + self.sigma_data**2) / (t * self.sigma_data) ** 2
-        expansion_loss = weight[batch] * (expansion_pred - leaf_expansion) ** 2
-        pos_loss = weight[batch] * (pos_pred - C_0) ** 2
+        C_pred = rel_pred_all[leaf_idx_train]
+        e_pred = exp_pred_all[leaf_idx_train]
+        if e_pred.dim() == 1:
+            e_pred = e_pred.unsqueeze(-1)
 
-        return expansion_loss, pos_loss
+        pos_loss = F.mse_loss(C_pred, C_0)
+        exp_loss = F.mse_loss(e_pred, e_0)
+        return exp_loss, pos_loss
+
+    @staticmethod
+    def make_sigma_schedule(num_steps: int, sigma_max: float, sigma_min: float, device: th.device) -> th.Tensor:
+        """Return monotonically decreasing sigma schedule ending with 0."""
+        steps = max(int(num_steps), 1)
+        ramp = th.linspace(0.0, 1.0, steps=steps, device=device)
+        sigmas = sigma_max * (sigma_min / sigma_max) ** ramp
+        sigmas = th.cat([sigmas, sigmas.new_zeros(1)], dim=0)
+        return sigmas
 
     @th.no_grad()
-    def sample(self, edge_index, batch, model, model_kwargs):
-        pass
+    def sample(
+        self,
+        *,
+        node_feats: th.Tensor | None,
+        edge_index: th.Tensor,
+        batch: th.Tensor,
+        edge_attr: th.Tensor,
+        P_0: th.Tensor,
+        parent_idx: th.Tensor,
+        leaf_idx: th.Tensor,
+        leaf_parent_idx: th.Tensor,
+        model: Module,
+        model_kwargs: dict | None = None,
+    ) -> tuple[th.Tensor, th.Tensor]:
+        """Deterministically denoise leaves via σ-schedule (ancestral-free)."""
+        device = P_0.device
+        model_kwargs = model_kwargs or {}
+        if node_feats is None:
+            node_feats = P_0.new_zeros((P_0.size(0), 0))
 
+        if leaf_idx.numel() == 0:
+            zero_pos = P_0.new_zeros((0, 3))
+            zero_exp = P_0.new_zeros((0, 1))
+            return zero_pos, zero_exp
+
+        node_feats = node_feats.to(device=device)
+        parent_idx = parent_idx.to(device=device)
+        leaf_idx = leaf_idx.to(device=device, dtype=th.long)
+        leaf_parent_idx = leaf_parent_idx.to(device=device, dtype=th.long)
+
+        sigmas = self.make_sigma_schedule(self.num_steps, self.sigma_max, self.sigma_min, device)
+        sigma_init = float(sigmas[0].item())
+
+        L = leaf_idx.numel()
+        N = P_0.size(0)
+        parent_pos = P_0[leaf_parent_idx]
+        C = th.randn((L, 3), device=device) * sigma_init
+        e = th.randn((L, 1), device=device) * sigma_init
+
+        C0_pred = th.zeros_like(C)
+        e0_pred = th.zeros_like(e)
+
+        for step in range(self.num_steps):
+            sigma_cur = float(sigmas[step].item())
+            sigma_next = float(sigmas[step + 1].item())
+            sigma_cur_clamped = max(sigma_cur, 1e-12)
+            log_sigma = math.log(sigma_cur_clamped)
+
+            P_cur = P_0.clone()
+            P_cur[leaf_idx] = parent_pos + C
+
+            e_feat = P_0.new_zeros((N, 1))
+            e_feat[leaf_idx] = e
+
+            log_sigma_feat = P_0.new_full((N, 1), log_sigma)
+            node_feats_t = th.cat([node_feats, e_feat, log_sigma_feat], dim=-1)
+            x_in = th.cat([P_cur, node_feats_t], dim=-1)
+
+            out = model(
+                x=x_in,
+                edge_index=edge_index,
+                batch=batch,
+                edge_attr=edge_attr,
+                parent_idx=parent_idx,
+                **model_kwargs,
+            )
+            if not isinstance(out, dict):
+                raise ValueError("Model must return dict with 'rel_pred' and 'expansion_pred'.")
+            rel_pred_all = out["rel_pred"]
+            exp_pred_all = out["expansion_pred"]
+
+            C0_pred = rel_pred_all[leaf_idx]
+            e0_pred = exp_pred_all[leaf_idx]
+            if e0_pred.dim() == 1:
+                e0_pred = e0_pred.unsqueeze(-1)
+
+            inv_sigma = 1.0 / sigma_cur_clamped
+            eps_C = (C - C0_pred) * inv_sigma
+            eps_e = (e - e0_pred) * inv_sigma
+
+            C = C0_pred + sigma_next * eps_C
+            e = e0_pred + sigma_next * eps_e
+
+        return C0_pred, e0_pred
