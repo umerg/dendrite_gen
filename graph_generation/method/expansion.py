@@ -28,15 +28,11 @@ class Expansion(Method):
         diffusion: Module | None = None,
         deterministic_expansion: bool = False,      # just sets seeding for reproducibility
         red_threshold: int = 0,
-        leaf_noise_sigma: float = 0.05,             # <-- stddev of Gaussian around parent (same units as pos)
-        leaf_noise_clip: float | None = None,       # <-- optional radius clamp (float) or None
         expansion_loss_weight: float = 1.0,
     ):
         super().__init__(diffusion=diffusion)
         self.deterministic_expansion = deterministic_expansion
         self.red_threshold = red_threshold
-        self.leaf_noise_sigma = float(leaf_noise_sigma)
-        self.leaf_noise_clip = leaf_noise_clip
         self.expansion_loss_weight = float(expansion_loss_weight)
     
     def sample_graphs(self, target_size: th.Tensor, model: Module):
@@ -451,13 +447,14 @@ class Expansion(Method):
             assert (leaf_parent_idx >= 0).all(), "Leaf with no valid parent encountered."
 
         # map per-node expansion labels so new leaves can be indexed directly
+        # more an indexing step? because we map to allnodes and then back to only new leaves instead of all leaves
         leaf_targets_per_node = leaf_expansion_all.new_full((pos_gt.size(0),), -1)
         if leaf_idx_all.numel() > 0:
             leaf_targets_per_node[leaf_idx_all] = leaf_expansion_all.view(-1)
         leaf_expansion = leaf_targets_per_node[leaf_idx_train]
         if leaf_expansion.numel() > 0:
             valid_mask = leaf_expansion >= 0
-            if not valid_mask.all():
+            if not valid_mask.all(): # filter out any invalid leaves - extra safety? Shouldn't get triggered?
                 leaf_idx_train = leaf_idx_train[valid_mask]
                 leaf_parent_idx = leaf_parent_idx[valid_mask]
                 leaf_expansion = leaf_expansion[valid_mask]
@@ -471,7 +468,7 @@ class Expansion(Method):
         # --- prepare EGNN input (positions + minimal node features)
         feats_total = getattr(model, 'feats_dim', 0)
         cond_dim = getattr(self.diffusion, "cond_dim", 0) if self.diffusion is not None else 0
-        feats_dim = max(feats_total - cond_dim, 0)
+        feats_dim = max(feats_total - cond_dim, 0) # need to account for diffusion cond input added inside diffusion module
 
         if feats_dim > 0:
             is_leaf = pos_gt.new_zeros((pos_gt.size(0), 1))

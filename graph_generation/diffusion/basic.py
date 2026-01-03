@@ -44,7 +44,7 @@ class DenoisingDiffusionModel(Module):
             return zero, zero
 
         leaf_expansion = leaf_expansion.to(dtype=P_0.dtype).view(-1, 1)
-        e_0 = 2.0 * leaf_expansion - 1.0
+        e_0 = 2.0 * leaf_expansion - 1.0 # map [0,1] to [-1,1]
 
         if batch.numel() == 0:
             raise ValueError("Batch vector is empty; cannot sample σ.")
