@@ -9,7 +9,7 @@ import networkx as nx
 import numpy as np
 import torch as th
 import torch.multiprocessing as mp
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader
 from torch_geometric.data import Batch
 
@@ -18,7 +18,7 @@ from utils.data_loading import nx_graph_to_adj_pos, load_swc_graphs_from_dir
 import graph_generation as gg
 
 
-def get_expansion_items(cfg: DictConfig, train_graphs):
+def get_expansion_items(cfg: DictConfig, train_graphs, diffusion=None):
 
     # Train Dataset
     reduction_type = getattr(cfg.reduction, "type", "cherry")
@@ -175,7 +175,21 @@ def get_expansion_items(cfg: DictConfig, train_graphs):
     #     raise ValueError(f"Unknown diffusion name: {cfg.diffusion.name}")
 
     # Method
-    if cfg.method.name == "expansion":
+    method = None
+    method_name = cfg.method.name
+    if diffusion is not None:
+        if method_name != "expansion":
+            raise ValueError(
+                f"Diffusion-based runs require method 'expansion', got '{method_name}'."
+            )
+        expansion_loss_weight = getattr(cfg.method, "expansion_loss_weight", 1.0)
+        method = gg.method.Expansion(
+            diffusion=diffusion,
+            deterministic_expansion=cfg.method.deterministic_expansion,
+            red_threshold=cfg.reduction.red_threshold,
+            expansion_loss_weight=expansion_loss_weight,
+        )
+    elif method_name == "expansion":
         method = gg.method.Expansion_OneShot(
             deterministic_expansion=cfg.method.deterministic_expansion,
             red_threshold=cfg.reduction.red_threshold,
@@ -186,8 +200,8 @@ def get_expansion_items(cfg: DictConfig, train_graphs):
             debug=cfg.debugging,
             debug_max_batches=cfg.debugging_max_batches,
             debug_dir=cfg.debugging_dir,
-        ) # expansion with one-shot generation at every step
-    elif cfg.method.name == "expansion_augmented":
+        )  # expansion with one-shot generation at every step
+    elif method_name == "expansion_augmented":
         method = gg.method.Expansion_OneShot_Augmented(
             deterministic_expansion=cfg.method.deterministic_expansion,
             red_threshold=cfg.reduction.red_threshold,
@@ -198,9 +212,9 @@ def get_expansion_items(cfg: DictConfig, train_graphs):
             debug=cfg.debugging,
             debug_max_batches=cfg.debugging_max_batches,
             debug_dir=cfg.debugging_dir,
-        ) # augmented expansion with one-shot generation at every step
+        )  # augmented expansion with one-shot generation at every step
     else:
-        raise ValueError(f"Unknown method name: {cfg.method.name}")
+        raise ValueError(f"Unknown method name: {method_name}")
 
     return {
         "train_dataloader": train_dataloader,
@@ -284,9 +298,20 @@ def main(cfg: DictConfig):
             gg.metrics.UniqueNovelValidTree(),
         ]
 
+    diffusion_cfg = OmegaConf.select(cfg, "diffusion")
+    diffusion = None
+    if diffusion_cfg is not None:
+        diffusion_name = getattr(diffusion_cfg, "name", None)
+        if diffusion_name == "basic":
+            diffusion = gg.diffusion.DenoisingDiffusionModel(
+                num_steps=diffusion_cfg.num_steps,
+            )
+        else:
+            raise ValueError(f"Unknown diffusion name: {diffusion_name}")
+
     # Method
     if cfg.method.name in ("expansion", "expansion_augmented"):
-        method_items = get_expansion_items(cfg, train_graphs)
+        method_items = get_expansion_items(cfg, train_graphs, diffusion=diffusion)
     else:
         raise ValueError(f"Unknown method name: {cfg.method.name}")
     method_items = defaultdict(lambda: None, method_items)
