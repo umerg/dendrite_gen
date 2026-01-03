@@ -315,6 +315,10 @@ def main(cfg: DictConfig):
     else:
         raise ValueError(f"Unknown method name: {cfg.method.name}")
     method_items = defaultdict(lambda: None, method_items)
+    # verbose logging of method details
+    print(f"Using method: {cfg.method.name}")
+    print(f"Method details: {method_items['method']}")
+    print(f"Model details: {method_items['model']}")
 
     # Trainer
     th.set_float32_matmul_precision("high")

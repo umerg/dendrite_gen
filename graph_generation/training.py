@@ -264,7 +264,6 @@ class Trainer:
                 sizes = sizes[sizes > 0]
                 if sizes.numel() > 0:
                     unique_sizes = sorted({int(size) for size in sizes.tolist()})
-                    print(f"[Debug] Unique graph sizes this batch: {unique_sizes}")
 
         loss, loss_terms = self.method.get_loss(
             batch=batch, model=self.model,

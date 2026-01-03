@@ -5,7 +5,7 @@ defaults:
   - method: expansion_oneshot
 
 reduction:
-  type: "cherry"
+  type: "depth"
   mode: "stochastic"
   cherry_p: 1.0 # imp now with new leaves tracking?
   ensure_progress: True
@@ -26,7 +26,7 @@ training:
   resume: False # if True, resume from last checkpoint, if number, resume from that step
   lr_scheduler: "cosine_annealing"              # Enable cosine annealing
   scheduler_T_max: ${training.num_steps}  # Optional: full cosine cycle length
-  scheduler_eta_min: 1.0e-8          # Optional: minimum learning rate
+  scheduler_eta_min: 1.0e-6          # Optional: minimum learning rate
 
 validation:
   batch_size: 1
