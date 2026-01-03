@@ -342,7 +342,7 @@ class Expansion_OneShot(Method):
             graph_mask = (batch_vec == graph_id)
             node_idx = graph_mask.nonzero(as_tuple=False).flatten()
             graph_size = int(node_idx.numel())
-            if graph_size < 7 or graph_size > 11: # chnage debug graph size range here
+            if graph_size < 9 or graph_size > 13: # change debug graph size range here
                 continue
             node_ids = node_idx.tolist()
             global_to_local = {int(g): i for i, g in enumerate(node_ids)}
