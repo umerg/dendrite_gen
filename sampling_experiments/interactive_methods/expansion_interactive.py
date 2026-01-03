@@ -71,6 +71,7 @@ class InteractiveExpansionOneShot(Expansion_OneShot):
         leaf_expansion = th.where(target_size >= 3, th.full_like(leaf_idx, 2), th.full_like(leaf_idx, 1))
         pos = root_pos
         sibling_order = th.full((num_graphs,), -1, device=device, dtype=th.long)
+        leaf_mask = th.ones((num_graphs,), device=device, dtype=th.bool)
         max_steps = int(target_size.max().item() * 2)
 
         traces: list[list[GraphStepTrace]] = [[] for _ in range(num_graphs)]
@@ -101,6 +102,7 @@ class InteractiveExpansionOneShot(Expansion_OneShot):
                 parent_idx_1b,
                 batch,
                 sibling_order,
+                leaf_mask,
                 terminated,
                 debug_payload,
             ) = self.expand(
@@ -113,6 +115,7 @@ class InteractiveExpansionOneShot(Expansion_OneShot):
                 leaf_expansion=leaf_expansion,
                 parent_idx_1b=parent_idx_1b,
                 sibling_order=sibling_order,
+                leaf_mask=leaf_mask,
                 step=step,
                 ensure_progress=ensure_progress,
                 map_threshold=threshold,
@@ -321,6 +324,7 @@ class InteractiveExpansionOneShot(Expansion_OneShot):
         leaf_expansion: th.Tensor | None = None,
         parent_idx_1b: th.Tensor | None = None,
         sibling_order: th.Tensor | None = None,
+        leaf_mask: th.Tensor | None = None,
         step: int = 0,
         ensure_progress: bool = False,
         map_threshold: float = 0.5,
@@ -332,6 +336,12 @@ class InteractiveExpansionOneShot(Expansion_OneShot):
 
         device = pos.device
         parent_idx = parent_idx_1b - 1
+        if leaf_mask is None:
+            leaf_mask = th.ones((pos.size(0),), device=device, dtype=th.bool)
+        else:
+            leaf_mask = leaf_mask.to(device=device)
+            if leaf_mask.dtype != th.bool:
+                leaf_mask = leaf_mask.bool()
 
         size_per_graph = scatter(th.ones_like(batch_reduced), batch_reduced)
         remaining_capacity = target_size.to(device) - size_per_graph
@@ -347,6 +357,7 @@ class InteractiveExpansionOneShot(Expansion_OneShot):
                 parent_idx_1b,
                 batch_reduced,
                 sibling_order.clone(),
+                leaf_mask.clone(),
                 True,
             )
             if return_debug_payload:
@@ -397,6 +408,11 @@ class InteractiveExpansionOneShot(Expansion_OneShot):
                     forced_leaf = leaf_indices_g[rand_idx]
                 spawn_counts_final[forced_leaf] = 2
 
+        leaf_mask_updated = leaf_mask.clone()
+        expanded_mask = spawn_counts_final == 2
+        if expanded_mask.any():
+            leaf_mask_updated[leaf_idx[expanded_mask]] = False
+
         total_new_children = int(spawn_counts_final.sum().item())
         if total_new_children == 0:
             result = (
@@ -407,6 +423,7 @@ class InteractiveExpansionOneShot(Expansion_OneShot):
                 parent_idx_1b,
                 batch_reduced,
                 sibling_order.clone(),
+                leaf_mask_updated,
                 True,
             )
             if return_debug_payload:
@@ -479,6 +496,8 @@ class InteractiveExpansionOneShot(Expansion_OneShot):
         adj_new = SparseTensor(row=row_all, col=col_all, value=val_all, sparse_sizes=(pos_new.size(0), pos_new.size(0)))
 
         leaf_idx_next = th.arange(base_N, base_N + total_new_children, device=device, dtype=leaf_idx.dtype)
+        new_leaf_flags = th.ones((leaf_idx_next.numel(),), device=device, dtype=th.bool)
+        leaf_mask_next = th.cat([leaf_mask_updated, new_leaf_flags], dim=0)
         if leaf_idx_next.numel() == 0:
             result = (
                 adj_new,
@@ -488,6 +507,7 @@ class InteractiveExpansionOneShot(Expansion_OneShot):
                 parent_idx_1b_new,
                 batch_new,
                 sibling_order_next,
+                leaf_mask_next,
                 True,
             )
             if return_debug_payload:
@@ -505,8 +525,7 @@ class InteractiveExpansionOneShot(Expansion_OneShot):
         feats_dim = getattr(model, "feats_dim", 0)
         pos_dim = getattr(model, "pos_dim", 3)
         if feats_dim > 0:
-            is_leaf_flag = pos_new.new_zeros((pos_new.size(0), 1))
-            is_leaf_flag[leaf_idx_next] = 1.0
+            is_leaf_flag = leaf_mask_next.to(dtype=pos_new.dtype).unsqueeze(-1)
             features = [is_leaf_flag]
             feats_used = 1
             if feats_used < feats_dim:
@@ -565,6 +584,7 @@ class InteractiveExpansionOneShot(Expansion_OneShot):
             parent_idx_1b_new,
             batch_new,
             sibling_order_next,
+            leaf_mask_next,
             terminated,
         )
 

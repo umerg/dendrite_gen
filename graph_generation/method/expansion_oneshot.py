@@ -540,6 +540,7 @@ class Expansion_OneShot(Method):
         pos = root_pos
         # Persistent sibling order: -1 for nodes with no sibling assignment yet
         sibling_order = th.full((num_graphs,), -1, device=device, dtype=th.long)
+        leaf_mask = th.ones((num_graphs,), device=device, dtype=th.bool)
 
         # Safety max steps: enough to reach capacity even if only one leaf expands each time.
         max_steps = int(target_size.max().item() * 2)  # generous upper bound
@@ -547,7 +548,7 @@ class Expansion_OneShot(Method):
         terminated = False
 
         while not terminated and step < max_steps:
-            adj, pos, leaf_idx, leaf_expansion, parent_idx_1b, batch, sibling_order, terminated = self.expand(
+            adj, pos, leaf_idx, leaf_expansion, parent_idx_1b, batch, sibling_order, leaf_mask, terminated = self.expand(
                 adj,
                 batch,
                 target_size,
@@ -557,6 +558,7 @@ class Expansion_OneShot(Method):
                 leaf_expansion=leaf_expansion,
                 parent_idx_1b=parent_idx_1b,
                 sibling_order=sibling_order,
+                leaf_mask=leaf_mask,
                 step=step,
                 ensure_progress=False,
                 map_threshold=0.3,
@@ -601,6 +603,7 @@ class Expansion_OneShot(Method):
         leaf_expansion: th.Tensor | None = None,
         parent_idx_1b: th.Tensor | None = None,
         sibling_order: th.Tensor | None = None,
+        leaf_mask: th.Tensor | None = None,
         step: int = 0,
         ensure_progress: bool = False,
         map_threshold: float = 0.5,
@@ -625,6 +628,12 @@ class Expansion_OneShot(Method):
         # 1) Basic tensor / device prep
         device = pos.device
         parent_idx = parent_idx_1b - 1  # 0-based parent indices
+        if leaf_mask is None:
+            leaf_mask = th.ones((pos.size(0),), device=device, dtype=th.bool)
+        else:
+            leaf_mask = leaf_mask.to(device=device)
+            if leaf_mask.dtype != th.bool:
+                leaf_mask = leaf_mask.bool()
         
         # -----ENFORCING DETERMINISTIC CONDITIONS-----
 
@@ -635,7 +644,17 @@ class Expansion_OneShot(Method):
             sibling_order = th.full((pos.size(0),), -1, device=device, dtype=th.long)
 
         if (remaining_capacity <= 0).all() or leaf_idx.numel() == 0:
-            return adj_reduced, pos, leaf_idx.clone(), leaf_expansion.clone(), parent_idx_1b, batch_reduced, sibling_order.clone(), True
+            return (
+                adj_reduced,
+                pos,
+                leaf_idx.clone(),
+                leaf_expansion.clone(),
+                parent_idx_1b,
+                batch_reduced,
+                sibling_order.clone(),
+                leaf_mask.clone(),
+                True,
+            )
 
         # 3) Map labels -> spawn counts (binary branching)
         spawn_counts = (leaf_expansion == 2).long() * 2  # {0,2}
@@ -700,13 +719,27 @@ class Expansion_OneShot(Method):
         # 6) Count new children & early exit
         total_new_children = int(spawn_counts_final.sum().item())
         if total_new_children == 0:
-            return adj_reduced, pos, leaf_idx.clone(), leaf_expansion.clone(), parent_idx_1b, batch_reduced, sibling_order.clone(), True
+            return (
+                adj_reduced,
+                pos,
+                leaf_idx.clone(),
+                leaf_expansion.clone(),
+                parent_idx_1b,
+                batch_reduced,
+                sibling_order.clone(),
+                leaf_mask.clone(),
+                True,
+            )
 
         # ----- EXPANSION -----
 
         # 7) Materialize children (positions, parents, batch ids)
         base_N = adj_reduced.size(0)
         new_child_positions = []
+        leaf_mask_updated = leaf_mask.clone()
+        expanded_mask = spawn_counts_final == 2
+        if expanded_mask.any():
+            leaf_mask_updated[leaf_idx[expanded_mask]] = False
         new_child_parents = []
         new_child_batches = []
         parent_child_edges = []
@@ -764,8 +797,20 @@ class Expansion_OneShot(Method):
 
         # 9) Next leaf set (children only)
         leaf_idx_next = th.arange(base_N, base_N + total_new_children, device=device, dtype=leaf_idx.dtype)
+        new_leaf_flags = th.ones((leaf_idx_next.numel(),), device=device, dtype=th.bool)
+        leaf_mask_next = th.cat([leaf_mask_updated, new_leaf_flags], dim=0)
         if leaf_idx_next.numel() == 0:
-            return adj_new, pos_new, leaf_idx_next, leaf_idx_next.new_empty((0,), dtype=leaf_expansion.dtype), parent_idx_1b_new, batch_new, sibling_order_next, True
+            return (
+                adj_new,
+                pos_new,
+                leaf_idx_next,
+                leaf_idx_next.new_empty((0,), dtype=leaf_expansion.dtype),
+                parent_idx_1b_new,
+                batch_new,
+                sibling_order_next,
+                leaf_mask_next,
+                True,
+            )
 
         num_graphs_total = int(target_size.numel())
         node_counts_per_graph = scatter(
@@ -782,8 +827,7 @@ class Expansion_OneShot(Method):
         pos_dim = getattr(model, 'pos_dim', 3)
         if feats_dim > 0:
             # feature 0: is_leaf flag
-            is_leaf_flag = pos_new.new_zeros((pos_new.size(0), 1))
-            is_leaf_flag[leaf_idx_next] = 1.0
+            is_leaf_flag = leaf_mask_next.to(dtype=pos_new.dtype).unsqueeze(-1)
             features = [is_leaf_flag]
             feats_used = 1
             # feature 1: sibling left flag (persistent) if capacity permits
@@ -845,7 +889,17 @@ class Expansion_OneShot(Method):
         remaining_capacity_new = target_size.to(device) - node_counts_per_graph
         terminated = (remaining_capacity_new < 2).all() or leaf_idx_next.numel() == 0
 
-        return adj_new, pos_new, leaf_idx_next, leaf_expansion_next, parent_idx_1b_new, batch_new, sibling_order_next, terminated
+        return (
+            adj_new,
+            pos_new,
+            leaf_idx_next,
+            leaf_expansion_next,
+            parent_idx_1b_new,
+            batch_new,
+            sibling_order_next,
+            leaf_mask_next,
+            terminated,
+        )
 
     # ---------------------------------------------------------
     # 1) Build masked positions: replace leaf coords by parent + noise
