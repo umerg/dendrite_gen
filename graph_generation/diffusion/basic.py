@@ -11,7 +11,7 @@ class DenoisingDiffusionModel(Module):
     P_mean = -1.2
     P_std = 1.2
     sigma_min = 0.002
-    sigma_max = 80.0
+    sigma_max = 6.0
     cond_dim = 2  # e_t feature + log_sigma feature per node
 
     def __init__(self, num_steps: int = 1):
