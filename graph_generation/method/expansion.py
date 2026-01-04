@@ -453,6 +453,11 @@ class Expansion(Method):
         else:
             leaf_parent_idx = parent_idx[leaf_idx_train]
             assert (leaf_parent_idx >= 0).all(), "Leaf with no valid parent encountered."
+        
+        overlap = th.isin(leaf_idx_train, leaf_idx_all).float().mean().item() if leaf_idx_train.numel() else 1.0
+        num_valid = int((leaf_targets_per_node[leaf_idx_train] >= 0).sum().item()) if leaf_idx_train.numel() else 0
+        logger.info("[SupervisionDebug] n_train=%d n_all=%d overlap=%.3f num_valid=%d",
+                    leaf_idx_train.numel(), leaf_idx_all.numel(), overlap, num_valid)
 
         # map per-node expansion labels so new leaves can be indexed directly
         # more an indexing step? because we map to allnodes and then back to only new leaves instead of all leaves
