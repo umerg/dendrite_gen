@@ -434,6 +434,14 @@ class Expansion(Method):
             raise ValueError("Expected batch.leaf_idx (leaf node indices). Please update dataloader.")
         leaf_idx_all = batch.leaf_idx
 
+        leaf_graphs_all = batch.batch[leaf_idx_all]
+        logger.info(
+        "[LeafAllDebug] leaf_idx_all.max()=%s, unique_leaf_graphs_all=%s, leaf_idx_all[:20]=%s",
+        int(leaf_idx_all.max().item()),
+        int(leaf_graphs_all.unique().numel()),
+        leaf_idx_all[:20].tolist()
+        )
+
         # --- expansion state for leaves
         if not hasattr(batch, "leaf_expansion"):
             raise ValueError("Expected batch.leaf_expansion (leaf expansion states). Please update dataloader.")
