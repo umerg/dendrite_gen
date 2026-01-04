@@ -458,6 +458,24 @@ class Expansion(Method):
                 leaf_idx_train = leaf_idx_train[valid_mask]
                 leaf_parent_idx = leaf_parent_idx[valid_mask]
                 leaf_expansion = leaf_expansion[valid_mask]
+
+        if leaf_idx_train.numel() > 0:
+            N = int(batch.pos.size(0))
+            ptr = getattr(batch, "ptr", None)
+            num_graphs = int(ptr.numel() - 1) if ptr is not None else None
+            leaf_sample = leaf_idx_train[:20].tolist()
+            leaf_max = int(leaf_idx_train.max().item())
+            ptr_sample = ptr[:5].tolist() if ptr is not None else None
+            unshifted = leaf_max < N
+            logger.info(
+                "[IndexDebug] N=%s, num_graphs=%s, leaf_idx_train[:20]=%s, leaf_idx_train.max()=%s, batch.ptr[:5]=%s, unshifted=%s",
+                N,
+                num_graphs,
+                leaf_sample,
+                leaf_max,
+                ptr_sample,
+                unshifted,
+            )
         
         # --- relative position conformation matrix for new/train leaves 
         leaf_rel_pos = leaf_rel_targets(pos_gt, leaf_idx_train, leaf_parent_idx)  # [L,3]
