@@ -1,45 +1,37 @@
+"""Interactive wrapper around the diffusion-based Expansion sampler."""
+
+from __future__ import annotations
+
+from typing import Any, Dict, Optional
+
 import networkx as nx
 import torch as th
 from torch.nn import Module
 from torch_scatter import scatter
 from torch_sparse import SparseTensor
-import logging
 
-logger = logging.getLogger(__name__)
+from graph_generation.method.expansion import Expansion
+from graph_generation.method.helpers import build_directed_edge_index
 
-from .helpers import (
-    build_directed_edge_index,
-    compute_geo_lr_mask,
-    decode_parent_indices,
-    leaf_rel_targets,
-    plot_diffusion_debug_trees,
-    select_training_leaf_indices,
-    size_ratio_feature_from_batch,
-)
-from .method import Method
+from .expansion_interactive import GraphStepTrace
 
-class Expansion(Method):
-    """Graph generation method generating graphs by local expansion."""
 
-    EDGE_PARENT_TO_CHILD = 0
-    EDGE_CHILD_TO_PARENT = 1
+class InteractiveDiffusionExpansion(Expansion):
+    """Diffusion-driven Expansion method that captures per-step traces."""
 
-    def __init__(
+    DEFAULT_MAP_THRESHOLD = 0.0
+
+    def sample_graphs_with_trace(
         self,
-        diffusion: Module | None = None,
-        deterministic_expansion: bool = False,      # just sets seeding for reproducibility
-        red_threshold: int = 0,
-        expansion_loss_weight: float = 1.0,
-    ):
-        super().__init__(diffusion=diffusion)
-        self.deterministic_expansion = deterministic_expansion
-        self.red_threshold = red_threshold
-        self.expansion_loss_weight = float(expansion_loss_weight)
-    
-    def sample_graphs(self, target_size: th.Tensor, model: Module):
-        """Generate graphs via iterative diffusion-based leaf expansion."""
+        target_size: th.Tensor,
+        model,
+        *,
+        map_threshold: float | None = None,
+        ensure_progress: bool = False,
+    ) -> tuple[list[nx.Graph], list[list[GraphStepTrace]]]:
+        """Run sampling while collecting graph+trace artifacts."""
         if self.diffusion is None:
-            raise ValueError("Diffusion module is required for sampling.")
+            raise ValueError("InteractiveDiffusionExpansion requires a diffusion module.")
         if target_size.dim() != 1:
             raise ValueError("target_size must be a 1D tensor.")
         if (target_size < 1).any():
@@ -47,6 +39,7 @@ class Expansion(Method):
 
         device = target_size.device
         num_graphs = int(target_size.numel())
+        threshold = map_threshold if map_threshold is not None else self.DEFAULT_MAP_THRESHOLD
 
         pos = th.zeros((num_graphs, 3), device=device)
         adj = SparseTensor(
@@ -62,12 +55,27 @@ class Expansion(Method):
         leaf_expansion = th.where(expandable.bool(), th.full_like(leaf_idx, 2), th.full_like(leaf_idx, 1))
         geo_lr_assign = th.full((num_graphs,), -1, device=device, dtype=th.long)
         leaf_mask = th.ones((num_graphs,), device=device, dtype=th.bool)
-
         max_steps = int(target_size.max().item() * 2)
+
+        traces: list[list[GraphStepTrace]] = [[] for _ in range(num_graphs)]
+        initial_traces = self._capture_step_traces(
+            step_idx=0,
+            adj=adj,
+            pos=pos,
+            batch=batch,
+            leaf_idx=leaf_idx,
+            prev_leaf_idx=None,
+            geo_lr_assign=geo_lr_assign,
+            target_size=target_size,
+            debug_payload=None,
+        )
+        for g in range(num_graphs):
+            traces[g].append(initial_traces[g])
+
         step = 0
         terminated = False
-
         while not terminated and step < max_steps:
+            prev_leaf_idx = leaf_idx.clone()
             (
                 adj,
                 pos,
@@ -78,6 +86,7 @@ class Expansion(Method):
                 geo_lr_assign,
                 leaf_mask,
                 terminated,
+                debug_payload,
             ) = self.expand(
                 adj,
                 batch,
@@ -90,25 +99,184 @@ class Expansion(Method):
                 geo_lr_assign=geo_lr_assign,
                 leaf_mask=leaf_mask,
                 step=step,
-                ensure_progress=False,
+                ensure_progress=ensure_progress,
+                map_threshold=threshold,
+                return_debug_payload=True,
             )
             step += 1
+            step_traces = self._capture_step_traces(
+                step_idx=step,
+                adj=adj,
+                pos=pos,
+                batch=batch,
+                leaf_idx=leaf_idx,
+                prev_leaf_idx=prev_leaf_idx,
+                geo_lr_assign=geo_lr_assign,
+                target_size=target_size,
+                debug_payload=debug_payload,
+            )
+            for g in range(num_graphs):
+                traces[g].append(step_traces[g])
+
+        graphs = self._build_final_graphs(adj, batch, pos, num_graphs)
+        return graphs, traces
+
+    def _capture_step_traces(
+        self,
+        *,
+        step_idx: int,
+        adj: SparseTensor,
+        pos: th.Tensor,
+        batch: th.Tensor,
+        leaf_idx: th.Tensor,
+        prev_leaf_idx: Optional[th.Tensor],
+        geo_lr_assign: th.Tensor,
+        target_size: th.Tensor,
+        debug_payload: dict | None,
+    ) -> list[GraphStepTrace]:
+        """Snapshot per-graph tensors into GraphStepTrace entries."""
+        num_graphs = int(target_size.numel())
+        traces: list[GraphStepTrace] = []
+
+        target_cpu = target_size.detach().cpu()
+        pos_cpu = pos.detach().cpu()
+        batch_cpu = batch.detach().cpu()
+        geo_cpu = geo_lr_assign.detach().cpu()
+        leaf_cpu = leaf_idx.detach().cpu()
+        prev_leaf_cpu = prev_leaf_idx.detach().cpu() if prev_leaf_idx is not None else None
 
         row, col, _ = adj.coo()
-        graphs = []
+        row_list = row.detach().cpu().tolist()
+        col_list = col.detach().cpu().tolist()
+
         for g in range(num_graphs):
-            mask = batch == g
-            node_ids = mask.nonzero(as_tuple=False).flatten()
-            local_map = {int(n.item()): i for i, n in enumerate(node_ids)}
-            G = nx.Graph()
-            for i_local, n_global in enumerate(node_ids.tolist()):
-                G.add_node(i_local, pos=pos[n_global].detach().cpu().numpy())
-            for r, c in zip(row.tolist(), col.tolist()):
+            node_mask = (batch_cpu == g)
+            node_ids = node_mask.nonzero(as_tuple=False).flatten()
+            node_ids_list = node_ids.tolist()
+            local_map = {int(global_id): idx for idx, global_id in enumerate(node_ids_list)}
+
+            node_positions = pos_cpu[node_ids]
+            geo_local = geo_cpu[node_ids]
+            remaining_capacity = int(target_cpu[g].item()) - len(node_ids_list)
+
+            leaf_local: list[int] = [local_map[idx] for idx in leaf_cpu.tolist() if idx in local_map]
+            expanded_local: list[int] = []
+            if prev_leaf_cpu is not None:
+                expanded_local = [local_map[idx] for idx in prev_leaf_cpu.tolist() if idx in local_map]
+
+            edges: list[tuple[int, int]] = []
+            seen: set[tuple[int, int]] = set()
+            for r, c in zip(row_list, col_list):
                 if r in local_map and c in local_map:
-                    if local_map[r] <= local_map[c]:
-                        G.add_edge(local_map[r], local_map[c])
+                    u = local_map[r]
+                    v = local_map[c]
+                    key = (u, v) if u <= v else (v, u)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    edges.append(key)
+
+            info = debug_payload.get(g) if debug_payload else None
+            expansion_logits = info.get("expansion_logits") if info else None
+            expansion_probs = info.get("expansion_probs") if info else None
+            rel_pred_tensor = (
+                th.tensor(info["rel_pred"], dtype=pos_cpu.dtype) if info and info.get("rel_pred") else None
+            )
+            extras: Dict[str, Any] | None = {"expanded_leaf_ids": expanded_local} if expanded_local else None
+            if info and info.get("leaf_global_ids"):
+                extras = extras or {}
+                extras["leaf_global_ids"] = info["leaf_global_ids"]
+
+            trace = GraphStepTrace(
+                step_idx=step_idx,
+                graph_id=g,
+                node_positions=node_positions.clone(),
+                edges=edges,
+                leaf_ids=leaf_local,
+                expansion_logits=expansion_logits,
+                expansion_probs=expansion_probs,
+                rel_pred=rel_pred_tensor,
+                noise_sample=None,
+                sibling_order=geo_local.clone(),
+                remaining_capacity=remaining_capacity,
+                enforced_progress=False,
+                extras=extras,
+            )
+            traces.append(trace)
+        return traces
+
+    def _build_final_graphs(
+        self,
+        adj: SparseTensor,
+        batch: th.Tensor,
+        pos: th.Tensor,
+        num_graphs: int,
+    ) -> list[nx.Graph]:
+        """Rebuild NetworkX graphs identical to base Expansion.sample_graphs."""
+        row, col, _ = adj.coo()
+        graphs: list[nx.Graph] = []
+        row_list = row.tolist()
+        col_list = col.tolist()
+
+        for g in range(num_graphs):
+            g_mask = (batch == g)
+            node_ids = th.nonzero(g_mask, as_tuple=False).flatten()
+            node_ids_list = node_ids.tolist()
+            local_map = {int(n): i for i, n in enumerate(node_ids_list)}
+            G = nx.Graph()
+            for i_local, n_global in enumerate(node_ids_list):
+                G.add_node(
+                    i_local,
+                    pos=pos[n_global].detach().cpu().numpy(),
+                )
+            seen: set[tuple[int, int]] = set()
+            for r, c in zip(row_list, col_list):
+                if r in local_map and c in local_map:
+                    u = local_map[r]
+                    v = local_map[c]
+                    key = (u, v) if u <= v else (v, u)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    G.add_edge(u, v)
             graphs.append(G)
         return graphs
+
+    def _build_debug_payload(
+        self,
+        *,
+        leaf_idx_next: th.Tensor,
+        batch_new: th.Tensor,
+        expansion_logits: th.Tensor,
+        expansion_probs: th.Tensor,
+        rel_pred_leaves: th.Tensor,
+    ) -> dict[int, dict]:
+        payload: dict[int, dict] = {}
+        if leaf_idx_next.numel() == 0:
+            return payload
+
+        leaf_ids = leaf_idx_next.detach().cpu().tolist()
+        graph_ids = batch_new[leaf_idx_next].detach().cpu().tolist()
+        logits = expansion_logits.detach().cpu().view(-1).tolist()
+        probs = expansion_probs.detach().cpu().view(-1).tolist()
+        rel_entries = rel_pred_leaves.detach().cpu().tolist()
+
+        for idx, graph_id in enumerate(graph_ids):
+            entry = payload.setdefault(
+                int(graph_id),
+                {
+                    "leaf_global_ids": [],
+                    "expansion_logits": [],
+                    "expansion_probs": [],
+                    "rel_pred": [],
+                    "noise": [],
+                },
+            )
+            entry["leaf_global_ids"].append(int(leaf_ids[idx]))
+            entry["expansion_logits"].append(float(logits[idx]))
+            entry["expansion_probs"].append(float(probs[idx]))
+            entry["rel_pred"].append(rel_entries[idx])
+        return payload
 
     @th.no_grad()
     def expand(
@@ -127,14 +295,13 @@ class Expansion(Method):
         step: int = 0,
         ensure_progress: bool = False,
         map_threshold: float = 0.0,
+        return_debug_payload: bool = False,
     ):
-        """Expand graphs by one generation step using binary leaf branching.
-        """
-
-        if not all(x is not None for x in (pos, leaf_idx, leaf_expansion, parent_idx_1b)):
-            raise ValueError("expand requires pos, leaf_idx, leaf_expansion, parent_idx_1b tensors.")
+        """Copy of Expansion.expand with optional debug payload output."""
         if self.diffusion is None:
             raise ValueError("Diffusion module must be provided for sampling.")
+        if not all(x is not None for x in (pos, leaf_idx, leaf_expansion, parent_idx_1b)):
+            raise ValueError("expand requires pos, leaf_idx, leaf_expansion, parent_idx_1b tensors.")
 
         device = pos.device
         parent_idx = parent_idx_1b - 1
@@ -159,7 +326,7 @@ class Expansion(Method):
             geo_lr_assign = th.full((pos.size(0),), -1, device=device, dtype=th.long)
 
         if (remaining_capacity <= 0).all() or leaf_idx.numel() == 0:
-            return (
+            result = (
                 adj_reduced,
                 pos,
                 leaf_idx.clone(),
@@ -170,6 +337,9 @@ class Expansion(Method):
                 leaf_mask.clone(),
                 True,
             )
+            if return_debug_payload:
+                return (*result, {})
+            return result
 
         spawn_counts = (leaf_expansion == 2).long() * 2
         leaf_batch = batch_reduced[leaf_idx]
@@ -217,7 +387,7 @@ class Expansion(Method):
 
         total_new_children = int(spawn_counts_final.sum().item())
         if total_new_children == 0:
-            return (
+            result = (
                 adj_reduced,
                 pos,
                 leaf_idx.clone(),
@@ -228,6 +398,9 @@ class Expansion(Method):
                 leaf_mask.clone(),
                 True,
             )
+            if return_debug_payload:
+                return (*result, {})
+            return result
 
         base_N = adj_reduced.size(0)
         leaf_mask_updated = leaf_mask.clone()
@@ -296,7 +469,7 @@ class Expansion(Method):
         new_leaf_flags = th.ones((leaf_idx_next.numel(),), device=device, dtype=th.bool)
         leaf_mask_next = th.cat([leaf_mask_updated, new_leaf_flags], dim=0)
         if leaf_idx_next.numel() == 0:
-            return (
+            result = (
                 adj_new,
                 pos_new,
                 leaf_idx_next,
@@ -307,6 +480,9 @@ class Expansion(Method):
                 leaf_mask_next,
                 True,
             )
+            if return_debug_payload:
+                return (*result, {})
+            return result
 
         node_counts_per_graph = scatter(
             th.ones_like(batch_new, dtype=target_size.dtype),
@@ -383,12 +559,13 @@ class Expansion(Method):
         if exp_pred.dim() == 1:
             exp_pred = exp_pred.unsqueeze(-1)
         expansion_score = exp_pred.squeeze(-1)
+        expansion_prob = expansion_score.sigmoid()
         leaf_expansion_next = (expansion_score > map_threshold).long() + 1
 
         remaining_capacity_new = target_size.to(device) - node_counts_per_graph
         terminated = (remaining_capacity_new < 2).all() or leaf_idx_next.numel() == 0
 
-        return (
+        result = (
             adj_new,
             pos_new,
             leaf_idx_next,
@@ -400,190 +577,13 @@ class Expansion(Method):
             terminated,
         )
 
-    # ---------------------------------------------------------
-    # 4) Forward + loss (positional + expansion)
-    # ---------------------------------------------------------
-    def get_loss(self, batch, model: th.nn.Module):
-        """
-        Expected batch fields:
-          - adj: SparseTensor [N×N] (undirected ok)
-          - pos: Float [N,3] (absolute GT)
-          - leaf_expansion: Long [L] in {1,2} (GT expansion states for leaves)
-          - leaf_idx: Long [L]
-          - parent_idx_1b: Long [N] (1-based; 0 denotes root; will be shifted in batching)
-          - batch: Long [N]  (PyG batch vector)
-        The network returns a dict with:
-          - "node_state": [N, pos_dim + feats_dim]
-          - "rel_pred"  : [N, 3]  (predicted parent-relative offsets for ALL nodes)
-        """
-
-        # --- parent indices (1-based in Data for safe batching) -> shift back to 0-based with -1 for roots
-        if not hasattr(batch, "parent_idx_1b"):
-            raise ValueError("Expected batch.parent_idx_1b (1-based parent indices). Please update dataloader.")
-        parent_idx = decode_parent_indices(batch).to(device=batch.pos.device)           # [N], -1 for roots
-
-        # --- graph and positions
-        pos_gt = batch.pos                             # [N,3] (absolute, untouched)
-        edge_index, edge_types = build_directed_edge_index(
-            parent_idx,
-            edge_parent_to_child=self.EDGE_PARENT_TO_CHILD,
-            edge_child_to_parent=self.EDGE_CHILD_TO_PARENT,
-        )
-
-        # --- tracking of leaves
-        if not hasattr(batch, "leaf_idx"):
-            raise ValueError("Expected batch.leaf_idx (leaf node indices). Please update dataloader.")
-        leaf_idx_all = batch.leaf_idx
-
-        leaf_graphs_all = batch.batch[leaf_idx_all]
-        logger.info(
-        "[LeafAllDebug] leaf_idx_all.max()=%s, unique_leaf_graphs_all=%s, leaf_idx_all[:20]=%s",
-        int(leaf_idx_all.max().item()),
-        int(leaf_graphs_all.unique().numel()),
-        leaf_idx_all[:20].tolist()
-        )
-
-        # --- expansion state for leaves
-        if not hasattr(batch, "leaf_expansion"):
-            raise ValueError("Expected batch.leaf_expansion (leaf expansion states). Please update dataloader.")
-        leaf_expansion_all = batch.leaf_expansion - 1       # [L_total] in {0,1}
-
-        leaf_idx_train = select_training_leaf_indices(batch)
-        if leaf_idx_train.numel() == 0:
-            leaf_parent_idx = parent_idx.new_empty((0,), dtype=parent_idx.dtype)
-        else:
-            leaf_parent_idx = parent_idx[leaf_idx_train]
-            assert (leaf_parent_idx >= 0).all(), "Leaf with no valid parent encountered."
-
-        # map per-node expansion labels so new leaves can be indexed directly
-        # more an indexing step? because we map to allnodes and then back to only new leaves instead of all leaves
-        leaf_targets_per_node = leaf_expansion_all.new_full((pos_gt.size(0),), -1)
-        if leaf_idx_all.numel() > 0:
-            leaf_targets_per_node[leaf_idx_all] = leaf_expansion_all.view(-1)
-        leaf_expansion = leaf_targets_per_node[leaf_idx_train]
-        if leaf_expansion.numel() > 0:
-            valid_mask = leaf_expansion >= 0
-            if not valid_mask.all(): # filter out any invalid leaves - extra safety? Shouldn't get triggered?
-                leaf_idx_train = leaf_idx_train[valid_mask]
-                leaf_parent_idx = leaf_parent_idx[valid_mask]
-                leaf_expansion = leaf_expansion[valid_mask]
-
-        if leaf_idx_train.numel() > 0:
-            N = int(batch.pos.size(0))
-            ptr = getattr(batch, "ptr", None)
-            num_graphs = int(ptr.numel() - 1) if ptr is not None else None
-            leaf_sample = leaf_idx_train[:20].tolist()
-            leaf_max = int(leaf_idx_train.max().item())
-            ptr_sample = ptr[:5].tolist() if ptr is not None else None
-            unshifted = leaf_max < N
-            logger.info(
-                "[IndexDebug] N=%s, num_graphs=%s, leaf_idx_train[:20]=%s, leaf_idx_train.max()=%s, batch.ptr[:5]=%s, unshifted=%s",
-                N,
-                num_graphs,
-                leaf_sample,
-                leaf_max,
-                ptr_sample,
-                unshifted,
+        if return_debug_payload:
+            payload = self._build_debug_payload(
+                leaf_idx_next=leaf_idx_next,
+                batch_new=batch_new,
+                expansion_logits=expansion_score,
+                expansion_probs=expansion_prob,
+                rel_pred_leaves=rel_pred,
             )
-        
-        # --- relative position conformation matrix for new/train leaves 
-        leaf_rel_pos = leaf_rel_targets(pos_gt, leaf_idx_train, leaf_parent_idx)  # [L,3]
-
-        # --- compute geometric left/right mask for siblings
-        geo_lr_mask = compute_geo_lr_mask(pos_gt, parent_idx, debug=getattr(self, "debug", False))
-         
-        # --- prepare EGNN input (positions + minimal node features)
-        feats_total = getattr(model, 'feats_dim', 0)
-        cond_dim = getattr(self.diffusion, "cond_dim", 0) if self.diffusion is not None else 0
-        feats_dim = max(feats_total - cond_dim, 0) # need to account for diffusion cond input added inside diffusion module
-
-        if feats_dim > 0:
-            is_leaf = pos_gt.new_zeros((pos_gt.size(0), 1))
-            is_leaf[batch.leaf_idx] = 1.0
-            features = [is_leaf]
-            feats_used = 1
-
-            # Geometry-derived left/right bit for siblings
-            if feats_used < feats_dim:
-                geo_left = geo_lr_mask.to(device=pos_gt.device, dtype=pos_gt.dtype).unsqueeze(-1)
-                features.append(geo_left)
-                feats_used += 1
-
-            # Add indicator for nodes flagged as newly expanded leaves (when provided)
-            if hasattr(batch, "new_leaf_mask_from_next") and feats_used < feats_dim:
-                new_mask = batch.new_leaf_mask_from_next
-                if isinstance(new_mask, th.Tensor):
-                    new_mask_tensor = new_mask.to(pos_gt.device, dtype=pos_gt.dtype)
-                else:
-                    new_mask_tensor = pos_gt.new_tensor(new_mask, dtype=pos_gt.dtype)
-                new_mask_tensor = new_mask_tensor.view(-1)
-                if new_mask_tensor.numel() != pos_gt.size(0):
-                    aligned = pos_gt.new_zeros(pos_gt.size(0))
-                    count = min(new_mask_tensor.numel(), pos_gt.size(0))
-                    if count > 0:
-                        aligned[:count] = new_mask_tensor[:count]
-                    new_mask_tensor = aligned
-                features.append(new_mask_tensor.unsqueeze(-1))
-                feats_used += 1
-
-            # Graph size ratio feature (current nodes / target nodes), broadcast per node
-            if feats_used < feats_dim:
-                size_ratio = size_ratio_feature_from_batch(
-                    batch=batch,
-                    device=pos_gt.device,
-                    dtype=pos_gt.dtype,
-                )
-                if size_ratio is not None:
-                    features.append(size_ratio)
-                    feats_used += 1
-
-            # Fill remaining dimensions with zeros if needed
-            if feats_used < feats_dim:
-                extra = pos_gt.new_zeros((pos_gt.size(0), feats_dim - feats_used))
-                features.append(extra)
-            
-            node_feats = th.cat(features, dim=-1)
-        else:
-            node_feats = pos_gt.new_zeros((pos_gt.size(0), 0))
-
-        if edge_types.numel():
-            edge_attr = edge_types.unsqueeze(-1).to(pos_gt.dtype)
-        else:
-            edge_attr = pos_gt.new_zeros((0, 1))
-
-        if self.diffusion is None:
-            raise ValueError("Diffusion module must be provided for Expansion training.")
-
-        plot_diffusion_debug_trees(
-            pos=pos_gt,
-            parent_idx=parent_idx,
-            batch_vec=batch.batch,
-            leaf_idx_all=leaf_idx_all,
-            leaf_idx_train=leaf_idx_train,
-            geo_lr_mask=geo_lr_mask,
-            leaf_targets_per_node=leaf_targets_per_node,
-        )
-
-        expansion_loss, position_loss = self.diffusion(
-            node_feats=node_feats,
-            edge_index=edge_index,
-            batch=batch.batch,
-            edge_attr=edge_attr,
-            P_0=pos_gt,
-            C_0=leaf_rel_pos,
-            parent_idx=parent_idx,
-            leaf_idx_train=leaf_idx_train,
-            leaf_expansion=leaf_expansion,
-            leaf_parent_idx=leaf_parent_idx,
-            model=model,
-        )
-
-        loss = position_loss + self.expansion_loss_weight * expansion_loss
-        metrics = {
-            "leaf_pos_loss": float(position_loss.item()),
-            "leaf_expansion_loss": float(expansion_loss.item()),
-            "cumulative_loss": float(loss.item()),
-            "num_leaves": int(leaf_idx_train.numel()),
-            "num_total_leaves": int(leaf_idx_all.numel()),
-        }
-        return loss, metrics
+            return (*result, payload)
+        return result

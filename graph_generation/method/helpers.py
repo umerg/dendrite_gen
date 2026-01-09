@@ -1,10 +1,13 @@
+import itertools
 import logging
+from pathlib import Path
 from typing import Optional, Tuple
 
 import torch as th
 from torch_scatter import scatter
 
 logger = logging.getLogger(__name__)
+_DIFFUSION_PLOT_COUNTER = itertools.count()
 
 
 def build_directed_edge_index(
@@ -276,3 +279,157 @@ def leaf_rel_targets(
         return pos_gt.new_zeros((0, 3))
     parent_pos = pos_gt[leaf_parent_idx]
     return pos_gt[leaf_idx] - parent_pos
+
+
+def plot_diffusion_debug_trees(
+    *,
+    pos: th.Tensor,
+    parent_idx: th.Tensor,
+    batch_vec: th.Tensor,
+    leaf_idx_all: th.Tensor,
+    leaf_idx_train: th.Tensor,
+    geo_lr_mask: th.Tensor,
+    leaf_targets_per_node: Optional[th.Tensor] = None,
+    out_dir: Optional[Path] = None,
+) -> list[Path]:
+    """Plot per-graph tree layouts with node coloring and a metadata table."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception as exc:
+        logger.warning("[DebugPlot] matplotlib unavailable: %s", exc)
+        return []
+
+    if pos.numel() == 0:
+        return []
+    if out_dir is None:
+        root_dir = Path(__file__).resolve().parents[2]
+        out_dir = root_dir / "debug_plots" / "diffusion"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    pos_cpu = pos.detach().cpu()
+    parent_cpu = parent_idx.detach().cpu()
+    batch_cpu = batch_vec.detach().cpu()
+    leaf_all_cpu = leaf_idx_all.detach().cpu()
+    leaf_train_cpu = leaf_idx_train.detach().cpu()
+    geo_lr_cpu = geo_lr_mask.detach().cpu()
+    leaf_targets_cpu = None
+    if leaf_targets_per_node is not None:
+        leaf_targets_cpu = leaf_targets_per_node.detach().cpu()
+
+    num_graphs = int(batch_cpu.max().item()) + 1 if batch_cpu.numel() else 0
+    leaf_all_set = set(leaf_all_cpu.tolist())
+    leaf_train_set = set(leaf_train_cpu.tolist())
+    saved: list[Path] = []
+
+    for graph_id in range(num_graphs):
+        node_mask = batch_cpu == graph_id
+        node_idx = node_mask.nonzero(as_tuple=False).flatten()
+        if node_idx.numel() == 0:
+            continue
+        node_list = node_idx.tolist()
+        idx_to_local = {idx: i for i, idx in enumerate(node_list)}
+        node_set = set(node_list)
+        num_nodes = len(node_list)
+
+        pos_xyz = pos_cpu[node_idx, :3] if pos_cpu.size(1) >= 3 else pos_cpu[node_idx]
+        if pos_xyz.size(1) == 1:
+            pos_xyz = th.cat([pos_xyz, th.zeros_like(pos_xyz), th.zeros_like(pos_xyz)], dim=1)
+        elif pos_xyz.size(1) == 2:
+            pos_xyz = th.cat([pos_xyz, th.zeros_like(pos_xyz[:, :1])], dim=1)
+        xs = pos_xyz[:, 0].numpy()
+        ys = pos_xyz[:, 1].numpy()
+        zs = pos_xyz[:, 2].numpy()
+
+        colors: list[str] = []
+        for n in node_list:
+            if parent_cpu[n].item() < 0:
+                colors.append("#ffd700")
+            elif n in leaf_train_set:
+                colors.append("#d62728")
+            elif n in leaf_all_set:
+                colors.append("#2ca02c")
+            else:
+                colors.append("#1f77b4")
+
+        width = max(12.0, min(0.5 * num_nodes, 24.0))
+        height = max(10.0, min(0.4 * num_nodes, 20.0))
+        fig = plt.figure(figsize=(width, height))
+        ax_graph = fig.add_subplot(2, 1, 1, projection="3d")
+        ax_table = fig.add_subplot(2, 1, 2)
+
+        for child in node_list:
+            parent = int(parent_cpu[child].item())
+            if parent < 0 or parent not in node_set:
+                continue
+            child_idx = idx_to_local[child]
+            parent_idx_local = idx_to_local[parent]
+            ax_graph.plot(
+                [xs[parent_idx_local], xs[child_idx]],
+                [ys[parent_idx_local], ys[child_idx]],
+                [zs[parent_idx_local], zs[child_idx]],
+                color="#b0b0b0",
+                linewidth=1.0,
+                zorder=1,
+            )
+
+        ax_graph.scatter(xs, ys, zs, s=80, c=colors, edgecolors="black", linewidths=0.5, zorder=2)
+        for i, n in enumerate(node_list):
+            ax_graph.text(
+                xs[i],
+                ys[i],
+                zs[i],
+                str(n),
+                fontsize=8,
+                ha="center",
+                va="center",
+                color="black",
+                bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="none", alpha=0.7),
+                zorder=3,
+            )
+        ax_graph.set_title(f"Graph {graph_id} (nodes={num_nodes})")
+        ax_graph.set_axis_off()
+        ax_graph.view_init(elev=20, azim=45)
+        try:
+            ax_graph.set_box_aspect((1, 1, 1))
+        except Exception:
+            pass
+
+        table_rows = []
+        for n in node_list:
+            pos_vals = pos_cpu[n]
+            if parent_cpu[n].item() < 0:
+                geo_lr = "root"
+            else:
+                geo_lr = "L" if bool(geo_lr_cpu[n].item()) else "R"
+            parent_val = int(parent_cpu[n].item())
+            if leaf_targets_cpu is None:
+                exp_state = "N/A"
+            else:
+                val = int(leaf_targets_cpu[n].item())
+                exp_state = str(val) if val >= 0 else "N/A"
+            x_val = f"{float(pos_vals[0].item()):.3f}"
+            y_val = f"{float(pos_vals[1].item()):.3f}" if pos_vals.numel() > 1 else "0.000"
+            z_val = f"{float(pos_vals[2].item()):.3f}" if pos_vals.numel() > 2 else "0.000"
+            table_rows.append([str(n), x_val, y_val, z_val, str(parent_val), geo_lr, exp_state])
+
+        ax_table.axis("off")
+        table = ax_table.table(
+            cellText=table_rows,
+            colLabels=["node", "x", "y", "z", "parent_idx", "geo_lr", "expansion"],
+            loc="center",
+        )
+        table.auto_set_font_size(False)
+        table_font = max(6, 10 - num_nodes // 20)
+        table.set_fontsize(table_font)
+        table.scale(1.0, 1.2)
+
+        fig.tight_layout()
+        plot_id = next(_DIFFUSION_PLOT_COUNTER)
+        out_file = out_dir / f"tree_n{num_nodes}_id{plot_id}.png"
+        fig.savefig(out_file, dpi=150)
+        plt.close(fig)
+        saved.append(out_file)
+
+    return saved

@@ -20,6 +20,7 @@ import torch as th
 from omegaconf import DictConfig, OmegaConf
 
 from sampling_experiments.interactive_methods import (
+    InteractiveDiffusionExpansion,
     InteractiveExpansionOneShot,
     InteractiveExpansionOneShotAugmented,
 )
@@ -76,8 +77,13 @@ def _resolve_target_tensor(target_sizes: Sequence[int], *, device: th.device) ->
     return tensor.to(device)
 
 
-def _select_method_class(method_name: str):
+def _select_method_class(cfg) -> type:
+    method_name = getattr(cfg.method, "name", None)
+    diffusion_cfg = getattr(cfg, "diffusion", None)
+    has_diffusion = diffusion_cfg is not None
     if method_name == "expansion":
+        if has_diffusion:
+            return InteractiveDiffusionExpansion
         return InteractiveExpansionOneShot
     if method_name == "expansion_augmented":
         return InteractiveExpansionOneShotAugmented
@@ -145,7 +151,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         cfg.method.name = parsed.method
 
     method_name = cfg.method.name
-    method_cls = _select_method_class(method_name)
+    method_cls = _select_method_class(cfg)
 
     context = load_sampling_items(
         cfg=cfg,

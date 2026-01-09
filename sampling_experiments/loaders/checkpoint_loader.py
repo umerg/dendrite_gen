@@ -78,17 +78,16 @@ def _instantiate_model(cfg, *, method_name: str):
 
 def _instantiate_method(cfg, *, method_name: str, method_cls: type | None = None):
     """Return Expansion method matching cfg.method.name with overrides."""
-    method_kwargs = dict(
-        deterministic_expansion=cfg.method.deterministic_expansion,
-        red_threshold=cfg.reduction.red_threshold,
-        leaf_noise_sigma=cfg.method.leaf_noise_sigma,
-        leaf_noise_clip=cfg.method.leaf_noise_clip,
-        sibling_loss_weight=cfg.method.sibling_loss_weight,
-        use_sibling_matching=cfg.method.use_sibling_matching,
-        debug=cfg.debugging,
-        debug_max_batches=getattr(cfg, "debugging_max_batches", 2),
-        debug_dir=getattr(cfg, "debugging_dir", None),
-    )
+    diffusion_cfg = getattr(cfg, "diffusion", None)
+    diffusion = None
+    if diffusion_cfg is not None:
+        diffusion_name = getattr(diffusion_cfg, "name", None)
+        if diffusion_name == "basic":
+            diffusion = gg.diffusion.DenoisingDiffusionModel(
+                num_steps=diffusion_cfg.num_steps,
+            )
+        elif diffusion_name is not None:
+            raise ValueError(f"Unknown diffusion name: {diffusion_name}")
 
     cls = method_cls
     if cls is None:
@@ -98,6 +97,44 @@ def _instantiate_method(cfg, *, method_name: str, method_cls: type | None = None
             cls = gg.method.Expansion_OneShot_Augmented
         else:
             raise ValueError(f"Unknown method name: {method_name}")
+
+    if issubclass(cls, gg.method.Expansion):
+        if diffusion is None:
+            raise ValueError("Diffusion config is required for Expansion-based samplers.")
+        expansion_loss_weight = getattr(cfg.method, "expansion_loss_weight", 1.0)
+        method_kwargs = dict(
+            diffusion=diffusion,
+            deterministic_expansion=cfg.method.deterministic_expansion,
+            red_threshold=cfg.reduction.red_threshold,
+            expansion_loss_weight=expansion_loss_weight,
+        )
+    elif issubclass(cls, gg.method.Expansion_OneShot):
+        method_kwargs = dict(
+            deterministic_expansion=cfg.method.deterministic_expansion,
+            red_threshold=cfg.reduction.red_threshold,
+            leaf_noise_sigma=cfg.method.leaf_noise_sigma,
+            leaf_noise_clip=cfg.method.leaf_noise_clip,
+            sibling_loss_weight=cfg.method.sibling_loss_weight,
+            use_sibling_matching=cfg.method.use_sibling_matching,
+            debug=cfg.debugging,
+            debug_max_batches=getattr(cfg, "debugging_max_batches", 2),
+            debug_dir=getattr(cfg, "debugging_dir", None),
+        )
+    elif issubclass(cls, gg.method.Expansion_OneShot_Augmented):
+        method_kwargs = dict(
+            deterministic_expansion=cfg.method.deterministic_expansion,
+            red_threshold=cfg.reduction.red_threshold,
+            leaf_noise_sigma=cfg.method.leaf_noise_sigma,
+            leaf_noise_clip=cfg.method.leaf_noise_clip,
+            sibling_loss_weight=cfg.method.sibling_loss_weight,
+            use_sibling_matching=cfg.method.use_sibling_matching,
+            debug=cfg.debugging,
+            debug_max_batches=getattr(cfg, "debugging_max_batches", 2),
+            debug_dir=getattr(cfg, "debugging_dir", None),
+        )
+    else:
+        raise ValueError(f"Unsupported method class: {cls}")
+
     return cls(**method_kwargs)
 
 
