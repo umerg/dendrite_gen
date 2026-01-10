@@ -83,7 +83,7 @@ def get_expansion_items(cfg: DictConfig, train_graphs, diffusion=None):
     print(f"Initializing model: {cfg.model.name}...")
     # features = 2 if cfg.diffusion.name == "discrete" else 1
     if cfg.model.name == "egnn": 
-        model = gg.model.SO2_EGNN_Sparse_Network(
+        model = gg.model.SO2_EGNN_Network(
             n_layers=cfg.model.num_layers,
             feats_dim=cfg.model.feats_dim,
             pos_dim=3,
@@ -99,7 +99,6 @@ def get_expansion_items(cfg: DictConfig, train_graphs, diffusion=None):
             num_global_tokens=cfg.model.num_global_tokens,
             offset_head_hidden=cfg.model.offset_head_hidden,
             # so2_axis=cfg.model.so2_axis,
-            use_global_fallback_frames=cfg.model.use_global_fallback_frames,
         )
     elif cfg.model.name == "egnn_multihead": 
         model = gg.model.SO2_EGNN_Sparse_Network_MultiHead(
@@ -213,6 +212,18 @@ def get_expansion_items(cfg: DictConfig, train_graphs, diffusion=None):
             debug_max_batches=cfg.debugging_max_batches,
             debug_dir=cfg.debugging_dir,
         )  # augmented expansion with one-shot generation at every step
+    elif method_name == "expansion_0ed":
+        method = gg.method.Expansion_OneShot_0ed(
+            deterministic_expansion=cfg.method.deterministic_expansion,
+            red_threshold=cfg.reduction.red_threshold,
+            leaf_noise_sigma=cfg.method.leaf_noise_sigma,
+            leaf_noise_clip=cfg.method.leaf_noise_clip,
+            sibling_loss_weight=cfg.method.sibling_loss_weight,
+            use_sibling_matching=cfg.method.use_sibling_matching,
+            debug=cfg.debugging,
+            debug_max_batches=cfg.debugging_max_batches,
+            debug_dir=cfg.debugging_dir,
+        )  # expansion with one-shot generation at every step
     else:
         raise ValueError(f"Unknown method name: {method_name}")
 
