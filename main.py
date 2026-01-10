@@ -321,7 +321,7 @@ def main(cfg: DictConfig):
             raise ValueError(f"Unknown diffusion name: {diffusion_name}")
 
     # Method
-    if cfg.method.name in ("expansion", "expansion_augmented"):
+    if cfg.method.name in ("expansion", "expansion_augmented", "expansion_0ed"):
         method_items = get_expansion_items(cfg, train_graphs, diffusion=diffusion)
     else:
         raise ValueError(f"Unknown method name: {cfg.method.name}")

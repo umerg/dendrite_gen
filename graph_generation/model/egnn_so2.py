@@ -300,7 +300,7 @@ class SO2_EGNN(MessagePassing):
         assert aggr in {'add', 'sum', 'max', 'mean'}, 'pool method must be a valid option'
         assert update_feats or update_coors, 'you must update either features, coordinates, or both'
         kwargs.setdefault('aggr', aggr)
-        super(SO2_EGNN_Sparse, self).__init__(**kwargs)
+        super(SO2_EGNN, self).__init__(**kwargs)
         # model params
         self.fourier_features = fourier_features
         self.feats_dim = feats_dim
