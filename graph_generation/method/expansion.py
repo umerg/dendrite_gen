@@ -436,12 +436,12 @@ class Expansion(Method):
         leaf_idx_all = batch.leaf_idx
 
         leaf_graphs_all = batch.batch[leaf_idx_all]
-        logger.info(
-        "[LeafAllDebug] leaf_idx_all.max()=%s, unique_leaf_graphs_all=%s, leaf_idx_all[:20]=%s",
-        int(leaf_idx_all.max().item()),
-        int(leaf_graphs_all.unique().numel()),
-        leaf_idx_all[:20].tolist()
-        )
+        # logger.info(
+        # "[LeafAllDebug] leaf_idx_all.max()=%s, unique_leaf_graphs_all=%s, leaf_idx_all[:20]=%s",
+        # int(leaf_idx_all.max().item()),
+        # int(leaf_graphs_all.unique().numel()),
+        # leaf_idx_all[:20].tolist()
+        # )
 
         # --- expansion state for leaves
         if not hasattr(batch, "leaf_expansion"):
@@ -468,23 +468,23 @@ class Expansion(Method):
                 leaf_parent_idx = leaf_parent_idx[valid_mask]
                 leaf_expansion = leaf_expansion[valid_mask]
 
-        if leaf_idx_train.numel() > 0:
-            N = int(batch.pos.size(0))
-            ptr = getattr(batch, "ptr", None)
-            num_graphs = int(ptr.numel() - 1) if ptr is not None else None
-            leaf_sample = leaf_idx_train[:20].tolist()
-            leaf_max = int(leaf_idx_train.max().item())
-            ptr_sample = ptr[:5].tolist() if ptr is not None else None
-            unshifted = leaf_max < N
-            logger.info(
-                "[IndexDebug] N=%s, num_graphs=%s, leaf_idx_train[:20]=%s, leaf_idx_train.max()=%s, batch.ptr[:5]=%s, unshifted=%s",
-                N,
-                num_graphs,
-                leaf_sample,
-                leaf_max,
-                ptr_sample,
-                unshifted,
-            )
+        # if leaf_idx_train.numel() > 0:
+        #     N = int(batch.pos.size(0))
+        #     ptr = getattr(batch, "ptr", None)
+        #     num_graphs = int(ptr.numel() - 1) if ptr is not None else None
+        #     leaf_sample = leaf_idx_train[:20].tolist()
+        #     leaf_max = int(leaf_idx_train.max().item())
+        #     ptr_sample = ptr[:5].tolist() if ptr is not None else None
+        #     unshifted = leaf_max < N
+        #     logger.info(
+        #         "[IndexDebug] N=%s, num_graphs=%s, leaf_idx_train[:20]=%s, leaf_idx_train.max()=%s, batch.ptr[:5]=%s, unshifted=%s",
+        #         N,
+        #         num_graphs,
+        #         leaf_sample,
+        #         leaf_max,
+        #         ptr_sample,
+        #         unshifted,
+        #     )
         
         # --- relative position conformation matrix for new/train leaves 
         leaf_rel_pos = leaf_rel_targets(pos_gt, leaf_idx_train, leaf_parent_idx)  # [L,3]
@@ -554,15 +554,15 @@ class Expansion(Method):
         if self.diffusion is None:
             raise ValueError("Diffusion module must be provided for Expansion training.")
 
-        plot_diffusion_debug_trees(
-            pos=pos_gt,
-            parent_idx=parent_idx,
-            batch_vec=batch.batch,
-            leaf_idx_all=leaf_idx_all,
-            leaf_idx_train=leaf_idx_train,
-            geo_lr_mask=geo_lr_mask,
-            leaf_targets_per_node=leaf_targets_per_node,
-        )
+        # plot_diffusion_debug_trees(
+        #     pos=pos_gt,
+        #     parent_idx=parent_idx,
+        #     batch_vec=batch.batch,
+        #     leaf_idx_all=leaf_idx_all,
+        #     leaf_idx_train=leaf_idx_train,
+        #     geo_lr_mask=geo_lr_mask,
+        #     leaf_targets_per_node=leaf_targets_per_node,
+        # )
 
         expansion_loss, position_loss = self.diffusion(
             node_feats=node_feats,

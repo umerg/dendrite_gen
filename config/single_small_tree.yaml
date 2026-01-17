@@ -1,7 +1,7 @@
 defaults:
   - _self_
   - dataset: single_tree
-  - method: expansion_oneshot
+  - method: expansion_oneshot_0ed
 
 reduction:
   type: "depth"
@@ -38,7 +38,7 @@ validation:
 testing: False # if True, only evaluate on test set
 
 model:
-  name: egnn
+  name: egnn_simple
   num_layers: 6
   feats_dim: 32
   m_dim: 32
@@ -56,7 +56,7 @@ ema:
   gamma: 1.0
   power: 1.0
 
-name: single_small_tree_so2angle
+name: single_small_tree_0ed
 debugging: False
 debugging_max_batches: 50
 debugging_dir: "single_tree_debug"
