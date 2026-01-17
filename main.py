@@ -100,45 +100,8 @@ def get_expansion_items(cfg: DictConfig, train_graphs, diffusion=None):
             offset_head_hidden=cfg.model.offset_head_hidden,
             # so2_axis=cfg.model.so2_axis,
         )
-    elif cfg.model.name == "egnn_multihead": 
-        model = gg.model.SO2_EGNN_Sparse_Network_MultiHead(
-            n_layers=cfg.model.num_layers,
-            feats_dim=cfg.model.feats_dim,
-            pos_dim=3,
-            m_dim=cfg.model.m_dim,
-            edge_embedding_nums=edge_embedding_nums,
-            edge_embedding_dims=edge_embedding_dims,
-            edge_attr_dim=edge_attr_dim,
-            dropout=cfg.model.dropout,
-            norm_feats=cfg.model.norm_feats,
-            global_linear_attn_every=cfg.model.global_linear_attn_every,
-            global_linear_attn_heads=cfg.model.global_linear_attn_heads,
-            global_linear_attn_dim_head=cfg.model.global_linear_attn_dim_head,
-            num_global_tokens=cfg.model.num_global_tokens,
-            offset_head_hidden=cfg.model.offset_head_hidden,
-            # so2_axis=cfg.model.so2_axis,
-            use_global_fallback_frames=cfg.model.use_global_fallback_frames,
-        )
     elif cfg.model.name == "egnn_simple":
         model = gg.model.SO2_EGNN_Sparse_Network_Simple(
-            n_layers=cfg.model.num_layers,
-            feats_dim=cfg.model.feats_dim,
-            pos_dim=3,
-            m_dim=cfg.model.m_dim,
-            edge_embedding_nums=edge_embedding_nums,
-            edge_embedding_dims=edge_embedding_dims,
-            edge_attr_dim=edge_attr_dim,
-            dropout=cfg.model.dropout,
-            norm_feats=cfg.model.norm_feats,
-            global_linear_attn_every=cfg.model.global_linear_attn_every,
-            global_linear_attn_heads=cfg.model.global_linear_attn_heads,
-            global_linear_attn_dim_head=cfg.model.global_linear_attn_dim_head,
-            num_global_tokens=cfg.model.num_global_tokens,
-            offset_head_hidden=cfg.model.offset_head_hidden,
-            # so2_axis=cfg.model.so2_axis,
-        )
-    elif cfg.model.name == "egnn_geometry_aware":
-        model = gg.model.SO2_EGNN_Sparse_Network_Geometry_Aware(
             n_layers=cfg.model.num_layers,
             feats_dim=cfg.model.feats_dim,
             pos_dim=3,
@@ -191,39 +154,27 @@ def get_expansion_items(cfg: DictConfig, train_graphs, diffusion=None):
     elif method_name == "expansion":
         method = gg.method.Expansion_OneShot(
             deterministic_expansion=cfg.method.deterministic_expansion,
-            red_threshold=cfg.reduction.red_threshold,
             leaf_noise_sigma=cfg.method.leaf_noise_sigma,
             leaf_noise_clip=cfg.method.leaf_noise_clip,
             sibling_loss_weight=cfg.method.sibling_loss_weight,
             use_sibling_matching=cfg.method.use_sibling_matching,
+            use_geo_lr_mask=cfg.method.use_geo_lr_mask,
+            use_radial_distance=cfg.method.use_radial_distance,
             debug=cfg.debugging,
             debug_max_batches=cfg.debugging_max_batches,
             debug_dir=cfg.debugging_dir,
         )  # expansion with one-shot generation at every step
-    elif method_name == "expansion_augmented":
-        method = gg.method.Expansion_OneShot_Augmented(
-            deterministic_expansion=cfg.method.deterministic_expansion,
-            red_threshold=cfg.reduction.red_threshold,
-            leaf_noise_sigma=cfg.method.leaf_noise_sigma,
-            leaf_noise_clip=cfg.method.leaf_noise_clip,
-            sibling_loss_weight=cfg.method.sibling_loss_weight,
-            use_sibling_matching=cfg.method.use_sibling_matching,
-            debug=cfg.debugging,
-            debug_max_batches=cfg.debugging_max_batches,
-            debug_dir=cfg.debugging_dir,
-        )  # augmented expansion with one-shot generation at every step
-    elif method_name == "expansion_0ed":
-        method = gg.method.Expansion_OneShot_0ed(
-            deterministic_expansion=cfg.method.deterministic_expansion,
-            red_threshold=cfg.reduction.red_threshold,
-            leaf_noise_sigma=cfg.method.leaf_noise_sigma,
-            leaf_noise_clip=cfg.method.leaf_noise_clip,
-            sibling_loss_weight=cfg.method.sibling_loss_weight,
-            use_sibling_matching=cfg.method.use_sibling_matching,
-            debug=cfg.debugging,
-            debug_max_batches=cfg.debugging_max_batches,
-            debug_dir=cfg.debugging_dir,
-        )  # expansion with one-shot generation at every step
+    # elif method_name == "expansion_augmented":
+    #     method = gg.method.Expansion_OneShot_Augmented(
+    #         deterministic_expansion=cfg.method.deterministic_expansion,
+    #         leaf_noise_sigma=cfg.method.leaf_noise_sigma,
+    #         leaf_noise_clip=cfg.method.leaf_noise_clip,
+    #         sibling_loss_weight=cfg.method.sibling_loss_weight,
+    #         use_sibling_matching=cfg.method.use_sibling_matching,
+    #         debug=cfg.debugging,
+    #         debug_max_batches=cfg.debugging_max_batches,
+    #         debug_dir=cfg.debugging_dir,
+    #     )  # augmented expansion with one-shot generation at every step
     else:
         raise ValueError(f"Unknown method name: {method_name}")
 

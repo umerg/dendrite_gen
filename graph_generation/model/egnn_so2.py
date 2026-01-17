@@ -600,7 +600,7 @@ class SO2_EGNN_Network(nn.Module):
                  rbf_gamma=10.0,
                  eps=1e-8,
                  # offset head
-                 LR_offset_head=True,
+                 LR_offset_head=False,
                  offset_head_hidden=128,
                  ):
         super().__init__()

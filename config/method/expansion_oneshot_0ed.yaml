@@ -1,6 +1,0 @@
-name: expansion_0ed
-leaf_noise_sigma: 0.05
-leaf_noise_clip: null
-sibling_loss_weight: 0.0
-use_sibling_matching: False
-deterministic_expansion: True
