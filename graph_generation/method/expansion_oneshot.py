@@ -19,22 +19,24 @@ class Expansion_OneShot(Method):
     def __init__(
         self,
         deterministic_expansion: bool = False,      # just sets seeding for reproducibility
-        red_threshold: int = 0,
         leaf_noise_sigma: float = 0.05,             # <-- stddev of Gaussian around parent (same units as pos)
         leaf_noise_clip: float | None = None,       # <-- optional radius clamp (float) or None
         sibling_loss_weight: float = 0.8,           # weight for sibling distance regularizer
         use_sibling_matching: bool = False,         # if True, use per-parent matching for positional loss
+        use_geo_lr_mask: bool = False,            # if True, use geometric left/right child assignment
+        use_radial_distance: bool = False,    # if True, use radial distance feature for EGNN
         debug: bool = False,
         debug_max_batches: int = 2,
         debug_dir: str | None = None,
     ):
         super().__init__(diffusion=None)
         self.deterministic_expansion = deterministic_expansion
-        self.red_threshold = red_threshold
         self.leaf_noise_sigma = float(leaf_noise_sigma)
         self.leaf_noise_clip = leaf_noise_clip
         self.sibling_loss_weight = float(sibling_loss_weight)
         self.use_sibling_matching = bool(use_sibling_matching)
+        self.use_geo_lr_mask = bool(use_geo_lr_mask)
+        self.use_radial_distance = bool(use_radial_distance)
         self.debug = debug
         self._debug_step = 0
         from pathlib import Path as _P
@@ -687,34 +689,7 @@ class Expansion_OneShot(Method):
             disable = expanders_shuffled[max_leaves:]  # disable excess after fair selection
             spawn_counts_final[disable] = 0
 
-        # 5) Ensure progress if capacity still available
-        if ensure_progress and (remaining_capacity >= 2).any():
-            # Guarantee per-graph progress: for every graph that
-            # (a) still has capacity for at least one 2-branch AND
-            # (b) has at least one current leaf, AND
-            # (c) has no leaf already scheduled to expand this step,
-            # force exactly one leaf to expand (add 2 children).
-            # This prevents graphs from stalling at size=3 (root + 2 children)
-            # when the model prematurely predicts all leaves as terminal.
-            num_graphs = int(target_size.numel())
-            for g in range(num_graphs):
-                if remaining_capacity[g] < 2:
-                    continue  # not enough room for a binary expansion
-                mask_g = (leaf_batch == g)
-                if not mask_g.any():
-                    continue  # no leaves to expand in this graph
-                if (spawn_counts_final[mask_g] == 2).any():
-                    continue  # already at least one expansion scheduled for this graph
-                # Force the first leaf (deterministically or random) to expand
-                leaf_indices_g = th.nonzero(mask_g, as_tuple=False).flatten()
-                if self.deterministic_expansion:
-                    # Deterministic ordering: pick smallest index (first in tensor)
-                    forced_leaf = leaf_indices_g[0]
-                else:
-                    # Random selection among available leaves for diversity
-                    rand_idx = th.randint(low=0, high=leaf_indices_g.numel(), size=(1,), device=leaf_indices_g.device)
-                    forced_leaf = leaf_indices_g[rand_idx]
-                spawn_counts_final[forced_leaf] = 2
+        # 5) Ensure progress if capacity still available # ADD LATER
 
         # 6) Count new children & early exit
         total_new_children = int(spawn_counts_final.sum().item())
@@ -830,20 +805,25 @@ class Expansion_OneShot(Method):
             is_leaf_flag = leaf_mask_next.to(dtype=pos_new.dtype).unsqueeze(-1)
             features = [is_leaf_flag]
             feats_used = 1
-            # feature 1: sibling left flag (persistent) if capacity permits
-            if feats_used < feats_dim:                
-                so = sibling_order_next
-                sib_is_left = (so == 0).float().unsqueeze(-1)
-                sib_is_left = th.where(so.unsqueeze(-1) >= 0, sib_is_left, sib_is_left.new_zeros(sib_is_left.shape))
-                features.append(sib_is_left)
-                feats_used += 1
-            # feature 2: indicator for freshly expanded leaves
+            # feature 1: indicator for freshly expanded leaves
             if feats_used < feats_dim:
                 new_leaf_flag = pos_new.new_zeros((pos_new.size(0), 1))
                 new_leaf_flag[leaf_idx_next] = 1.0
                 features.append(new_leaf_flag)
                 feats_used += 1
-            # feature 3: current size / target size ratio broadcast per node
+            # feature 2: geo lr flag if capacity permits
+            if self.use_geo_lr_mask and feats_used < feats_dim:                
+                so = sibling_order_next
+                sib_is_left = (so == 0).float().unsqueeze(-1)
+                sib_is_left = th.where(so.unsqueeze(-1) >= 0, sib_is_left, sib_is_left.new_zeros(sib_is_left.shape))
+                features.append(sib_is_left)
+                feats_used += 1
+            # feature 3: radial distance from origin
+            if self.use_radial_distance and feats_used < feats_dim:
+                radial_dist = pos_new.norm(dim=-1, keepdim=True)
+                features.append(radial_dist)
+                feats_used += 1
+            # feature 4: current size / target size ratio broadcast per node
             if feats_used < feats_dim:
                 target_size_float = target_size.to(pos_new.dtype)
                 ratio_graph = node_counts_per_graph.to(pos_new.dtype) / target_size_float.clamp_min(1.0)
@@ -879,6 +859,24 @@ class Expansion_OneShot(Method):
 
         # updating new leaf positions
         pos_new[leaf_idx_next] = parent_pos_for_children + rel_pred_leaves
+
+        # Update sibling order based on predicted geometry for newly created siblings.
+        if leaf_idx_next.numel() > 0:
+            geo_lr_mask = self._compute_geo_lr_mask(pos_new, parent_idx_new_0b)
+            parent_new = parent_idx_new_0b[leaf_idx_next]
+            counts = scatter(
+                th.ones_like(parent_new),
+                parent_new,
+                dim=0,
+                dim_size=pos_new.size(0),
+            )
+            valid = counts[parent_new] == 2
+            if valid.any():
+                sib_left = geo_lr_mask[leaf_idx_next][valid]
+                sibling_order_next = sibling_order_next.clone()
+                sibling_order_next[leaf_idx_next[valid]] = (~sib_left).to(
+                    dtype=sibling_order_next.dtype
+                )
 
         # calculating expansion labels for next step
 
@@ -1088,15 +1086,17 @@ class Expansion_OneShot(Method):
             sigma=self.leaf_noise_sigma,
             clip=self.leaf_noise_clip,
         )                                              # [N,3]
-        geo_lr_mask = self._compute_geo_lr_mask(pos_gt, parent_idx)
-        self._maybe_debug_root_children(
-            batch=batch,
-            parent_idx=parent_idx,
-            geo_lr_mask=geo_lr_mask,
-            leaf_idx_train=leaf_idx_train,
-            pos_gt=pos_gt,
-            pos_masked=pos_in,
-        )
+
+        if self.use_geo_lr_mask:
+            geo_lr_mask = self._compute_geo_lr_mask(pos_gt, parent_idx)
+            self._maybe_debug_root_children(
+                batch=batch,
+                parent_idx=parent_idx,
+                geo_lr_mask=geo_lr_mask,
+                leaf_idx_train=leaf_idx_train,
+                pos_gt=pos_gt,
+                pos_masked=pos_in,
+            )
          
         # --- prepare EGNN input (positions + minimal node features)
         feats_dim = getattr(model, 'feats_dim', 0)
@@ -1109,14 +1109,10 @@ class Expansion_OneShot(Method):
             features = [is_leaf]
             feats_used = 1
 
-            # Geometry-derived left/right bit for siblings
+            # Add indicator for nodes flagged as newly expanded leaves (required)
             if feats_used < feats_dim:
-                geo_left = geo_lr_mask.to(device=pos_in.device, dtype=pos_in.dtype).unsqueeze(-1)
-                features.append(geo_left)
-                feats_used += 1
-
-            # Add indicator for nodes flagged as newly expanded leaves (when provided)
-            if hasattr(batch, "new_leaf_mask_from_next") and feats_used < feats_dim:
+                if not hasattr(batch, "new_leaf_mask_from_next"):
+                    raise ValueError("Expected batch.new_leaf_mask_from_next for new-leaf feature.")
                 new_mask = batch.new_leaf_mask_from_next
                 if isinstance(new_mask, th.Tensor):
                     new_mask_tensor = new_mask.to(pos_in.device, dtype=pos_in.dtype)
@@ -1130,6 +1126,17 @@ class Expansion_OneShot(Method):
                         aligned[:count] = new_mask_tensor[:count]
                     new_mask_tensor = aligned
                 features.append(new_mask_tensor.unsqueeze(-1))
+                feats_used += 1
+            
+            # Geometry-derived left/right bit for siblings
+            if self.use_geo_lr_mask and feats_used < feats_dim:
+                geo_left = geo_lr_mask.to(device=pos_in.device, dtype=pos_in.dtype).unsqueeze(-1)
+                features.append(geo_left)
+                feats_used += 1
+            
+            if self.use_radial_distance and feats_used < feats_dim:
+                radial_dist = pos_in.norm(dim=-1, keepdim=True)  # [N,1]
+                features.append(radial_dist)
                 feats_used += 1
 
             # Graph size ratio feature (current nodes / target nodes), broadcast per node

@@ -570,6 +570,23 @@ class InteractiveExpansionOneShot(Expansion_OneShot):
         parent_pos_for_children = pos_new[parent_idx_new_0b[leaf_idx_next]]
         pos_new[leaf_idx_next] = parent_pos_for_children + rel_pred_leaves
 
+        if leaf_idx_next.numel() > 0:
+            geo_lr_mask = self._compute_geo_lr_mask(pos_new, parent_idx_new_0b)
+            parent_new = parent_idx_new_0b[leaf_idx_next]
+            counts = scatter(
+                th.ones_like(parent_new),
+                parent_new,
+                dim=0,
+                dim_size=pos_new.size(0),
+            )
+            valid = counts[parent_new] == 2
+            if valid.any():
+                sib_left = geo_lr_mask[leaf_idx_next][valid]
+                sibling_order_next = sibling_order_next.clone()
+                sibling_order_next[leaf_idx_next[valid]] = (~sib_left).to(
+                    dtype=sibling_order_next.dtype
+                )
+
         expansion_prob = expansion_pred_leaves.squeeze(-1).sigmoid()
         leaf_expansion_next = (expansion_prob > map_threshold).long() + 1
 

@@ -55,8 +55,7 @@ def _instantiate_model(cfg, *, method_name: str):
     )
 
     if model_name == "egnn":
-        return gg.model.SO2_EGNN_Sparse_Network(
-            use_global_fallback_frames=cfg.model.use_global_fallback_frames,
+        return gg.model.SO2_EGNN_Network(
             **base_kwargs,
         )
     if model_name == "egnn_multihead":

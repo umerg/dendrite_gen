@@ -11,7 +11,7 @@ from torch_scatter import scatter
 from torch_sparse import SparseTensor
 
 from graph_generation.method.expansion import Expansion
-from graph_generation.method.helpers import build_directed_edge_index
+from graph_generation.method.helpers import build_directed_edge_index, compute_geo_lr_mask
 
 from .expansion_interactive import GraphStepTrace
 
@@ -555,6 +555,23 @@ class InteractiveDiffusionExpansion(Expansion):
 
         parent_pos_for_children = pos_new[leaf_parent_idx_next]
         pos_new[leaf_idx_next] = parent_pos_for_children + rel_pred
+
+        if leaf_idx_next.numel() > 0:
+            geo_lr_mask = compute_geo_lr_mask(pos_new, parent_idx_new_0b)
+            parent_new = parent_idx_new_0b[leaf_idx_next]
+            counts = scatter(
+                th.ones_like(parent_new),
+                parent_new,
+                dim=0,
+                dim_size=pos_new.size(0),
+            )
+            valid = counts[parent_new] == 2
+            if valid.any():
+                geo_left = geo_lr_mask[leaf_idx_next][valid]
+                geo_lr_assign_next = geo_lr_assign_next.clone()
+                geo_lr_assign_next[leaf_idx_next[valid]] = (~geo_left).to(
+                    dtype=geo_lr_assign_next.dtype
+                )
 
         if exp_pred.dim() == 1:
             exp_pred = exp_pred.unsqueeze(-1)

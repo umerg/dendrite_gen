@@ -411,7 +411,6 @@ class SO2_EGNN(MessagePassing):
             cos_theta_edge = pre_geom.get('cos_theta_edge')
         else:
             src, dst = edge_index
-
             rel_coors = coors[dst] - coors[src]  # (E, 3)
             # axis-aware decomposition
             du   = (rel_coors @ self.uhat)                                    # (E, )
@@ -601,7 +600,7 @@ class SO2_EGNN_Network(nn.Module):
                  rbf_gamma=10.0,
                  eps=1e-8,
                  # offset head
-                 add_offset_head=True,
+                 LR_offset_head=True,
                  offset_head_hidden=128,
                  ):
         super().__init__()
@@ -650,8 +649,8 @@ class SO2_EGNN_Network(nn.Module):
         self.register_buffer('uhat', u / (u.norm() + 1e-8))
 
         # basis-coef head
-        self.add_offset_head = add_offset_head
-        if self.add_offset_head:
+        self.add_offset_head = LR_offset_head
+        if self.LR_offset_head:
             # Two-class gated offset heads; each is a 2-layer MLP producing (dx, dy, dz, expansion)
             self.offset_head_class0 = nn.Sequential(
                 nn.Linear(self.feats_dim, offset_head_hidden),
@@ -663,7 +662,12 @@ class SO2_EGNN_Network(nn.Module):
                 nn.SiLU(),
                 nn.Linear(offset_head_hidden, 4),
             )
-
+        else:
+            self.offset_head = nn.Sequential(
+                nn.Linear(self.feats_dim, offset_head_hidden),
+                nn.SiLU(),
+                nn.Linear(offset_head_hidden, 4),
+            )
         # global attn irrelevant for take one UGEDIT
         self.has_global_attn = global_linear_attn_every > 0
         self.global_tokens = None
@@ -715,16 +719,14 @@ class SO2_EGNN_Network(nn.Module):
 
             * x: (N, pos_dim+feats_dim) will be unpacked into coors, feats.
         """
-
-        # NODES - Embedd each dim to its target dimensions:
         x = embedd_token(x, self.embedding_dims, self.emb_layers) # identity if no embedding layers
         class_feature = None
-        if self.add_offset_head:
+        if self.LR_offset_head:
             class_feature_idx = self.pos_dim + 1  # second entry of the input feature vector
             if x.size(1) <= class_feature_idx:
                 raise ValueError("Expected at least two feature channels to extract class indicator.")
             class_feature = x[:, class_feature_idx].clone()
-            # x[:, class_feature_idx] = 0.0  # zero-out the binary class indicator before message passing # dont zero out for diversity test
+
         # regulates wether to embedd edges each layer
         edges_need_embedding = True  
         # Precompute static geometry if coordinates will remain fixed (update_coors False in all layers)
@@ -766,21 +768,22 @@ class SO2_EGNN_Network(nn.Module):
                 edges_need_embedding = True
             
         # decode per-node parent-relative offsets
-        if not self.add_offset_head:
-            return {"node_state": x, "rel_pred": torch.zeros(x.size(0), 3, device=x.device, dtype=x.dtype)}
-
         coors, feats = x[:, :self.pos_dim], x[:, self.pos_dim:]
         N = coors.size(0)
         if parent_idx is None:
             raise ValueError("parent_idx is required to decode parent-relative offsets.")
 
         # head
-        if class_feature is None:
-            raise ValueError("Class feature was not captured; cannot route to multi-head offset decoder.")
-        class_mask = (class_feature > 0.5).unsqueeze(-1)  # True -> head 1, False -> head 0
-        head0 = self.offset_head_class0(feats)
-        head1 = self.offset_head_class1(feats)
-        offset_state = torch.where(class_mask, head1, head0)  # apply class-specific decoder head
+        if not self.LR_offset_head:
+            offset_state = self.offset_head(feats)
+        else:
+            if class_feature is None:
+                raise ValueError("Class feature was not captured; cannot route to multi-head offset decoder.")
+            class_mask = (class_feature > 0.5).unsqueeze(-1)  # True -> head 1, False -> head 0
+            head0 = self.offset_head_class0(feats)
+            head1 = self.offset_head_class1(feats)
+            offset_state = torch.where(class_mask, head1, head0)  # apply class-specific decoder head
+        
         rel_pred = offset_state[:, :3]
         expansion_pred = offset_state[:, 3:4]
 
@@ -800,6 +803,7 @@ class SO2_EGNN_Network(nn.Module):
         r_perp = rel_coors - r_par
         rho = r_perp.norm(dim=-1, keepdim=True).clamp_min(self.eps)  # (E,1)
         du = du[:, None]
+
         if parent_idx is None:
             raise ValueError("parent_idx must be provided for branch angle computation; received None.")
 
