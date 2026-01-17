@@ -561,7 +561,7 @@ class Expansion_OneShot(Method):
                 leaf_mask=leaf_mask,
                 step=step,
                 ensure_progress=False,
-                map_threshold=0.3,
+                map_threshold=0.5,
             )
             step += 1
 
