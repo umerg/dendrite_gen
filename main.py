@@ -86,6 +86,8 @@ def get_expansion_items(cfg: DictConfig, train_graphs, diffusion=None):
     # Model
     print(f"Initializing model: {cfg.model.name}...")
     # features = 2 if cfg.diffusion.name == "discrete" else 1
+    tmd_in_dim = getattr(cfg.model, "tmd_in_dim", 0)
+    tmd_hidden_dim = getattr(cfg.model, "tmd_hidden_dim", 0)
     if cfg.model.name == "egnn": 
         model = gg.model.SO2_EGNN_Network(
             n_layers=cfg.model.num_layers,
@@ -102,6 +104,8 @@ def get_expansion_items(cfg: DictConfig, train_graphs, diffusion=None):
             global_linear_attn_dim_head=cfg.model.global_linear_attn_dim_head,
             num_global_tokens=cfg.model.num_global_tokens,
             offset_head_hidden=cfg.model.offset_head_hidden,
+            tmd_in_dim=tmd_in_dim,
+            tmd_hidden_dim=tmd_hidden_dim,
             # so2_axis=cfg.model.so2_axis,
         )
     elif cfg.model.name == "egnn_simple":

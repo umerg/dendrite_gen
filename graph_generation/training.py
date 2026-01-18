@@ -13,6 +13,8 @@ from matplotlib.figure import Figure
 from torch.optim import Adam
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
+from utils.tmd_conditioning_utils import compute_tmd_global_embedding
+
 # Optional / guarded imports (Hydra, OmegaConf, wandb)
 try:  # Hydra runtime config access
     from hydra.core.hydra_config import HydraConfig  # type: ignore
@@ -347,6 +349,13 @@ class Trainer:
 
         # Select target number of nodes and split into batches
         target_size = np.array([len(g) for g in eval_graphs])[pred_perm]
+        tmd_hidden_dim = getattr(model, "tmd_hidden_dim", 0)
+        tmds = None
+        if tmd_hidden_dim > 0:
+            tmds = np.stack(
+                [compute_tmd_global_embedding(g) for g in eval_graphs],
+                axis=0,
+            )[pred_perm]
         bs = (
             self.cfg.validation.batch_size
             if self.cfg.validation.batch_size is not None
@@ -358,12 +367,18 @@ class Trainer:
 
         # Generate graphs
         pred_graphs = []
+        cursor = 0
         for batch in batches:
+            tmd_batch = None
+            if tmds is not None:
+                tmd_batch = th.from_numpy(tmds[cursor : cursor + len(batch)]).to(self.device)
             pred_graphs_batch = self.method.sample_graphs(
                 target_size=th.tensor(batch, device=self.device),
                 model=model,
+                tmd=tmd_batch,
             )  # returns list[nx.Graph] with geometric node attrs
             pred_graphs += pred_graphs_batch
+            cursor += len(batch)
         # Reorder according to original permutation
         results["pred_graphs"] = [pred_graphs[i] for i in pred_perm]
         if self.device == "cuda":
