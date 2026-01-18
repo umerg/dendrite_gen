@@ -494,7 +494,7 @@ class Expansion_OneShot(Method):
                     new_idx = new_idx[valid]
         return new_idx
     
-    def sample_graphs(self, target_size: th.Tensor, model: Module):
+    def sample_graphs(self, target_size: th.Tensor, model: Module, tmd: th.Tensor | None = None):
         """Generate a batch of graphs starting from one root node per graph.
 
         Process:
@@ -523,6 +523,8 @@ class Expansion_OneShot(Method):
 
         device = target_size.device
         num_graphs = int(target_size.numel())
+        if tmd is not None:
+            tmd = tmd.to(device=device)
 
         # ---- Initial root nodes ----
 
@@ -566,6 +568,7 @@ class Expansion_OneShot(Method):
                 parent_idx_1b=parent_idx_1b,
                 sibling_order=sibling_order,
                 leaf_mask=leaf_mask,
+                tmd=tmd,
                 step=step,
                 ensure_progress=False,
                 map_threshold=0.5,
@@ -611,6 +614,7 @@ class Expansion_OneShot(Method):
         parent_idx_1b: th.Tensor | None = None,
         sibling_order: th.Tensor | None = None,
         leaf_mask: th.Tensor | None = None,
+        tmd: th.Tensor | None = None,
         step: int = 0,
         ensure_progress: bool = False,
         map_threshold: float = 0.5,
@@ -804,39 +808,43 @@ class Expansion_OneShot(Method):
 
         # 10) Model forward to refine child positions & predict next expansion states
         feats_dim = getattr(model, 'feats_dim', 0)
+        tmd_hidden_dim = getattr(model, 'tmd_hidden_dim', 0)
+        avail_feats_dim = feats_dim - tmd_hidden_dim
+        if tmd_hidden_dim > 0 and avail_feats_dim < 5:
+            raise ValueError("feats_dim - tmd_hidden_dim must be >= 5 when using TMD.")
         pos_dim = getattr(model, 'pos_dim', 3)
-        if feats_dim > 0:
+        if avail_feats_dim > 0:
             # feature 0: is_leaf flag
             is_leaf_flag = leaf_mask_next.to(dtype=pos_new.dtype).unsqueeze(-1)
             features = [is_leaf_flag]
             feats_used = 1
             # feature 1: indicator for freshly expanded leaves
-            if feats_used < feats_dim:
+            if feats_used < avail_feats_dim:
                 new_leaf_flag = pos_new.new_zeros((pos_new.size(0), 1))
                 new_leaf_flag[leaf_idx_next] = 1.0
                 features.append(new_leaf_flag)
                 feats_used += 1
             # feature 2: geo lr flag if capacity permits
-            if self.use_geo_lr_mask and feats_used < feats_dim:                
+            if self.use_geo_lr_mask and feats_used < avail_feats_dim:                
                 so = sibling_order_next
                 sib_is_left = (so == 0).float().unsqueeze(-1)
                 sib_is_left = th.where(so.unsqueeze(-1) >= 0, sib_is_left, sib_is_left.new_zeros(sib_is_left.shape))
                 features.append(sib_is_left)
                 feats_used += 1
             # feature 3: radial distance from origin
-            if self.use_radial_distance and feats_used < feats_dim:
+            if self.use_radial_distance and feats_used < avail_feats_dim:
                 radial_dist = pos_new.norm(dim=-1, keepdim=True)
                 features.append(radial_dist)
                 feats_used += 1
             # feature 4: current size / target size ratio broadcast per node
-            if feats_used < feats_dim:
+            if feats_used < avail_feats_dim:
                 target_size_float = target_size.to(pos_new.dtype)
                 ratio_graph = node_counts_per_graph.to(pos_new.dtype) / target_size_float.clamp_min(1.0)
                 ratio_nodes = ratio_graph[batch_new].unsqueeze(-1)
                 features.append(ratio_nodes)
                 feats_used += 1
-            if feats_used < feats_dim:
-                features.append(pos_new.new_zeros((pos_new.size(0), feats_dim - feats_used)))
+            if feats_used < avail_feats_dim:
+                features.append(pos_new.new_zeros((pos_new.size(0), avail_feats_dim - feats_used)))
             node_feats = th.cat(features, dim=-1)
             x_in = th.cat([pos_new[:, :pos_dim], node_feats], dim=-1)
         else:
@@ -846,7 +854,14 @@ class Expansion_OneShot(Method):
             edge_attr = edge_types.unsqueeze(-1).to(x_in.dtype)
         else:
             edge_attr = x_in.new_zeros((0, 1))
-        out = model(x=x_in, edge_index=edge_index, batch=batch_new, edge_attr=edge_attr, parent_idx=parent_idx_new_0b)
+        out = model(
+            x=x_in,
+            edge_index=edge_index,
+            batch=batch_new,
+            edge_attr=edge_attr,
+            parent_idx=parent_idx_new_0b,
+            tmd=tmd,
+        )
         if not isinstance(out, dict) or 'rel_pred' not in out or 'expansion_pred' not in out:
             raise ValueError("Model must return dict with 'rel_pred' and 'expansion_pred'.")
         
@@ -1105,9 +1120,16 @@ class Expansion_OneShot(Method):
          
         # --- prepare EGNN input (positions + minimal node features)
         feats_dim = getattr(model, 'feats_dim', 0)
+        tmd_hidden_dim = getattr(model, 'tmd_hidden_dim', 0)
+        avail_feats_dim = feats_dim - tmd_hidden_dim
+        if tmd_hidden_dim > 0 and avail_feats_dim < 5:
+            raise ValueError("feats_dim - tmd_hidden_dim must be >= 5 when using TMD.")
         pos_dim   = getattr(model, 'pos_dim', 3)
+        tmd = getattr(batch, "tmd", None)
+        if tmd_hidden_dim > 0 and tmd is None:
+            raise ValueError("Expected batch.tmd when tmd_hidden_dim > 0.")
 
-        if feats_dim > 0:
+        if avail_feats_dim > 0:
             # seed with simple is_leaf flag - could be extended later TODO
             is_leaf = pos_in.new_zeros((pos_in.size(0), 1))
             is_leaf[batch.leaf_idx] = 1.0
@@ -1115,7 +1137,7 @@ class Expansion_OneShot(Method):
             feats_used = 1
 
             # Add indicator for nodes flagged as newly expanded leaves (required)
-            if feats_used < feats_dim:
+            if feats_used < avail_feats_dim:
                 if not hasattr(batch, "new_leaf_mask_from_next"):
                     raise ValueError("Expected batch.new_leaf_mask_from_next for new-leaf feature.")
                 new_mask = batch.new_leaf_mask_from_next
@@ -1134,18 +1156,18 @@ class Expansion_OneShot(Method):
                 feats_used += 1
             
             # Geometry-derived left/right bit for siblings
-            if self.use_geo_lr_mask and feats_used < feats_dim:
+            if self.use_geo_lr_mask and feats_used < avail_feats_dim:
                 geo_left = geo_lr_mask.to(device=pos_in.device, dtype=pos_in.dtype).unsqueeze(-1)
                 features.append(geo_left)
                 feats_used += 1
             
-            if self.use_radial_distance and feats_used < feats_dim:
+            if self.use_radial_distance and feats_used < avail_feats_dim:
                 radial_dist = pos_in.norm(dim=-1, keepdim=True)  # [N,1]
                 features.append(radial_dist)
                 feats_used += 1
 
             # Graph size ratio feature (current nodes / target nodes), broadcast per node
-            if feats_used < feats_dim:
+            if feats_used < avail_feats_dim:
                 size_ratio = self._size_ratio_feature_from_batch(
                     batch=batch,
                     device=pos_in.device,
@@ -1156,8 +1178,8 @@ class Expansion_OneShot(Method):
                     feats_used += 1
 
             # Fill remaining dimensions with zeros if needed
-            if feats_used < feats_dim:
-                extra = pos_in.new_zeros((pos_in.size(0), feats_dim - feats_used))
+            if feats_used < avail_feats_dim:
+                extra = pos_in.new_zeros((pos_in.size(0), avail_feats_dim - feats_used))
                 features.append(extra)
             
             node_feats = th.cat(features, dim=-1)
@@ -1176,6 +1198,7 @@ class Expansion_OneShot(Method):
             batch=batch.batch,
             edge_attr=edge_attr,
             parent_idx=parent_idx,
+            tmd=tmd,
         )
         if isinstance(out, dict):
             pred_rel_all = out["rel_pred"]                # [N,3]

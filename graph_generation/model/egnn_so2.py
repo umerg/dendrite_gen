@@ -573,6 +573,8 @@ class SO2_EGNN_Network(nn.Module):
                  pos_dim = 3,
                  edge_attr_dim = 0, 
                  m_dim = 16,
+                 tmd_in_dim = 0,
+                 tmd_hidden_dim = 0,
                  fourier_features = 0, 
                  soft_edge = 0,
                  embedding_nums=[], 
@@ -632,6 +634,8 @@ class SO2_EGNN_Network(nn.Module):
         self.pos_dim          = pos_dim
         self.edge_attr_dim    = edge_attr_dim
         self.m_dim            = m_dim
+        self.tmd_in_dim       = int(tmd_in_dim)
+        self.tmd_hidden_dim   = int(tmd_hidden_dim)
         self.fourier_features = fourier_features
         self.soft_edge        = soft_edge
         self.norm_feats       = norm_feats
@@ -647,6 +651,21 @@ class SO2_EGNN_Network(nn.Module):
         # axis buffer needed for decode
         u = torch.tensor(so2_axis, dtype=torch.float32)
         self.register_buffer('uhat', u / (u.norm() + 1e-8))
+
+        if self.tmd_hidden_dim < 0 or self.tmd_in_dim < 0:
+            raise ValueError("tmd_in_dim and tmd_hidden_dim must be >= 0.")
+        if self.tmd_hidden_dim > 0 and self.tmd_in_dim == 0:
+            raise ValueError("tmd_in_dim must be > 0 when tmd_hidden_dim > 0.")
+        if self.tmd_hidden_dim > self.feats_dim:
+            raise ValueError("tmd_hidden_dim cannot exceed feats_dim.")
+        
+        self.tmd_mlp = None
+        if self.tmd_hidden_dim > 0:
+            self.tmd_mlp = nn.Sequential(
+                nn.Linear(self.tmd_in_dim, self.tmd_hidden_dim),
+                nn.SiLU(),
+                nn.Linear(self.tmd_hidden_dim, self.tmd_hidden_dim),
+            )
 
         # basis-coef head
         self.LR_offset_head = LR_offset_head
@@ -713,13 +732,39 @@ class SO2_EGNN_Network(nn.Module):
 
     def forward(self, x, edge_index, batch, edge_attr,
                 bsize=None, recalc_edge=None, verbose=0,
-                parent_idx: Optional[torch.Tensor] = None):
+                parent_idx: Optional[torch.Tensor] = None,
+                tmd: Optional[torch.Tensor] = None):
         """ Recalculate edge features every `self.recalc_edge` with the
             `recalc_edge` function if self.recalc_edge is set.
 
             * x: (N, pos_dim+feats_dim) will be unpacked into coors, feats.
         """
         x = embedd_token(x, self.embedding_dims, self.emb_layers) # identity if no embedding layers
+        if self.tmd_hidden_dim > 0:
+            if tmd is None:
+                raise ValueError("tmd must be provided when tmd_hidden_dim > 0.")
+            if tmd.dim() != 2:
+                raise ValueError("tmd must be a 2D tensor of shape (B, tmd_in_dim).")
+            if tmd.size(-1) != self.tmd_in_dim:
+                raise ValueError("tmd last dim must match tmd_in_dim.")
+            
+            tmd = tmd.to(device=x.device, dtype=x.dtype)
+            tmd_emb = self.tmd_mlp(tmd)
+            num_graphs = int(batch.max().item()) + 1
+            
+            if tmd_emb.size(0) != num_graphs:
+                raise ValueError("tmd batch size must be == number of graphs in batch.")
+            
+            coors, feats = x[:, :self.pos_dim], x[:, self.pos_dim:]
+            expected_feats = self.feats_dim - self.tmd_hidden_dim
+            
+            if feats.size(1) != expected_feats:
+                raise ValueError("Input feature dim does not match feats_dim - tmd_hidden_dim.")
+            
+            tmd_nodes = tmd_emb[batch]
+            feats = torch.cat([feats, tmd_nodes], dim=-1)
+            x = torch.cat([coors, feats], dim=-1)
+
         class_feature = None
         if self.LR_offset_head:
             class_feature_idx = self.pos_dim + 1  # second entry of the input feature vector
