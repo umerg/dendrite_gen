@@ -18,18 +18,18 @@ reduction:
 training:
   batch_size: 16
   lr: 1e-3
-  num_steps: 200
+  num_steps: 10000
   max_num_workers: 0
   log_interval: 2
   save_checkpoint: True
   resume: False # if True, resume from last checkpoint, if number, resume from that step
   lr_scheduler: "cosine_annealing"              # Enable cosine annealing
   scheduler_T_max: ${training.num_steps}  # Optional: full cosine cycle length
-  scheduler_eta_min: 1.0e-5          # Optional: minimum learning rate
+  scheduler_eta_min: 1.0e-8          # Optional: minimum learning rate
 
 validation:
   batch_size: 1
-  interval: 50
+  interval: 100
   first_step: 0
   per_graph_size: False
   enable_metrics: False
@@ -55,7 +55,7 @@ ema:
   gamma: 1.0
   power: 1.0
 
-name: single_small_tree_
+name: single_small_tree_geo_radial
 debugging: False
 debugging_max_batches: 50
 debugging_dir: "single_tree_debug"

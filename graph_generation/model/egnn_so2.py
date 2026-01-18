@@ -649,7 +649,7 @@ class SO2_EGNN_Network(nn.Module):
         self.register_buffer('uhat', u / (u.norm() + 1e-8))
 
         # basis-coef head
-        self.add_offset_head = LR_offset_head
+        self.LR_offset_head = LR_offset_head
         if self.LR_offset_head:
             # Two-class gated offset heads; each is a 2-layer MLP producing (dx, dy, dz, expansion)
             self.offset_head_class0 = nn.Sequential(

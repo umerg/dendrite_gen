@@ -25,6 +25,8 @@ class Expansion_OneShot(Method):
         use_sibling_matching: bool = False,         # if True, use per-parent matching for positional loss
         use_geo_lr_mask: bool = False,            # if True, use geometric left/right child assignment
         use_radial_distance: bool = False,    # if True, use radial distance feature for EGNN
+        pos_loss_weight: float = 3.0,                     # position loss weight 
+        expansion_loss_weight: float = 1.0,               # expansion loss weight 
         debug: bool = False,
         debug_max_batches: int = 2,
         debug_dir: str | None = None,
@@ -37,6 +39,9 @@ class Expansion_OneShot(Method):
         self.use_sibling_matching = bool(use_sibling_matching)
         self.use_geo_lr_mask = bool(use_geo_lr_mask)
         self.use_radial_distance = bool(use_radial_distance)
+        self.pos_loss_weight = float(pos_loss_weight)
+        self.expansion_loss_weight = float(expansion_loss_weight)
+
         self.debug = debug
         self._debug_step = 0
         from pathlib import Path as _P
@@ -1244,7 +1249,7 @@ class Expansion_OneShot(Method):
                     sibling_dist_loss = F.mse_loss(d_pred, d_gt)
 
         # combine losses with sibling regularizer
-        loss = leaf_pos_loss + leaf_expansion_loss + self.sibling_loss_weight * sibling_dist_loss
+        loss = self.pos_loss_weight * leaf_pos_loss + self.expansion_loss_weight * leaf_expansion_loss + self.sibling_loss_weight * sibling_dist_loss
 
         with th.no_grad():
             parent_pos_in = pos_in[leaf_parent_idx]                # [L,3]
