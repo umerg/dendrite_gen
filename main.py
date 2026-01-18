@@ -14,6 +14,7 @@ from torch.utils.data import DataLoader
 from torch_geometric.data import Batch
 
 from utils.data_loading import nx_graph_to_adj_pos, load_swc_graphs_from_dir
+from utils.tmd_conditioning_utils import compute_tmd_global_embedding
 
 import graph_generation as gg
 
@@ -43,16 +44,19 @@ def get_expansion_items(cfg: DictConfig, train_graphs, diffusion=None):
     print(f"Extracting adjacency and position matrices for {len(train_graphs)} training graphs...")
     adjs = []
     poses = []
+    tmds = []
     for G in train_graphs:
         A, P, _ = nx_graph_to_adj_pos(G)
         adjs.append(A)
         poses.append(P)
+        tmds.append(compute_tmd_global_embedding(G))
     print("Extraction done.")
 
     print("Creating training reduction sequences...")
     train_dataset = gg.data.InfiniteRandRedDataset(
         adjs=adjs,
         poses=poses,
+        tmds=tmds,
         red_factory=red_factory,
     ) # support only for infinite random reduction dataset for expansion
     print("Training reduction sequences created.")
@@ -236,10 +240,21 @@ def main(cfg: DictConfig):
     else:
         raise ValueError(f"Unknown dataset name: {cfg.dataset.name}")
 
+    def _ensure_root(graphs):
+        for G in graphs:
+            root = G.graph.get("root", None)
+            if root is None or root not in G.nodes:
+                G.graph["root"] = next(iter(G.nodes))
+
+    _ensure_root(train_graphs)
+    _ensure_root(validation_graphs)
+    _ensure_root(test_graphs)
+
     # keep only largest connected component for train graphs - IS THIS REDUNDANT? TODO
     train_graphs = [
         G.subgraph(max(nx.connected_components(G), key=len)) for G in train_graphs
     ]
+    _ensure_root(train_graphs)
 
     # Metrics
     validation_metrics = [

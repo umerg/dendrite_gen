@@ -15,13 +15,14 @@ class RandRedDataset(IterableDataset, ABC):
     Expects ReductionFactory to yield a stateful reducer (e.g., CherryReduction).
     No spectral features; only structural fields needed by the expansion model.
     """
-    def __init__(self, adjs, poses, red_factory: ReductionFactory):
+    def __init__(self, adjs, poses, red_factory: ReductionFactory, tmds=None):
         super().__init__()
         self.red_factory = red_factory
         self.adjs = adjs  # list of scipy.sparse adjacency arrays (float64 okay)
         self.poses = poses  # list of np.ndarray, each of shape (n, 3) for 3D positions
+        self.tmds = tmds  # list of np.ndarray, each of shape (D,) or (1, D)
 
-    def _build_reduced_graph_data(self, graph, pos, forced_new_leaf_idx=None):
+    def _build_reduced_graph_data(self, graph, pos, forced_new_leaf_idx=None, tmd=None):
         """Helper: convert reducer state into ReducedGraphData."""
         if graph.leaf_idx is not None:
             leaf_idx = graph.leaf_idx
@@ -54,6 +55,10 @@ class RandRedDataset(IterableDataset, ABC):
             new_leaf_mask[new_leaf_idx] = True
 
         adj = graph.adj.astype(bool).astype(np.float32) if sp.sparse.issparse(graph.adj) else graph.adj
+        if tmd is not None:
+            tmd = np.asarray(tmd, dtype=np.float32)
+            if tmd.ndim == 1:
+                tmd = tmd[None, :]
 
         return ReducedGraphData(
             target_size=graph.n,
@@ -68,9 +73,10 @@ class RandRedDataset(IterableDataset, ABC):
             total_tree_size=graph.total_nodes,
             new_leaf_idx_from_next=new_leaf_idx,
             new_leaf_mask_from_next=new_leaf_mask,
+            tmd=tmd,
         )
 
-    def get_random_reduction_sequence(self, graph, pos, rng):
+    def get_random_reduction_sequence(self, graph, pos, rng, tmd=None):
         """
         Generate one full sequence of (fine -> coarse) steps
         until the reducer stops (n <= 1 or no cherries).
@@ -88,7 +94,7 @@ class RandRedDataset(IterableDataset, ABC):
                 if children:
                     forced_new = np.array(children, dtype=np.int64)
 
-            rgd = self._build_reduced_graph_data(graph, pos, forced_new_leaf_idx=forced_new)
+            rgd = self._build_reduced_graph_data(graph, pos, forced_new_leaf_idx=forced_new, tmd=tmd)
             data.append(rgd)
 
             if not reduced_graph.did_contract:  # terminal: smallest graph already recorded
@@ -104,8 +110,8 @@ class FiniteRandRedDataset(RandRedDataset):
     """
     Precompute K random reduction sequences per input graph.
     """
-    def __init__(self, adjs, poses, red_factory: ReductionFactory, num_red_seqs: int):
-        super().__init__(adjs, poses, red_factory)
+    def __init__(self, adjs, poses, red_factory: ReductionFactory, num_red_seqs: int, tmds=None):
+        super().__init__(adjs, poses, red_factory, tmds=tmds)
         self.num_red_seqs = int(num_red_seqs)
 
         self.rng = np.random.default_rng(seed=0)
@@ -116,7 +122,8 @@ class FiniteRandRedDataset(RandRedDataset):
                 # NEW: fresh reducer per sequence
                 graph = red_factory(adj, rng=self.rng)
                 pos = self.poses[i]
-                seq = self.get_random_reduction_sequence(graph, pos, self.rng)
+                tmd = self.tmds[i] if self.tmds is not None else None
+                seq = self.get_random_reduction_sequence(graph, pos, self.rng, tmd=tmd)
                 if seq:  # guard in case tree is already terminal
                     self.graph_reduced_data[i].extend(seq)
 
@@ -138,6 +145,7 @@ class InfiniteRandRedDataset(RandRedDataset):
         # NEW: keep raw adj list so we can reinit reducers
         base_adjs = [A.copy() for A in self.adjs]
         base_poses = [P.copy() for P in self.poses]
+        base_tmds = list(self.tmds) if self.tmds is not None else None
 
         # worker-specific RNG
         worker_info = th.utils.data.get_worker_info()
@@ -150,7 +158,8 @@ class InfiniteRandRedDataset(RandRedDataset):
         graph_reduced_data = {}
         for i, g in enumerate(graphs):
             pos = base_poses[i]
-            graph_reduced_data[i] = self.get_random_reduction_sequence(g, pos, rng)
+            tmd = base_tmds[i] if base_tmds is not None else None
+            graph_reduced_data[i] = self.get_random_reduction_sequence(g, pos, rng, tmd=tmd)
 
         while True:
             i = rng.integers(len(base_adjs))
@@ -158,7 +167,8 @@ class InfiniteRandRedDataset(RandRedDataset):
                 # NEW: reinit reducer and resample a full sequence
                 graphs[i] = self.red_factory(base_adjs[i].copy(), rng=rng)
                 pos = base_poses[i].copy()
-                seq = self.get_random_reduction_sequence(graphs[i], pos, rng)
+                tmd = base_tmds[i] if base_tmds is not None else None
+                seq = self.get_random_reduction_sequence(graphs[i], pos, rng, tmd=tmd)
                 if not seq:
                     # Degenerate: nothing to reduce (e.g., single-node tree). Skip this i.
                     continue
