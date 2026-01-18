@@ -1,6 +1,6 @@
 defaults:
   - _self_
-  - dataset: single_tree
+  - dataset: trees
   - method: expansion_oneshot
 
 reduction:
@@ -16,11 +16,11 @@ reduction:
   red_threshold: 0
 
 training:
-  batch_size: 4096
-  lr: 5e-3
-  num_steps: 1000 # ~200 epochs; considering 1 step = 1 batch
+  batch_size: 64
+  lr: 1e-3
+  num_steps: 10000 # ~200 epochs; considering 1 step = 1 batch
   max_num_workers: 0
-  log_interval: 20
+  log_interval: 100
   save_checkpoint: True
   resume: False # if True, resume from last checkpoint, if number, resume from that step
   lr_scheduler: "cosine_annealing"              # Enable cosine annealing
@@ -29,7 +29,7 @@ training:
 
 validation:
   batch_size: 1
-  interval: 50
+  interval: 100
   first_step: 0
   per_graph_size: False
   enable_metrics: False
@@ -38,9 +38,11 @@ validation:
 testing: False # if True, only evaluate on test set
 
 model:
-  name: egnn_simple
+  name: egnn
   num_layers: 6
   feats_dim: 32
+  tdm_in_dim: 768
+  tdm_hidden_dim: 16
   m_dim: 32
   dropout: 0.1
   norm_feats: True
@@ -56,10 +58,10 @@ ema:
   gamma: 1.0
   power: 1.0
 
-name: geo_method_single_tree
+name: small_trees_oneshot
 debugging: True
 debugging_max_batches: 50
-debugging_dir: "single_tree_debug"
+debugging_dir: "small_trees_debug"
 
 wandb:
   logging: False
