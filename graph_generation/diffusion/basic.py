@@ -32,6 +32,7 @@ class DenoisingDiffusionModel(Module):
         leaf_expansion: th.Tensor,
         leaf_parent_idx: th.Tensor,
         model: Module,
+        tmd: th.Tensor | None = None,
     ) -> tuple[th.Tensor, th.Tensor]:
         """Compute σ-conditioned denoising losses for positional + expansion targets."""
         device = P_0.device
@@ -79,6 +80,7 @@ class DenoisingDiffusionModel(Module):
             batch=batch,
             edge_attr=edge_attr,
             parent_idx=parent_idx,
+            tmd=tmd,
         )
         if not isinstance(out, dict):
             raise ValueError("Model must return dict with 'rel_pred' and 'expansion_pred'.")
@@ -117,10 +119,13 @@ class DenoisingDiffusionModel(Module):
         leaf_parent_idx: th.Tensor,
         model: Module,
         model_kwargs: dict | None = None,
+        tmd: th.Tensor | None = None,
     ) -> tuple[th.Tensor, th.Tensor]:
         """Deterministically denoise leaves via σ-schedule (ancestral-free)."""
         device = P_0.device
         model_kwargs = model_kwargs or {}
+        if tmd is not None:
+            model_kwargs = {**model_kwargs, "tmd": tmd}
         if node_feats is None:
             node_feats = P_0.new_zeros((P_0.size(0), 0))
 

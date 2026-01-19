@@ -36,7 +36,7 @@ class Expansion(Method):
         self.red_threshold = red_threshold
         self.expansion_loss_weight = float(expansion_loss_weight)
     
-    def sample_graphs(self, target_size: th.Tensor, model: Module):
+    def sample_graphs(self, target_size: th.Tensor, model: Module, tmd: th.Tensor | None = None):
         """Generate graphs via iterative diffusion-based leaf expansion."""
         if self.diffusion is None:
             raise ValueError("Diffusion module is required for sampling.")
@@ -47,6 +47,8 @@ class Expansion(Method):
 
         device = target_size.device
         num_graphs = int(target_size.numel())
+        if tmd is not None:
+            tmd = tmd.to(device=device)
 
         pos = th.zeros((num_graphs, 3), device=device)
         adj = SparseTensor(
@@ -89,6 +91,7 @@ class Expansion(Method):
                 parent_idx_1b=parent_idx_1b,
                 geo_lr_assign=geo_lr_assign,
                 leaf_mask=leaf_mask,
+                tmd=tmd,
                 step=step,
                 ensure_progress=False,
             )
@@ -124,6 +127,7 @@ class Expansion(Method):
         parent_idx_1b: th.Tensor | None = None,
         leaf_mask: th.Tensor | None = None,
         geo_lr_assign: th.Tensor | None = None,
+        tmd: th.Tensor | None = None,
         step: int = 0,
         ensure_progress: bool = False,
         map_threshold: float = 0.0,
@@ -316,16 +320,19 @@ class Expansion(Method):
         )
 
         feats_total = getattr(model, "feats_dim", 0)
+        tmd_hidden_dim = getattr(model, "tmd_hidden_dim", 0)
         cond_dim = getattr(self.diffusion, "cond_dim", 0)
-        feats_dim = max(feats_total - cond_dim, 0)
-        if feats_dim > 0:
+        avail_feats_dim = feats_total - cond_dim - tmd_hidden_dim
+        if tmd_hidden_dim > 0 and avail_feats_dim < 5:
+            raise ValueError("feats_dim - tmd_hidden_dim - cond_dim must be >= 5 when using TMD.")
+        if avail_feats_dim > 0:
             features = []
             feats_used = 0
             is_leaf = leaf_mask_next.to(dtype=pos_new.dtype).unsqueeze(-1)
             features.append(is_leaf)
             feats_used += 1
 
-            if feats_used < feats_dim:
+            if feats_used < avail_feats_dim:
                 geo_feat = pos_new.new_zeros((pos_new.size(0), 1))
                 mask = geo_lr_assign_next >= 0
                 if mask.any():
@@ -333,20 +340,20 @@ class Expansion(Method):
                 features.append(geo_feat)
                 feats_used += 1
 
-            if feats_used < feats_dim:
+            if feats_used < avail_feats_dim:
                 new_flag = pos_new.new_zeros((pos_new.size(0), 1))
                 new_flag[leaf_idx_next] = 1.0
                 features.append(new_flag)
                 feats_used += 1
 
-            if feats_used < feats_dim:
+            if feats_used < avail_feats_dim:
                 ratio_graph = node_counts_per_graph.to(pos_new.dtype) / target_size.to(pos_new.dtype).clamp_min(1.0)
                 ratio_nodes = ratio_graph[batch_new].unsqueeze(-1)
                 features.append(ratio_nodes)
                 feats_used += 1
 
-            if feats_used < feats_dim:
-                pad = pos_new.new_zeros((pos_new.size(0), feats_dim - feats_used))
+            if feats_used < avail_feats_dim:
+                pad = pos_new.new_zeros((pos_new.size(0), avail_feats_dim - feats_used))
                 features.append(pad)
 
             node_feats = th.cat(features, dim=-1)
@@ -364,6 +371,7 @@ class Expansion(Method):
             edge_attr = pos_new.new_zeros((0, 1))
 
         leaf_parent_idx_next = parent_idx_new_0b[leaf_idx_next]
+        model_kwargs = {"tmd": tmd} if tmd is not None else None
         rel_pred, exp_pred = self.diffusion.sample(
             node_feats=node_feats,
             edge_index=edge_index,
@@ -374,7 +382,7 @@ class Expansion(Method):
             leaf_idx=leaf_idx_next,
             leaf_parent_idx=leaf_parent_idx_next,
             model=model,
-            model_kwargs=None,
+            model_kwargs=model_kwargs,
         )
 
         parent_pos_for_children = pos_new[leaf_parent_idx_next]
@@ -511,23 +519,29 @@ class Expansion(Method):
          
         # --- prepare EGNN input (positions + minimal node features)
         feats_total = getattr(model, 'feats_dim', 0)
+        tmd_hidden_dim = getattr(model, "tmd_hidden_dim", 0)
         cond_dim = getattr(self.diffusion, "cond_dim", 0) if self.diffusion is not None else 0
-        feats_dim = max(feats_total - cond_dim, 0) # need to account for diffusion cond input added inside diffusion module
+        avail_feats_dim = feats_total - cond_dim - tmd_hidden_dim
+        if tmd_hidden_dim > 0 and avail_feats_dim < 5:
+            raise ValueError("feats_dim - tmd_hidden_dim - cond_dim must be >= 5 when using TMD.")
+        tmd = getattr(batch, "tmd", None)
+        if tmd_hidden_dim > 0 and tmd is None:
+            raise ValueError("Expected batch.tmd when tmd_hidden_dim > 0.")
 
-        if feats_dim > 0:
+        if avail_feats_dim > 0:
             is_leaf = pos_gt.new_zeros((pos_gt.size(0), 1))
             is_leaf[batch.leaf_idx] = 1.0
             features = [is_leaf]
             feats_used = 1
 
             # Geometry-derived left/right bit for siblings
-            if feats_used < feats_dim:
+            if feats_used < avail_feats_dim:
                 geo_left = geo_lr_mask.to(device=pos_gt.device, dtype=pos_gt.dtype).unsqueeze(-1)
                 features.append(geo_left)
                 feats_used += 1
 
             # Add indicator for nodes flagged as newly expanded leaves (when provided)
-            if hasattr(batch, "new_leaf_mask_from_next") and feats_used < feats_dim:
+            if hasattr(batch, "new_leaf_mask_from_next") and feats_used < avail_feats_dim:
                 new_mask = batch.new_leaf_mask_from_next
                 if isinstance(new_mask, th.Tensor):
                     new_mask_tensor = new_mask.to(pos_gt.device, dtype=pos_gt.dtype)
@@ -544,7 +558,7 @@ class Expansion(Method):
                 feats_used += 1
 
             # Graph size ratio feature (current nodes / target nodes), broadcast per node
-            if feats_used < feats_dim:
+            if feats_used < avail_feats_dim:
                 size_ratio = size_ratio_feature_from_batch(
                     batch=batch,
                     device=pos_gt.device,
@@ -555,8 +569,8 @@ class Expansion(Method):
                     feats_used += 1
 
             # Fill remaining dimensions with zeros if needed
-            if feats_used < feats_dim:
-                extra = pos_gt.new_zeros((pos_gt.size(0), feats_dim - feats_used))
+            if feats_used < avail_feats_dim:
+                extra = pos_gt.new_zeros((pos_gt.size(0), avail_feats_dim - feats_used))
                 features.append(extra)
             
             node_feats = th.cat(features, dim=-1)
@@ -593,6 +607,7 @@ class Expansion(Method):
             leaf_expansion=leaf_expansion,
             leaf_parent_idx=leaf_parent_idx,
             model=model,
+            tmd=tmd,
         )
 
         loss = position_loss + self.expansion_loss_weight * expansion_loss
