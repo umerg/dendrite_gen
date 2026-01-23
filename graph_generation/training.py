@@ -379,8 +379,10 @@ class Trainer:
             )  # returns list[nx.Graph] with geometric node attrs
             pred_graphs += pred_graphs_batch
             cursor += len(batch)
-        # Reorder according to original permutation
-        results["pred_graphs"] = [pred_graphs[i] for i in pred_perm]
+        # Reorder back to original eval_graphs order
+        inv_perm = np.empty_like(pred_perm)
+        inv_perm[pred_perm] = np.arange(len(pred_perm))
+        results["pred_graphs"] = [pred_graphs[i] for i in inv_perm]
         if self.device == "cuda":
             th.cuda.empty_cache()
 
