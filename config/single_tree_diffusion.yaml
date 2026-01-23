@@ -42,6 +42,8 @@ model:
   name: egnn
   num_layers: 6
   feats_dim: 64
+  tdm_in_dim: 768
+  tdm_hidden_dim: 32
   m_dim: 64
   dropout: 0.1
   norm_feats: True
@@ -57,7 +59,7 @@ ema:
   gamma: 1.0
   power: 1.0
 
-name: single_big_tree_diffusion2
+name: single_big_tree_diffusion_wTMD
 debugging: False
 debugging_max_batches: 50
 debugging_dir: "single_tree_debug"
