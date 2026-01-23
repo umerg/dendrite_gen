@@ -42,8 +42,8 @@ model:
   name: egnn
   num_layers: 6
   feats_dim: 64
-  tdm_in_dim: 768
-  tdm_hidden_dim: 32
+  tmd_in_dim: 768
+  tmd_hidden_dim: 32
   m_dim: 64
   dropout: 0.1
   norm_feats: True
