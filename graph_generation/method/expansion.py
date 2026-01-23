@@ -528,19 +528,19 @@ class Expansion(Method):
         if tmd_hidden_dim > 0 and tmd is None:
             raise ValueError("Expected batch.tmd when tmd_hidden_dim > 0.")
         
-        if tmd is not None:
-            tmd_cpu = tmd.detach().cpu()
-            tmd_round = (tmd_cpu * 1000).round() / 1000
-            uniq, counts = th.unique(tmd_round, dim=0, return_counts=True)
-            logger.info(
-                "[TMD Debug] unique=%d counts=%s",
-                int(uniq.size(0)),
-                counts.tolist(),
-            )
-            logger.info(
-                "[Unique TMDs] %s",
-                uniq.tolist(),
-            )
+        # if tmd is not None:
+        #     tmd_cpu = tmd.detach().cpu()
+        #     tmd_round = (tmd_cpu * 1000).round() / 1000
+        #     uniq, counts = th.unique(tmd_round, dim=0, return_counts=True)
+        #     logger.info(
+        #         "[TMD Debug] unique=%d counts=%s",
+        #         int(uniq.size(0)),
+        #         counts.tolist(),
+        #     )
+        #     logger.info(
+        #         "[Unique TMDs] %s",
+        #         uniq.tolist(),
+        #     )
 
         if avail_feats_dim > 0:
             is_leaf = pos_gt.new_zeros((pos_gt.size(0), 1))
