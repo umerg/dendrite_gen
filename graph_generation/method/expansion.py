@@ -537,6 +537,10 @@ class Expansion(Method):
                 int(uniq.size(0)),
                 counts.tolist(),
             )
+            logger.info(
+                "[Unique TMDs] %s",
+                uniq.tolist(),
+            )
 
         if avail_feats_dim > 0:
             is_leaf = pos_gt.new_zeros((pos_gt.size(0), 1))
