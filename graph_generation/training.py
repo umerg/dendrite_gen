@@ -357,10 +357,6 @@ class Trainer:
                 [compute_tmd_global_embedding(g) for g in eval_graphs],
                 axis=0,
             )[pred_perm]
-        logger.info(
-            "[Unique TMDs] %s",
-            tmds,
-        )
         bs = (
             self.cfg.validation.batch_size
             if self.cfg.validation.batch_size is not None

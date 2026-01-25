@@ -1,0 +1,3 @@
+name: tree_dataset
+data_dir: /scratch/guptau/small_trees_test
+load: True

@@ -1,6 +1,6 @@
 defaults:
   - _self_
-  - dataset: trees
+  - dataset: trees_test
   - diffusion: basic
   - method: expansion_oneshot
 
@@ -17,9 +17,9 @@ reduction:
   red_threshold: 0
 
 training:
-  batch_size: 4096
+  batch_size: 128
   lr: 5e-4
-  num_steps: 120000 # ~200 epochs; considering 1 step = 1 batch
+  num_steps: 30000 # ~200 epochs; considering 1 step = 1 batch
   max_num_workers: 0
   log_interval: 100
   save_checkpoint: True
@@ -29,7 +29,7 @@ training:
   scheduler_eta_min: 1e-5          # Optional: minimum learning rate
 
 validation:
-  batch_size: 512
+  batch_size: 1
   interval: 100
   first_step: 0
   per_graph_size: False
@@ -59,8 +59,8 @@ ema:
   gamma: 1.0
   power: 1.0
 
-name: small_trees_diffusion
-debugging: False
+name: small_trees_test_diffusion
+debugging: True
 debugging_max_batches: 50
 debugging_dir: "small_trees_debug"
 
