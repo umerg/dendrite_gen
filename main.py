@@ -172,17 +172,6 @@ def get_expansion_items(cfg: DictConfig, train_graphs, diffusion=None):
             debug_max_batches=cfg.debugging_max_batches,
             debug_dir=cfg.debugging_dir,
         )  # expansion with one-shot generation at every step
-    # elif method_name == "expansion_augmented":
-    #     method = gg.method.Expansion_OneShot_Augmented(
-    #         deterministic_expansion=cfg.method.deterministic_expansion,
-    #         leaf_noise_sigma=cfg.method.leaf_noise_sigma,
-    #         leaf_noise_clip=cfg.method.leaf_noise_clip,
-    #         sibling_loss_weight=cfg.method.sibling_loss_weight,
-    #         use_sibling_matching=cfg.method.use_sibling_matching,
-    #         debug=cfg.debugging,
-    #         debug_max_batches=cfg.debugging_max_batches,
-    #         debug_dir=cfg.debugging_dir,
-    #     )  # augmented expansion with one-shot generation at every step
     else:
         raise ValueError(f"Unknown method name: {method_name}")
 
@@ -285,6 +274,10 @@ def main(cfg: DictConfig):
         diffusion_name = getattr(diffusion_cfg, "name", None)
         if diffusion_name == "basic":
             diffusion = gg.diffusion.DenoisingDiffusionModel(
+                num_steps=diffusion_cfg.num_steps,
+            )
+        elif diffusion_name == "edm":
+            diffusion = gg.diffusion.EDMDiffusionModel(
                 num_steps=diffusion_cfg.num_steps,
             )
         else:

@@ -1,7 +1,7 @@
 defaults:
   - _self_
   - dataset: trees_test
-  - diffusion: basic
+  - diffusion: edm
   - method: expansion_oneshot
 
 reduction:
@@ -18,8 +18,8 @@ reduction:
 
 training:
   batch_size: 128
-  lr: 5e-4
-  num_steps: 30000 # ~200 epochs; considering 1 step = 1 batch
+  lr: 3e-4
+  num_steps: 12000 # ~200 epochs; considering 1 step = 1 batch
   max_num_workers: 0
   log_interval: 100
   save_checkpoint: True
@@ -29,7 +29,7 @@ training:
   scheduler_eta_min: 1e-5          # Optional: minimum learning rate
 
 validation:
-  batch_size: 1
+  batch_size: 4
   interval: 100
   first_step: 0
   per_graph_size: False
@@ -55,12 +55,12 @@ model:
   use_global_fallback_frames: False
 
 ema:
-  betas: [1]
+  betas: [0.999]
   gamma: 1.0
-  power: 1.0
+  power: 0.8
 
 name: small_trees_test_diffusion
-debugging: True
+debugging: False
 debugging_max_batches: 50
 debugging_dir: "small_trees_debug"
 
