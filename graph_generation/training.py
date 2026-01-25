@@ -122,7 +122,7 @@ class Trainer:
         if cfg.wandb.logging and wandb is not None and OmegaConf is not None:
             try:
                 self.wandb_run = wandb.init(
-                    project="tree-generation",
+                    project="tree_gen",
                     config=OmegaConf.to_container(cfg, resolve=True),
                     name=cfg.name,
                     resume=self.run_id,
