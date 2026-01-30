@@ -224,6 +224,134 @@ def compute_geo_lr_mask(
     return lr_mask
 
 
+def compute_geo_lr_mask_f2(
+    pos: th.Tensor,
+    parent_idx: th.Tensor,
+    *,
+    debug: bool = False,
+    eps: float = 1e-8,
+    tol: float = 1e-6,
+) -> th.Tensor:
+    """Return boolean mask marking the geometrically-defined left child per parent."""
+    if pos.numel() == 0:
+        return pos.new_zeros((0,), dtype=th.bool)
+    device = pos.device
+    dtype = pos.dtype
+    N = pos.size(0)
+    parent = parent_idx.to(device=device)
+    has_parent = parent >= 0
+
+    gp = parent.new_full((N,), -1)
+    if has_parent.any():
+        parents = parent[has_parent]
+        gp_values = parent.new_full((parents.numel(),), -1)
+        positive_mask = parents >= 0
+        if positive_mask.any():
+            gp_values[positive_mask] = parent[parents[positive_mask]].clamp(min=-1)
+        gp[has_parent] = gp_values
+
+    uhat = pos.new_zeros((pos.size(1),), dtype=dtype)
+    uhat[-1] = 1.0
+    global_e1, _ = global_inplane_basis(uhat, eps=eps)
+    uhat_vec = uhat.view(1, -1)
+
+    v_in = th.zeros((N, pos.size(1)), device=device, dtype=dtype)
+    has_gp_mask = gp >= 0
+    if has_gp_mask.any():
+        sel = has_gp_mask.nonzero(as_tuple=False).flatten()
+        v_in[sel] = pos[parent[sel]] - pos[gp[sel]]
+    fallback_mask = has_parent & ~has_gp_mask
+    if fallback_mask.any():
+        v_in[fallback_mask] = global_e1.view(1, -1)
+
+    v_out = th.zeros((N, pos.size(1)), device=device, dtype=dtype)
+    if has_parent.any():
+        sel = has_parent.nonzero(as_tuple=False).flatten()
+        v_out[sel] = pos[sel] - pos[parent[sel]]
+
+    du_in = (v_in * uhat_vec).sum(dim=-1, keepdim=True)
+    du_out = (v_out * uhat_vec).sum(dim=-1, keepdim=True)
+    v_in_perp = v_in - du_in * uhat_vec
+    v_out_perp = v_out - du_out * uhat_vec
+
+    nin = v_in_perp.norm(dim=-1, keepdim=True)
+    nout = v_out_perp.norm(dim=-1, keepdim=True)
+    v_in_unit = v_in_perp / (nin + eps)
+    degenerate = (nin <= eps) | (~has_parent).view(-1, 1)
+    if degenerate.any():
+        v_in_unit = v_in_unit.clone()
+        v_in_unit[degenerate.squeeze(-1)] = global_e1
+    v_out_unit = v_out_perp / (nout + eps)
+
+    cospsi = (v_in_unit * v_out_unit).sum(dim=-1, keepdim=True)
+    cross = th.cross(v_in_unit, v_out_unit, dim=-1)
+    sinpsi = (cross * uhat_vec).sum(dim=-1, keepdim=True)
+    mask = has_parent.view(-1, 1)
+    cospsi = th.where(mask, cospsi, cospsi.new_ones(cospsi.shape))
+    sinpsi = th.where(mask, sinpsi, sinpsi.new_zeros(sinpsi.shape))
+
+    lr_mask = th.zeros((N,), dtype=th.bool, device=device)
+
+    handled_parents = th.zeros((N,), dtype=th.bool, device=device)
+    root_nodes = (parent == -1).nonzero(as_tuple=False).flatten()
+    if not root_nodes.numel():
+        logger.warning("[GeoLR] No root with parent==-1 found; override skipped for this graph.")
+    else:
+        for r in root_nodes.tolist():
+            child_idx = (parent == r).nonzero(as_tuple=False).flatten()
+            if child_idx.numel() == 0:
+                continue
+            if child_idx.numel() == 2:
+                child_z = pos[child_idx, -1]
+                if float(child_z[0].item()) <= float(child_z[1].item()):
+                    left_idx = int(child_idx[0].item())
+                    right_idx = int(child_idx[1].item())
+                else:
+                    left_idx = int(child_idx[1].item())
+                    right_idx = int(child_idx[0].item())
+                lr_mask[left_idx] = True
+                lr_mask[right_idx] = False
+            else:
+                parent_z = pos[r, -1]
+                child_z = pos[child_idx, -1]
+                lr_mask[child_idx] = child_z >= parent_z
+            handled_parents[r] = True
+
+    unique_parents = parent.unique()
+    for p in unique_parents.tolist():
+        if p < 0:
+            continue
+        if handled_parents[p]:
+            continue
+        child_idx = (parent == p).nonzero(as_tuple=False).flatten()
+        if child_idx.numel() != 2:
+            continue
+        s = sinpsi[child_idx, 0]
+        c = cospsi[child_idx, 0]
+        if (s[0] * s[1] < -tol):
+            lr_mask[child_idx[0]] = bool(s[0] > 0)
+            lr_mask[child_idx[1]] = bool(s[1] > 0)
+        else:
+            theta = th.atan2(s, c)
+            idx_left = child_idx[int(th.argmax(theta))]
+            lr_mask[idx_left] = True
+
+    if debug:
+        for p in unique_parents.tolist():
+            if p < 0:
+                continue
+            child_idx = (parent == p).nonzero(as_tuple=False).flatten()
+            if child_idx.numel() != 2:
+                continue
+            left_count = int(lr_mask[child_idx].sum().item())
+            if left_count != 1:
+                logger.warning(
+                    f"[GeoLR] Parent {p} has {left_count} left assignments (expected 1)."
+                )
+
+    return lr_mask
+
+
 def decode_parent_indices(batch) -> th.Tensor:
     """Convert batched parent_idx_1b -> 0-based with -1 for roots, even after PyG offsets."""
     parent_idx_1b = batch.parent_idx_1b
