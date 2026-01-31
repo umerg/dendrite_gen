@@ -147,6 +147,7 @@ expansion_debug_test/
 single_tree_debug/
 small_trees_debug/
 weights/
+wandb/
 
 # weights
 

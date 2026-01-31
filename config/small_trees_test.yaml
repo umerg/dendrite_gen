@@ -1,7 +1,7 @@
 defaults:
   - _self_
   - dataset: trees_test
-  - diffusion: edm
+  - diffusion: basic
   - method: expansion_oneshot
 
 reduction:
@@ -18,10 +18,10 @@ reduction:
 
 training:
   batch_size: 128
-  lr: 3e-4
-  num_steps: 12000 # ~200 epochs; considering 1 step = 1 batch
+  lr: 5e-4
+  num_steps: 30000 # ~200 epochs; considering 1 step = 1 batch
   max_num_workers: 0
-  log_interval: 100
+  log_interval: 200
   save_checkpoint: True
   resume: False # if True, resume from last checkpoint, if number, resume from that step
   lr_scheduler: "cosine_annealing"              # Enable cosine annealing
@@ -30,7 +30,7 @@ training:
 
 validation:
   batch_size: 4
-  interval: 100
+  interval: 200
   first_step: 0
   per_graph_size: False
   enable_metrics: False
@@ -42,9 +42,9 @@ model:
   name: egnn
   num_layers: 6
   feats_dim: 64
-  tmd_in_dim: 768
-  tmd_hidden_dim: 32
   m_dim: 64
+  tmd_in_dim: 192
+  tmd_hidden_dim: 32
   dropout: 0.1
   norm_feats: True
   global_linear_attn_every: 2
@@ -55,14 +55,14 @@ model:
   use_global_fallback_frames: False
 
 ema:
-  betas: [0.999]
+  betas: [1.0]
   gamma: 1.0
-  power: 0.8
+  power: 1.0
 
-name: small_trees_test_diffusion
+name: small_trees_test_basic_tdm_fixed
 debugging: False
 debugging_max_batches: 50
 debugging_dir: "small_trees_debug"
 
 wandb:
-  logging: False
+  logging: True
