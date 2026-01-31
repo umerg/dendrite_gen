@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader
 from torch_geometric.data import Batch
 
 from utils.data_loading import nx_graph_to_adj_pos, load_swc_graphs_from_dir
-from utils.tmd_conditioning_utils import compute_tmd_global_embedding
+from utils.tmd_paper_embedding_utils import compute_tmd_global_embedding_paper
 
 import graph_generation as gg
 
@@ -49,7 +49,7 @@ def get_expansion_items(cfg: DictConfig, train_graphs, diffusion=None):
         A, P, _ = nx_graph_to_adj_pos(G)
         adjs.append(A)
         poses.append(P)
-        tmds.append(compute_tmd_global_embedding(G))
+        tmds.append(compute_tmd_global_embedding_paper(G))
     print("Extraction done.")
 
     print("Creating training reduction sequences...")

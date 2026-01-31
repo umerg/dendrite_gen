@@ -14,7 +14,7 @@ from matplotlib.figure import Figure
 from torch.optim import Adam
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
-from utils.tmd_conditioning_utils import compute_tmd_global_embedding
+from utils.tmd_paper_embedding_utils import compute_tmd_global_embedding_paper
 
 # Optional / guarded imports (Hydra, OmegaConf, wandb)
 try:  # Hydra runtime config access
@@ -354,7 +354,7 @@ class Trainer:
         tmds = None
         if tmd_hidden_dim > 0:
             tmds = np.stack(
-                [compute_tmd_global_embedding(g) for g in eval_graphs],
+                [compute_tmd_global_embedding_paper(g) for g in eval_graphs],
                 axis=0,
             )[pred_perm]
         bs = (
