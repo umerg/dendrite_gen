@@ -321,14 +321,14 @@ def compute_tmd_global_embedding_paper(
     G: nx.Graph,
     *,
     filtrations: Sequence[FiltrationName] = ("path", "height", "rho"),
-    n_bins: int = 64,
+    n_bins: int = 16,
     sigma: float = 0.05,
     normalize_mode: Literal["minmax", "max"] = "minmax",
-    weighting: Literal["none", "persistence"] = "none",
+    weighting: Literal["none", "persistence"] = "persistence",
     weight_edges_by_euclidean: bool = True,
     simplify_to_critical_tree: bool = True,
-    embedding: Literal["density", "pi", "density+pi"] = "density",
-    density_normalize: Literal["none", "max", "l1"] = "l1",
+    embedding: Literal["density", "pi", "density+pi"] = "pi",
+    density_normalize: Literal["none", "max", "l1"] = "none",
 ) -> np.ndarray:
     """
     Compute a concatenated global embedding using the *paper-style* TMD barcode.
