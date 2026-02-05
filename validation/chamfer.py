@@ -18,7 +18,7 @@ import pickle
 import sys
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Literal
 
 import networkx as nx
 import numpy as np
@@ -54,6 +54,7 @@ try:  # allow running as module or script
         bifurcation_angle_values,
         bottleneck_distance,
         branch_length_values,
+        graph_edit_distance_topology,
         mean_branch_amplitude,
         mean_branch_length,
     )
@@ -79,6 +80,7 @@ except Exception:
         bifurcation_angle_values,
         bottleneck_distance,
         branch_length_values,
+        graph_edit_distance_topology,
         mean_branch_amplitude,
         mean_branch_length,
     )
@@ -378,6 +380,10 @@ def run_metrics(
     squared: bool,
     tmd_normalize: Literal["minmax", "max", "none"] = "minmax",
     f1_radius: float = 0.05,
+    ged_enabled: bool = False,
+    ged_mode: Literal["raw", "normalized", "both"] = "raw",
+    ged_normalization: Literal["nodes_edges", "nodes", "edges"] = "nodes_edges",
+    ged_timeout: float | None = None,
     plot_dir: Path | None = None,
     plot_max: int = 12,
     plot_pairs: bool = False,
@@ -446,6 +452,10 @@ def run_metrics(
     chamfers: list[float] = []
     by_size: dict[int, list[float]] = defaultdict(list)
 
+    ged_raw_vals: list[float] = []
+    ged_norm_vals: list[float] = []
+    ged_timeouts = 0
+
     for idx_pair, pair in enumerate(pairs):
         gt_idx = pair["gt_idx"]
         pred_idx = pair["pred_idx"]
@@ -491,6 +501,37 @@ def run_metrics(
         )
         tmd_bn = bottleneck_distance(gt_diag, pred_diag, canonicalize=False)
 
+        ged_raw = None
+        ged_norm = None
+        if ged_enabled:
+            ged_raw = graph_edit_distance_topology(
+                gt,
+                pred,
+                normalize=False,
+                timeout=ged_timeout,
+            )
+            if ged_raw is None:
+                ged_timeouts += 1
+            if ged_mode in ("normalized", "both"):
+                if ged_raw is None:
+                    ged_norm = None
+                else:
+                    if ged_normalization == "nodes":
+                        denom = max(gt.number_of_nodes(), pred.number_of_nodes())
+                    elif ged_normalization == "edges":
+                        denom = max(gt.number_of_edges(), pred.number_of_edges())
+                    else:
+                        denom = max(
+                            gt.number_of_nodes() + gt.number_of_edges(),
+                            pred.number_of_nodes() + pred.number_of_edges(),
+                        )
+                    ged_norm = 0.0 if denom <= 0 else float(ged_raw) / float(denom)
+
+            if ged_mode in ("raw", "both") and ged_raw is not None:
+                ged_raw_vals.append(float(ged_raw))
+            if ged_mode in ("normalized", "both") and ged_norm is not None:
+                ged_norm_vals.append(float(ged_norm))
+
         tree_entry: dict[str, Any] = {
             "gt_index": int(gt_idx),
             "gt_name": gt_files[gt_idx].name if gt_idx < len(gt_files) else None,
@@ -528,6 +569,11 @@ def run_metrics(
             "tmd_path_pd_pred": _diagram_to_list(pred_diag),
             "tmd_path_bottleneck": float(tmd_bn),
         }
+        if ged_enabled:
+            tree_entry["ged_topology_raw"] = float(ged_raw) if ged_raw is not None else None
+            tree_entry["ged_topology_norm"] = (
+                float(ged_norm) if ged_norm is not None and ged_mode in ("normalized", "both") else None
+            )
 
         if plot_dir is not None and idx_pair < plot_max:
             plot_dir = Path(plot_dir)
@@ -540,7 +586,7 @@ def run_metrics(
                     stem=stem,
                     file_tag="graph",
                     title_gt="Ground Truth Tree",
-                    title_pred="Reconstructed Tree",
+                    title_pred="Predicted Tree",
                 )
                 points_paths = plot_pointcloud_pair_separate(
                     gt_pts,
@@ -548,7 +594,7 @@ def run_metrics(
                     out_dir=plot_dir,
                     stem=stem,
                     title_gt="Ground Truth Tree",
-                    title_pred="Reconstructed Tree",
+                    title_pred="Predicted Tree",
                     color_gt=GT_COLOR,
                     color_pred=PRED_COLOR,
                     n_nodes_gt=gt.number_of_nodes(),
@@ -561,7 +607,7 @@ def run_metrics(
                     stem=stem,
                     file_tag="skeleton",
                     title_gt="Ground Truth Tree",
-                    title_pred="Reconstructed Tree",
+                    title_pred="Predicted Tree",
                     node_color_gt=GT_COLOR,
                     node_color_pred=PRED_COLOR,
                     edge_color_gt=GT_COLOR,
@@ -586,7 +632,7 @@ def run_metrics(
                 out_dir=plot_dir,
                 stem=f"pred{pred_idx:04d}",
                 file_tag="graph",
-                title="Reconstructed Tree",
+                title="Predicted Tree",
                 node_color=PRED_COLOR,
                 edge_color="lightgray",
                 show_nodes=True,
@@ -606,7 +652,7 @@ def run_metrics(
                 out_dir=plot_dir,
                 stem=f"pred{pred_idx:04d}",
                 file_tag="points",
-                title="Reconstructed Tree",
+                title="Predicted Tree",
                 color=PRED_COLOR,
                 n_nodes=pred.number_of_nodes(),
             )
@@ -627,7 +673,7 @@ def run_metrics(
                 out_dir=plot_dir,
                 stem=f"pred{pred_idx:04d}",
                 file_tag="skeleton",
-                title="Reconstructed Tree",
+                title="Predicted Tree",
                 node_color=PRED_COLOR,
                 edge_color=PRED_COLOR,
                 show_nodes=False,
@@ -640,7 +686,7 @@ def run_metrics(
                 out_dir=plot_dir,
                 stem=stem,
                 file_tag="overlay",
-                title="GT + Reconstructed Tree Overlay",
+                title="GT + Predicted Tree Overlay",
                 node_color_gt=GT_COLOR,
                 node_color_pred=PRED_COLOR,
                 edge_color_gt=GT_COLOR,
@@ -673,6 +719,7 @@ def run_metrics(
                         color_gt=GT_COLOR,
                         color_pred=PRED_COLOR,
                         value_label="Length (metres)",
+                        xlim=(-3.0, 3.0)
                     )
                 )
             if angle_bin_edges is not None:
@@ -690,6 +737,7 @@ def run_metrics(
                         color_gt=GT_COLOR,
                         color_pred=PRED_COLOR,
                         value_label="Angle (deg)",
+                        xlim=(-0.025, 0.025)
                     )
                 )
             if plot_pairs:
@@ -711,7 +759,7 @@ def run_metrics(
     summary = _summarize(chamfers)
     per_size_summary = {str(k): _summarize(v) for k, v in sorted(by_size.items())}
 
-    return {
+    result: dict[str, Any] = {
         "config": {
             "gt_dir": str(gt_dir),
             "pred_pkl": str(pred_pkl),
@@ -732,6 +780,16 @@ def run_metrics(
         "per_tree": per_tree,
         "unmatched": unmatched,
     }
+    if ged_enabled:
+        result["config"]["ged"] = {
+            "mode": ged_mode,
+            "normalization": ged_normalization,
+            "timeout": ged_timeout,
+        }
+        result["ged_summary"] = _summarize(ged_raw_vals) if ged_mode in ("raw", "both") else None
+        result["ged_norm_summary"] = _summarize(ged_norm_vals) if ged_mode in ("normalized", "both") else None
+        result["ged_timeouts"] = int(ged_timeouts)
+    return result
 
 
 def run_chamfer(
@@ -742,6 +800,10 @@ def run_chamfer(
     squared: bool,
     tmd_normalize: Literal["minmax", "max", "none"] = "minmax",
     f1_radius: float = 0.05,
+    ged_enabled: bool = False,
+    ged_mode: Literal["raw", "normalized", "both"] = "raw",
+    ged_normalization: Literal["nodes_edges", "nodes", "edges"] = "nodes_edges",
+    ged_timeout: float | None = None,
     plot_dir: Path | None = None,
     plot_max: int = 12,
     plot_pairs: bool = False,
@@ -755,6 +817,10 @@ def run_chamfer(
         squared=squared,
         tmd_normalize=tmd_normalize,
         f1_radius=f1_radius,
+        ged_enabled=ged_enabled,
+        ged_mode=ged_mode,
+        ged_normalization=ged_normalization,
+        ged_timeout=ged_timeout,
         plot_dir=plot_dir,
         plot_max=plot_max,
         plot_pairs=plot_pairs,
@@ -772,6 +838,28 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tmd-normalize", type=str, default="minmax", choices=["minmax", "max", "none"],
                         help="Normalization for TMD filtrations before PD (minmax, max, none).")
     parser.add_argument("--f1-radius", type=float, default=0.2, help="Neighborhood radius for F1/precision/recall.")
+    parser.add_argument("--ged", "--ted", dest="ged", action="store_true",
+                        help="Compute topology-only tree edit distance (zss).")
+    parser.add_argument(
+        "--ged-mode",
+        type=str,
+        default="raw",
+        choices=["raw", "normalized", "both"],
+        help="TED reporting mode: raw, normalized, or both.",
+    )
+    parser.add_argument(
+        "--ged-normalization",
+        type=str,
+        default="nodes_edges",
+        choices=["nodes_edges", "nodes", "edges"],
+        help="Normalization denominator for TED when using normalized mode.",
+    )
+    parser.add_argument(
+        "--ged-timeout",
+        type=float,
+        default=None,
+        help="Timeout (seconds) for each TED computation; ignored for zss.",
+    )
     parser.add_argument("--plot-dir", type=Path, default=None, help="Optional directory to save plots.")
     parser.add_argument("--plot-max", type=int, default=12, help="Max number of graph pairs to plot.")
     parser.add_argument("--plot-pairs", action="store_true", help="Also save side-by-side GT/pred plots.")
@@ -790,6 +878,10 @@ def main() -> None:
         squared=args.squared,
         tmd_normalize=args.tmd_normalize,
         f1_radius=args.f1_radius,
+        ged_enabled=args.ged,
+        ged_mode=args.ged_mode,
+        ged_normalization=args.ged_normalization,
+        ged_timeout=args.ged_timeout,
         plot_dir=args.plot_dir,
         plot_max=args.plot_max,
         plot_pairs=args.plot_pairs,
@@ -805,9 +897,33 @@ def main() -> None:
     print("Chamfer summary:")
     print(f"  count={summary['count']} mean={summary['mean']:.6f} std={summary['std']:.6f} "
           f"min={summary['min']:.6f} max={summary['max']:.6f} median={summary['median']:.6f}")
+    if "ged" in results.get("config", {}):
+        ged_summary = results.get("ged_summary")
+        ged_norm_summary = results.get("ged_norm_summary")
+        if ged_summary is not None:
+            print("TED (topology) summary:")
+            print(f"  count={ged_summary['count']} mean={ged_summary['mean']:.6f} std={ged_summary['std']:.6f} "
+                  f"min={ged_summary['min']:.6f} max={ged_summary['max']:.6f} "
+                  f"median={ged_summary['median']:.6f}")
+        if ged_norm_summary is not None:
+            print("TED (topology, normalized) summary:")
+            print(f"  count={ged_norm_summary['count']} mean={ged_norm_summary['mean']:.6f} std={ged_norm_summary['std']:.6f} "
+                  f"min={ged_norm_summary['min']:.6f} max={ged_norm_summary['max']:.6f} "
+                  f"median={ged_norm_summary['median']:.6f}")
+        if results.get("ged_timeouts", 0):
+            print(f"TED timeouts: {results.get('ged_timeouts', 0)}")
     if results["per_tree"]:
         print("Per-graph stats:")
+        include_ged = "ged" in results.get("config", {})
         for item in results["per_tree"]:
+            ged_str = ""
+            if include_ged:
+                ged_raw_val = item.get("ged_topology_raw")
+                ged_norm_val = item.get("ged_topology_norm")
+                if ged_raw_val is not None:
+                    ged_str += f"ted_raw={float(ged_raw_val):.3f} "
+                if ged_norm_val is not None:
+                    ged_str += f"ted_norm={float(ged_norm_val):.4f} "
             print(
                 f"  gt={item['gt_index']}({item['gt_name']}) "
                 f"pred={item['pred_index']} "
@@ -822,6 +938,7 @@ def main() -> None:
                 f"mean_amp_deg(gt/pred)={item.get('mean_branch_amplitude_deg_gt', float('nan')):.2f}/"
                 f"{item.get('mean_branch_amplitude_deg_pred', float('nan')):.2f} "
                 f"tmd_bn={item.get('tmd_path_bottleneck', float('nan')):.6f} "
+                f"{ged_str}"
                 f"f1_samp={item.get('f1_sampled', float('nan')):.3f} "
                 f"p/r_samp={item.get('precision_sampled', float('nan')):.3f}/"
                 f"{item.get('recall_sampled', float('nan')):.3f} "

@@ -13,6 +13,10 @@ import math
 import networkx as nx
 import numpy as np
 from persim import bottleneck as _bottleneck
+try:
+    from zss import distance as _zss_distance
+except ModuleNotFoundError:  # optional dependency
+    _zss_distance = None
 
 
 def _pos_to_xyz(pos) -> np.ndarray:
@@ -229,3 +233,110 @@ def bottleneck_distance(
         return float(np.max(np.abs(dgm1[:, 1] - dgm1[:, 0])) / 2.0)
 
     return float(_bottleneck(dgm1, dgm2))
+
+
+class _ZssNode:
+    __slots__ = ("children",)
+
+    def __init__(self) -> None:
+        self.children: list["_ZssNode"] = []
+
+
+def _resolve_root(G: nx.Graph, root: int | None) -> int:
+    if root is None:
+        root = G.graph.get("root")
+    if root is None or root not in G.nodes:
+        raise ValueError("Root node is required for tree edit distance.")
+    return int(root)
+
+
+def _build_zss_tree(
+    G: nx.Graph,
+    *,
+    root: int | None,
+    unordered: bool,
+) -> _ZssNode:
+    root = _resolve_root(G, root)
+    _parent, children = _root_tree(G, root)
+
+    sig_cache: dict[int, tuple[int, tuple]] = {}
+
+    def _signature(u: int) -> tuple[int, tuple]:
+        if u in sig_cache:
+            return sig_cache[u]
+        child_sigs = [_signature(c) for c in children[u]]
+        child_sigs_sorted = tuple(sorted(child_sigs))
+        size = 1 + sum(s[0] for s in child_sigs_sorted)
+        sig = (size, child_sigs_sorted)
+        sig_cache[u] = sig
+        return sig
+
+    if unordered:
+        for u in children:
+            _signature(u)
+
+    def _build(u: int) -> _ZssNode:
+        node = _ZssNode()
+        child_ids = children[u]
+        if unordered and child_ids:
+            child_ids = sorted(child_ids, key=lambda c: sig_cache[c])
+        for c in child_ids:
+            node.children.append(_build(c))
+        return node
+
+    return _build(root)
+
+
+def graph_edit_distance_topology(
+    G1: nx.Graph,
+    G2: nx.Graph,
+    *,
+    normalize: bool = False,
+    normalization: str = "nodes_edges",
+    timeout: float | None = None,
+    unordered: bool = True,
+    root1: int | None = None,
+    root2: int | None = None,
+) -> float | None:
+    """
+    Topology-only tree edit distance using zss (ordered TED).
+
+    Substitution costs are zero (unlabeled topology), and insert/delete costs
+    are 1 for nodes. zss is ordered; when unordered=True we canonicalize child
+    order by subtree signatures (approximate for unordered TED).
+    """
+    if _zss_distance is None:
+        raise ModuleNotFoundError(
+            "zss is required for tree edit distance. Install with: pip install zss"
+        )
+    if timeout is not None:
+        _ = timeout  # zss has no built-in timeout; kept for API compatibility
+
+    t1 = _build_zss_tree(G1, root=root1, unordered=unordered)
+    t2 = _build_zss_tree(G2, root=root2, unordered=unordered)
+    ged_val = float(
+        _zss_distance(
+            t1,
+            t2,
+            get_children=lambda n: n.children,
+            insert_cost=lambda _n: 1.0,
+            remove_cost=lambda _n: 1.0,
+            update_cost=lambda _a, _b: 0.0,
+        )
+    )
+    if not normalize:
+        return ged_val
+
+    if normalization == "nodes":
+        denom = max(G1.number_of_nodes(), G2.number_of_nodes())
+    elif normalization == "edges":
+        denom = max(G1.number_of_edges(), G2.number_of_edges())
+    else:
+        denom = max(
+            G1.number_of_nodes() + G1.number_of_edges(),
+            G2.number_of_nodes() + G2.number_of_edges(),
+        )
+    if denom <= 0:
+        return 0.0
+
+    return ged_val / float(denom)

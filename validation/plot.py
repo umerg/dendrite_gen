@@ -14,7 +14,7 @@ from typing import Iterable
 import matplotlib
 
 matplotlib.use("Agg")
-matplotlib.rcParams.update({"axes.labelsize": 20, "axes.titlesize": 24})
+matplotlib.rcParams.update({"axes.labelsize": 24, "axes.titlesize": 24})
 import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
@@ -437,6 +437,12 @@ def plot_persistence_diagram_overlay(
     size_pred: float = 24,
     draw_diagonal: bool = True,
     pad_frac: float = 0.05,
+    show_x_axis: bool = True,
+    xlim: tuple[float, float] | None = None,
+    ylim: tuple[float, float] | None = None,
+    legend_fontsize: float | None = 16.0,
+    y_tick_fontsize: float | None = 20.0,
+    x_tick_fontsize: float | None = 20.0,
 ) -> Path:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -487,17 +493,36 @@ def plot_persistence_diagram_overlay(
             alpha=alpha_pred,
             edgecolors="k",
             linewidths=0.3,
-            label="Recon",
+            label="Pred",
         )
 
     ax.set_title(title)
-    ax.set_xlabel("Birth")
+    if show_x_axis:
+        ax.set_xlabel("Birth")
+    else:
+        ax.set_xlabel("")
+        ax.tick_params(axis="x", which="both", bottom=False, top=False, labelbottom=False)
     ax.set_ylabel("Death")
-    ax.set_xlim(lo, hi)
-    ax.set_ylim(lo, hi)
+    if xlim is not None:
+        ax.set_xlim(float(xlim[0]), float(xlim[1]))
+        if ylim is None:
+            ax.set_ylim(float(xlim[0]), float(xlim[1]))
+    else:
+        ax.set_xlim(lo, hi)
+    if ylim is not None:
+        ax.set_ylim(float(ylim[0]), float(ylim[1]))
+    elif xlim is None:
+        ax.set_ylim(lo, hi)
     ax.set_aspect("equal", adjustable="box")
     if gt_pairs.size or pred_pairs.size:
-        ax.legend(frameon=False, loc="upper left")
+        if legend_fontsize is None:
+            ax.legend(frameon=False, loc="upper left")
+        else:
+            ax.legend(frameon=False, loc="upper left", fontsize=legend_fontsize)
+    if x_tick_fontsize is not None:
+        ax.tick_params(axis="x", labelsize=x_tick_fontsize)
+    if y_tick_fontsize is not None:
+        ax.tick_params(axis="y", labelsize=y_tick_fontsize)
     ax.grid(True, linewidth=0.4, alpha=0.4)
     fig.tight_layout()
     out_path = out_dir / f"{stem}_{file_tag}.png"
@@ -519,8 +544,13 @@ def plot_tornado_histogram(
     color_pred: str = PRED_COLOR,
     value_label: str = "value",
     density_label: str = "Density",
+    show_x_axis: bool = True,
+    xlim: tuple[float, float] | None = None,
     alpha_fill: float = 0.35,
     line_width: float = 2.0,
+    legend_fontsize: float = 20.0,
+    y_tick_fontsize: float = 20.0,
+    x_tick_fontsize: float | None = 20.0,
 ) -> Path:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -547,15 +577,26 @@ def plot_tornado_histogram(
     ax.fill_betweenx(centers, 0.0, -gt_hist, color=color_gt, alpha=alpha_fill)
     ax.fill_betweenx(centers, 0.0, pred_hist, color=color_pred, alpha=alpha_fill)
     ax.plot(-gt_hist, centers, color=color_gt, linewidth=line_width, label="GT")
-    ax.plot(pred_hist, centers, color=color_pred, linewidth=line_width, label="Recon")
+    ax.plot(pred_hist, centers, color=color_pred, linewidth=line_width, label="Pred")
     ax.axvline(0.0, color="black", linewidth=0.8)
     ax.set_title(title)
-    ax.set_xlabel(density_label)
     ax.set_ylabel(value_label)
-    ax.set_xlim(-x_lim, x_lim)
+    if show_x_axis:
+        ax.set_xlabel(density_label)
+        if x_tick_fontsize is not None:
+            ax.tick_params(axis="x", labelsize=x_tick_fontsize)
+    else:
+        ax.set_xlabel("")
+        ax.tick_params(axis="x", which="both", bottom=False, top=False, labelbottom=False)
+    if xlim is not None:
+        ax.set_xlim(float(xlim[0]), float(xlim[1]))
+    else:
+        ax.set_xlim(-x_lim, x_lim)
     ax.set_ylim(float(bin_edges[0]), float(bin_edges[-1]))
     ax.grid(True, linewidth=0.4, alpha=0.4)
-    ax.legend(frameon=False, loc="upper right")
+    ax.legend(frameon=False, loc="upper right", fontsize=legend_fontsize)
+    ax.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(integer=True))
+    ax.tick_params(axis="y", labelsize=y_tick_fontsize)
     fig.tight_layout()
 
     out_path = out_dir / f"{stem}_{file_tag}.png"

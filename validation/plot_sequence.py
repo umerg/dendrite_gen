@@ -17,6 +17,8 @@ from typing import Any, Iterable
 import matplotlib
 
 matplotlib.use("Agg")
+matplotlib.rcParams.update({"axes.labelsize": 16, "axes.titlesize": 20})
+
 import matplotlib.pyplot as plt
 import numpy as np
 import scipy.sparse as sp
@@ -113,7 +115,15 @@ def _compute_depths(adj: sp.csr_matrix, root: int) -> np.ndarray:
     return depth
 
 
-def _set_axes_tight(ax, pts: np.ndarray, pad_frac: float = 0.04) -> None:
+def _set_axes_tight(
+    ax,
+    pts: np.ndarray,
+    pad_frac: float = 0.04,
+    *,
+    x_lim: tuple[float, float] | None = None,
+    y_lim: tuple[float, float] | None = None,
+    z_lim: tuple[float, float] | None = None,
+) -> None:
     if pts.size == 0:
         return
     mins = pts.min(axis=0)
@@ -122,10 +132,31 @@ def _set_axes_tight(ax, pts: np.ndarray, pad_frac: float = 0.04) -> None:
     pad = np.maximum(ranges * pad_frac, 1e-3)
     mins = mins - pad
     maxs = maxs + pad
-    ax.set_xlim(mins[0], maxs[0])
-    ax.set_ylim(mins[1], maxs[1])
-    ax.set_zlim(mins[2], maxs[2])
-    ax.set_box_aspect(maxs - mins)
+    if x_lim is None:
+        ax.set_xlim(mins[0], maxs[0])
+        x_range = maxs[0] - mins[0]
+    else:
+        ax.set_xlim(x_lim[0], x_lim[1])
+        x_range = x_lim[1] - x_lim[0]
+    if y_lim is None:
+        ax.set_ylim(mins[1], maxs[1])
+        y_range = maxs[1] - mins[1]
+    else:
+        ax.set_ylim(y_lim[0], y_lim[1])
+        y_range = y_lim[1] - y_lim[0]
+    if z_lim is None:
+        ax.set_zlim(mins[2], maxs[2])
+        z_range = maxs[2] - mins[2]
+    else:
+        ax.set_zlim(z_lim[0], z_lim[1])
+        z_range = z_lim[1] - z_lim[0]
+    ax.set_box_aspect(
+        [
+            max(abs(x_range), 1e-3),
+            max(abs(y_range), 1e-3),
+            max(abs(z_range), 1e-3),
+        ]
+    )
 
 
 def _plot_graph_panel(
@@ -137,6 +168,9 @@ def _plot_graph_panel(
     elev: float,
     azim: float,
     title: str,
+    x_lim: tuple[float, float] | None = None,
+    y_lim: tuple[float, float] | None = None,
+    z_lim: tuple[float, float] | None = None,
 ) -> None:
     if pos.size == 0:
         ax.set_title(title)
@@ -183,7 +217,7 @@ def _plot_graph_panel(
     ax.set_title(title)
     ax.view_init(elev=elev, azim=azim)
     ax.set_axis_off()
-    _set_axes_tight(ax, pos)
+    _set_axes_tight(ax, pos, x_lim=x_lim, y_lim=y_lim, z_lim=z_lim)
 
 
 def build_reduction_sequence(adj: sp.csr_matrix, pos: np.ndarray) -> list[dict[str, Any]]:
@@ -224,7 +258,10 @@ def plot_sequence(
     out_path: Path,
     elev: float = 20.0,
     azim: float = 30.0,
-    ncols: int = 4,
+    ncols: int = 5,
+    x_lim: tuple[float, float] | None = None,
+    y_lim: tuple[float, float] | None = None,
+    z_lim: tuple[float, float] | None = None,
 ) -> Path:
     seq = list(sequence)
     seq.reverse()
@@ -244,6 +281,9 @@ def plot_sequence(
             elev=elev,
             azim=azim,
             title=title,
+            x_lim=x_lim,
+            y_lim=y_lim,
+            z_lim=z_lim,
         )
 
     for j in range(n_plots, nrows * ncols):
@@ -266,7 +306,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out", type=Path, default=None, help="Output image path.")
     parser.add_argument("--elev", type=float, default=20.0, help="Elevation angle for 3D view.")
     parser.add_argument("--azim", type=float, default=30.0, help="Azimuth angle for 3D view.")
-    parser.add_argument("--ncols", type=int, default=4, help="Number of panels per row.")
+    parser.add_argument("--ncols", type=int, default=5, help="Number of panels per row.")
+    parser.add_argument("--x-lim", type=float, nargs=2, default=None, help="Fixed x-axis limits (min max).")
+    parser.add_argument("--y-lim", type=float, nargs=2, default=None, help="Fixed y-axis limits (min max).")
+    parser.add_argument("--z-lim", type=float, nargs=2, default=None, help="Fixed z-axis limits (min max).")
     parser.add_argument("--root-tol", type=float, default=1e-3, help="Tolerance for origin-based root selection.")
     return parser
 
@@ -292,7 +335,19 @@ def main() -> None:
     else:
         out_path = args.out
 
-    plot_sequence(seq, out_path=out_path, elev=args.elev, azim=args.azim, ncols=args.ncols)
+    x_lim = tuple(args.x_lim) if args.x_lim is not None else None
+    y_lim = tuple(args.y_lim) if args.y_lim is not None else None
+    z_lim = tuple(args.z_lim) if args.z_lim is not None else None
+    plot_sequence(
+        seq,
+        out_path=out_path,
+        elev=args.elev,
+        azim=args.azim,
+        ncols=args.ncols,
+        x_lim=x_lim,
+        y_lim=y_lim,
+        z_lim=z_lim,
+    )
     print(f"Saved sequence plot to {out_path}")
 
 
