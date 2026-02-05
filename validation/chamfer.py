@@ -201,7 +201,7 @@ def _chamfer_components(
 
     if squared:
         return float(np.mean(dist_a ** 2)), float(np.mean(dist_b ** 2))
-    return float(np.quantile(dist_a, 0.75)), float(np.quantile(dist_b, 0.75))
+    return float(np.mean(dist_a)), float(np.mean(dist_b))
 
 
 def _chamfer_distance(a: np.ndarray, b: np.ndarray, *, squared: bool = False) -> float:
