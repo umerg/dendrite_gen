@@ -22,6 +22,7 @@ try:
     # When imported as part of the utils package (repo root on sys.path)
     from utils.tmd_conditioning_utils import (  # type: ignore
         FiltrationName,
+        PersistenceDiagram0D,
         assert_rooted_tree_graph,
         compute_0d_persistence_diagram,
         filtration_height_z,
@@ -40,6 +41,7 @@ except ModuleNotFoundError:
     # Fallback for direct module execution/import when utils is already on sys.path
     from tmd_conditioning_utils import (  # type: ignore
         FiltrationName,
+        PersistenceDiagram0D,
         assert_rooted_tree_graph,
         compute_0d_persistence_diagram,
         filtration_height_z,
@@ -56,6 +58,51 @@ except ModuleNotFoundError:
     )
 
 MethodName = Literal["0d", "tmd"]
+
+
+def compute_tmd_barcode_diagram(
+    G: nx.Graph,
+    *,
+    filtration: FiltrationName = "path",
+    normalize_mode: Literal["minmax", "max", "none"] = "minmax",
+    weight_edges_by_euclidean: bool = True,
+    simplify_to_critical_tree: bool = True,
+) -> tuple[np.ndarray, PersistenceDiagram0D]:
+    """
+    Compute a paper-style TMD barcode and its canonicalized persistence diagram.
+
+    Returns:
+        barcode: (M,2) float array of (birth, death) pairs (raw TMD intervals)
+        diagram: PersistenceDiagram0D with birth <= death for each interval
+    """
+    if G.number_of_nodes() == 0:
+        empty = np.zeros((0,), dtype=np.float64)
+        return np.zeros((0, 2), dtype=np.float64), PersistenceDiagram0D(births=empty, deaths=empty)
+
+    assert_rooted_tree_graph(G)
+
+    if filtration == "path":
+        f_full = filtration_path_length_from_root(
+            G, weight_edges_by_euclidean=weight_edges_by_euclidean
+        )
+    elif filtration == "height":
+        f_full = filtration_height_z(G)
+    elif filtration == "rho":
+        f_full = filtration_radial_rho(G)
+    else:
+        raise ValueError(f"Unknown filtration name: {filtration!r}")
+
+    if normalize_mode != "none":
+        f_full = normalize_filtration_values(f_full, mode=normalize_mode)
+
+    root = G.graph["root"]
+    rooted = root_undirected_tree(G, root)
+    rooted_use = build_critical_tree(rooted) if simplify_to_critical_tree else rooted
+    f = {nid: float(f_full[nid]) for nid in rooted_use.children.keys()}
+
+    barcode = compute_tmd_barcode(rooted_use, f)
+    diagram = barcode_to_diagram(barcode)
+    return barcode, diagram
 
 
 def _resolve_method_map(
