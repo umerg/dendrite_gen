@@ -162,7 +162,7 @@ class Expansion(Method):
         if geo_lr_assign is None:
             geo_lr_assign = th.full((pos.size(0),), -1, device=device, dtype=th.long)
 
-        if (remaining_capacity <= 0).all() or leaf_idx.numel() == 0:
+        if leaf_idx.numel() == 0:  # (remaining_capacity <= 0).all() or 
             return (
                 adj_reduced,
                 pos,
@@ -178,29 +178,31 @@ class Expansion(Method):
         spawn_counts = (leaf_expansion == 2).long() * 2
         leaf_batch = batch_reduced[leaf_idx]
         spawn_counts_final = spawn_counts.clone()
-
-        for g in range(num_graphs):
-            cap = int(remaining_capacity[g].item())
-            if cap < 2:
-                spawn_counts_final[leaf_batch == g] = 0
-                continue
-            mask_g = leaf_batch == g
-            expanders = th.nonzero((spawn_counts_final == 2) & mask_g, as_tuple=False).flatten()
-            needed = expanders.numel() * 2
-            if needed <= cap:
-                continue
-            max_leaves = cap // 2
-            if max_leaves <= 0:
-                spawn_counts_final[expanders] = 0
-                continue
-            if self.deterministic_expansion:
-                generator = th.Generator(device=expanders.device)
-                generator.manual_seed(g * 10007 + step)
-                perm = th.randperm(expanders.numel(), generator=generator, device=expanders.device)
-            else:
-                perm = th.randperm(expanders.numel(), device=expanders.device)
-            disable = expanders[perm[max_leaves:]]
-            spawn_counts_final[disable] = 0
+        
+        # Deterministic capacity cut-off (DISABLED)
+        
+        # for g in range(num_graphs):
+        #     cap = int(remaining_capacity[g].item())
+        #     if cap < 2:
+        #         spawn_counts_final[leaf_batch == g] = 0
+        #         continue
+        #     mask_g = leaf_batch == g
+        #     expanders = th.nonzero((spawn_counts_final == 2) & mask_g, as_tuple=False).flatten()
+        #     needed = expanders.numel() * 2
+        #     if needed <= cap:
+        #         continue
+        #     max_leaves = cap // 2
+        #     if max_leaves <= 0:
+        #         spawn_counts_final[expanders] = 0
+        #         continue
+        #     if self.deterministic_expansion:
+        #         generator = th.Generator(device=expanders.device)
+        #         generator.manual_seed(g * 10007 + step)
+        #         perm = th.randperm(expanders.numel(), generator=generator, device=expanders.device)
+        #     else:
+        #         perm = th.randperm(expanders.numel(), device=expanders.device)
+        #     disable = expanders[perm[max_leaves:]]
+        #     spawn_counts_final[disable] = 0
 
         if ensure_progress and (remaining_capacity >= 2).any():
             for g in range(num_graphs):
@@ -411,7 +413,7 @@ class Expansion(Method):
         leaf_expansion_next = (expansion_score > map_threshold).long() + 1
 
         remaining_capacity_new = target_size.to(device) - node_counts_per_graph
-        terminated = (remaining_capacity_new < 2).all() or leaf_idx_next.numel() == 0
+        terminated = leaf_idx_next.numel() == 0 # (remaining_capacity_new < 2).all() or
 
         return (
             adj_new,
