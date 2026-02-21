@@ -17,8 +17,8 @@ reduction:
   red_threshold: 0
 
 training:
-  batch_size: 256
-  lr: 3e-4
+  batch_size: 128
+  lr: 5e-4
   num_steps: 40000 # ~200 epochs; considering 1 step = 1 batch
   max_num_workers: 0
   log_interval: 200
@@ -29,7 +29,7 @@ training:
   scheduler_eta_min: 1e-5          # Optional: minimum learning rate
 
 validation:
-  batch_size: 4
+  batch_size: 1
   interval: 200
   first_step: 0
   per_graph_size: False
@@ -43,7 +43,7 @@ model:
   num_layers: 6
   feats_dim: 64
   m_dim: 64
-  tmd_in_dim: 192
+  tmd_in_dim: 768
   tmd_hidden_dim: 32
   dropout: 0.1
   norm_feats: True
@@ -55,11 +55,11 @@ model:
   use_global_fallback_frames: False
 
 ema:
-  betas: [0.999]
+  betas: [1]
   gamma: 1.0
-  power: 0.8
+  power: 1.0
 
-name: medium_trees_test_basic_tdm_fixed
+name: medium_trees_test_basic_mixed_descriptor_2
 debugging: False
 debugging_max_batches: 50
 debugging_dir: "small_trees_debug"
