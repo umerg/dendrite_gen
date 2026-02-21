@@ -60,8 +60,7 @@ class Expansion(Method):
         batch = th.arange(num_graphs, device=device, dtype=th.long)
         parent_idx_1b = th.zeros_like(batch)
         leaf_idx = batch.clone()
-        expandable = (target_size >= 3).long()
-        leaf_expansion = th.where(expandable.bool(), th.full_like(leaf_idx, 2), th.full_like(leaf_idx, 1))
+        leaf_expansion = th.ones_like(leaf_idx)  # root's spawn count is overridden in expand
         geo_lr_assign = th.full((num_graphs,), -1, device=device, dtype=th.long)
         leaf_mask = th.ones((num_graphs,), device=device, dtype=th.bool)
 
@@ -178,7 +177,13 @@ class Expansion(Method):
         spawn_counts = (leaf_expansion == 2).long() * 2
         leaf_batch = batch_reduced[leaf_idx]
         spawn_counts_final = spawn_counts.clone()
-        
+
+        # Root nodes are non-binary: always spawn exactly 1 child
+        is_root_leaf = parent_idx[leaf_idx] < 0
+        if is_root_leaf.any():
+            root_should_spawn = (target_size[leaf_batch] > 1).long()
+            spawn_counts_final = th.where(is_root_leaf, root_should_spawn, spawn_counts_final)
+
         # Deterministic capacity cut-off (DISABLED)
         
         # for g in range(num_graphs):
@@ -237,7 +242,7 @@ class Expansion(Method):
 
         base_N = adj_reduced.size(0)
         leaf_mask_updated = leaf_mask.clone()
-        expanded_mask = spawn_counts_final == 2
+        expanded_mask = spawn_counts_final > 0
         if expanded_mask.any():
             leaf_mask_updated[leaf_idx[expanded_mask]] = False
         new_positions = []
