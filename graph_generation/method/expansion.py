@@ -30,11 +30,13 @@ class Expansion(Method):
         deterministic_expansion: bool = False,      # just sets seeding for reproducibility
         red_threshold: int = 0,
         expansion_loss_weight: float = 1.0,
+        use_size_ratio: bool = True,
     ):
         super().__init__(diffusion=diffusion)
         self.deterministic_expansion = deterministic_expansion
         self.red_threshold = red_threshold
         self.expansion_loss_weight = float(expansion_loss_weight)
+        self.use_size_ratio = use_size_ratio
     
     def sample_graphs(self, target_size: th.Tensor, model: Module, tmd: th.Tensor | None = None):
         """Generate graphs via iterative diffusion-based leaf expansion."""
@@ -353,7 +355,7 @@ class Expansion(Method):
                 features.append(new_flag)
                 feats_used += 1
 
-            if feats_used < avail_feats_dim:
+            if self.use_size_ratio and feats_used < avail_feats_dim:
                 ratio_graph = node_counts_per_graph.to(pos_new.dtype) / target_size.to(pos_new.dtype).clamp_min(1.0)
                 ratio_nodes = ratio_graph[batch_new].unsqueeze(-1)
                 features.append(ratio_nodes)
@@ -578,8 +580,8 @@ class Expansion(Method):
                 features.append(new_mask_tensor.unsqueeze(-1))
                 feats_used += 1
 
-            # Graph size ratio feature (current nodes / target nodes), broadcast per node
-            if feats_used < avail_feats_dim:
+            # Graph size ratio feature (current nodes / total_tree_size), broadcast per node
+            if self.use_size_ratio and feats_used < avail_feats_dim:
                 size_ratio = size_ratio_feature_from_batch(
                     batch=batch,
                     device=pos_gt.device,

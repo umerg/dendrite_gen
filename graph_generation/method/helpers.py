@@ -42,8 +42,8 @@ def build_directed_edge_index(
 
 
 def graph_target_sizes_from_batch(batch, device: th.device) -> Optional[th.Tensor]:
-    """Extract per-graph target sizes from a batched PyG Data object."""
-    target_attr = getattr(batch, "target_size", None)
+    """Extract per-graph total tree sizes from a batched PyG Data object."""
+    target_attr = getattr(batch, "total_tree_size", None)
     if target_attr is None:
         return None
     if not isinstance(target_attr, th.Tensor):
@@ -78,7 +78,7 @@ def size_ratio_feature_from_batch(
     device: th.device,
     dtype: th.dtype,
 ) -> Optional[th.Tensor]:
-    """Compute per-node (current_size / target_size) feature for a batch."""
+    """Compute per-node (current_size / total_tree_size) feature for a batch."""
     batch_vec = getattr(batch, "batch", None)
     if batch_vec is None or batch_vec.numel() == 0:
         return None
