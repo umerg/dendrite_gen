@@ -42,8 +42,8 @@ def build_directed_edge_index(
 
 
 def graph_target_sizes_from_batch(batch, device: th.device) -> Optional[th.Tensor]:
-    """Extract per-graph target sizes from a batched PyG Data object."""
-    target_attr = getattr(batch, "target_size", None)
+    """Extract per-graph total tree sizes from a batched PyG Data object."""
+    target_attr = getattr(batch, "total_tree_size", None)
     if target_attr is None:
         return None
     if not isinstance(target_attr, th.Tensor):
@@ -78,7 +78,7 @@ def size_ratio_feature_from_batch(
     device: th.device,
     dtype: th.dtype,
 ) -> Optional[th.Tensor]:
-    """Compute per-node (current_size / target_size) feature for a batch."""
+    """Compute per-node (current_size / total_tree_size) feature for a batch."""
     batch_vec = getattr(batch, "batch", None)
     if batch_vec is None or batch_vec.numel() == 0:
         return None
@@ -184,9 +184,12 @@ def compute_geo_lr_mask(
             child_idx = (parent == r).nonzero(as_tuple=False).flatten()
             if child_idx.numel() == 0:
                 continue
-            parent_z = pos[r, -1]
-            child_z = pos[child_idx, -1]
-            lr_mask[child_idx] = child_z >= parent_z
+            if child_idx.numel() == 1:
+                lr_mask[child_idx[0]] = True  # single child: assign as left (index 0)
+            else:
+                parent_z = pos[r, -1]
+                child_z = pos[child_idx, -1]
+                lr_mask[child_idx] = child_z >= parent_z
             handled_parents[r] = True
 
     unique_parents = parent.unique()

@@ -4,7 +4,7 @@ import networkx as nx
 from pathlib import Path
 
 
-def load_swc_graph(path):
+def load_swc_graph_enforce_binary_at_root(path):
     """
     Load a single cleaned SWC file into an undirected NetworkX tree graph.
 
@@ -99,6 +99,75 @@ def load_swc_graph(path):
         G.nodes[nid]["pos"] = G.nodes[nid]["pos"] - root_pos
 
     # Store root id on graph for downstream ordering logic
+    G.graph["root"] = root_id
+    return G
+
+
+def load_swc_graph(path):
+    """
+    Load a single cleaned SWC file into an undirected NetworkX tree graph.
+
+    Expected SWC columns (whitespace separated):
+        id  type  x  y  z  radius  parent_id
+
+    Root selection:
+        * The original SWC root (id==1, parent_id==0) is always used as root.
+        * No structural conditions (e.g. number of children) are enforced.
+
+    Post-processing adjustments:
+        * Positions are recentered so the root node is at the origin (0,0,0).
+        * Root id stored as G.graph['root'].
+
+    Node attributes:
+        pos: np.ndarray shape (3,) float64 (x,y,z) (after recentering)
+
+    Returns:
+        G (nx.Graph) with integer node ids matching SWC ids and 'pos' attribute.
+    """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"SWC file not found: {path}")
+
+    G = nx.Graph()
+    parent_links = []
+    root_id = None
+
+    with path.open("r") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            if len(parts) < 7:
+                raise ValueError(f"Malformed SWC line (expected >=7 cols): '{line}'")
+            nid = int(parts[0])
+            x = float(parts[2])
+            y = float(parts[3])
+            z = float(parts[4])
+            parent = int(parts[6])
+
+            if parent == 0:
+                root_id = nid
+
+            G.add_node(nid, pos=np.array([x, y, z], dtype=np.float64))
+            if parent > 0:
+                parent_links.append((nid, parent))
+
+    if root_id is None:
+        raise ValueError(f"No root node (parent_id==0) found in SWC file: {path}")
+
+    for child, parent in parent_links:
+        if parent not in G:
+            raise ValueError(f"Parent id {parent} referenced before definition in {path}")
+        G.add_edge(parent, child)
+
+    if not nx.is_tree(G):
+        raise AssertionError(f"Loaded graph from {path} is not a tree.")
+
+    root_pos = G.nodes[root_id]["pos"].copy()
+    for nid in G.nodes:
+        G.nodes[nid]["pos"] = G.nodes[nid]["pos"] - root_pos
+
     G.graph["root"] = root_id
     return G
 

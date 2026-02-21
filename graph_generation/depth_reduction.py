@@ -63,7 +63,7 @@ class DepthCherryReducer:
         state: Optional[_DepthCherryState] = None,
         level: int = 0,
         weighted_reduction: bool = False,  # if True, coarsen via Laplacian
-        contract_root: bool = True,        # if False, root is never contracted; smallest graph retains root+children
+        contract_root: bool = False,       # if False, root is never contracted; smallest graph retains root+children
         rng=None,                          # numpy RNG for deterministic sibling order
         total_nodes: Optional[int] = None,  # track original tree size for downstream bookkeeping
     ):
@@ -428,7 +428,7 @@ class DepthReductionFactory:
         ensure_progress: bool = True,
         root: RootSpec = "argmax_degree",
         weighted_reduction: bool = False,
-        contract_root: bool = True,
+        contract_root: bool = False,
     ):
         self.mode = mode
         self.cherry_p = float(cherry_p)

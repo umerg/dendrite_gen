@@ -30,11 +30,13 @@ class Expansion(Method):
         deterministic_expansion: bool = False,      # just sets seeding for reproducibility
         red_threshold: int = 0,
         expansion_loss_weight: float = 1.0,
+        use_size_ratio: bool = True,
     ):
         super().__init__(diffusion=diffusion)
         self.deterministic_expansion = deterministic_expansion
         self.red_threshold = red_threshold
         self.expansion_loss_weight = float(expansion_loss_weight)
+        self.use_size_ratio = use_size_ratio
     
     def sample_graphs(self, target_size: th.Tensor, model: Module, tmd: th.Tensor | None = None):
         """Generate graphs via iterative diffusion-based leaf expansion."""
@@ -60,8 +62,7 @@ class Expansion(Method):
         batch = th.arange(num_graphs, device=device, dtype=th.long)
         parent_idx_1b = th.zeros_like(batch)
         leaf_idx = batch.clone()
-        expandable = (target_size >= 3).long()
-        leaf_expansion = th.where(expandable.bool(), th.full_like(leaf_idx, 2), th.full_like(leaf_idx, 1))
+        leaf_expansion = th.ones_like(leaf_idx)  # root's spawn count is overridden in expand
         geo_lr_assign = th.full((num_graphs,), -1, device=device, dtype=th.long)
         leaf_mask = th.ones((num_graphs,), device=device, dtype=th.bool)
 
@@ -162,7 +163,7 @@ class Expansion(Method):
         if geo_lr_assign is None:
             geo_lr_assign = th.full((pos.size(0),), -1, device=device, dtype=th.long)
 
-        if (remaining_capacity <= 0).all() or leaf_idx.numel() == 0:
+        if leaf_idx.numel() == 0:  # (remaining_capacity <= 0).all() or 
             return (
                 adj_reduced,
                 pos,
@@ -179,28 +180,36 @@ class Expansion(Method):
         leaf_batch = batch_reduced[leaf_idx]
         spawn_counts_final = spawn_counts.clone()
 
-        for g in range(num_graphs):
-            cap = int(remaining_capacity[g].item())
-            if cap < 2:
-                spawn_counts_final[leaf_batch == g] = 0
-                continue
-            mask_g = leaf_batch == g
-            expanders = th.nonzero((spawn_counts_final == 2) & mask_g, as_tuple=False).flatten()
-            needed = expanders.numel() * 2
-            if needed <= cap:
-                continue
-            max_leaves = cap // 2
-            if max_leaves <= 0:
-                spawn_counts_final[expanders] = 0
-                continue
-            if self.deterministic_expansion:
-                generator = th.Generator(device=expanders.device)
-                generator.manual_seed(g * 10007 + step)
-                perm = th.randperm(expanders.numel(), generator=generator, device=expanders.device)
-            else:
-                perm = th.randperm(expanders.numel(), device=expanders.device)
-            disable = expanders[perm[max_leaves:]]
-            spawn_counts_final[disable] = 0
+        # Root nodes are non-binary: always spawn exactly 1 child
+        is_root_leaf = parent_idx[leaf_idx] < 0
+        if is_root_leaf.any():
+            root_should_spawn = (target_size[leaf_batch] > 1).long()
+            spawn_counts_final = th.where(is_root_leaf, root_should_spawn, spawn_counts_final)
+
+        # Deterministic capacity cut-off (DISABLED)
+        
+        # for g in range(num_graphs):
+        #     cap = int(remaining_capacity[g].item())
+        #     if cap < 2:
+        #         spawn_counts_final[leaf_batch == g] = 0
+        #         continue
+        #     mask_g = leaf_batch == g
+        #     expanders = th.nonzero((spawn_counts_final == 2) & mask_g, as_tuple=False).flatten()
+        #     needed = expanders.numel() * 2
+        #     if needed <= cap:
+        #         continue
+        #     max_leaves = cap // 2
+        #     if max_leaves <= 0:
+        #         spawn_counts_final[expanders] = 0
+        #         continue
+        #     if self.deterministic_expansion:
+        #         generator = th.Generator(device=expanders.device)
+        #         generator.manual_seed(g * 10007 + step)
+        #         perm = th.randperm(expanders.numel(), generator=generator, device=expanders.device)
+        #     else:
+        #         perm = th.randperm(expanders.numel(), device=expanders.device)
+        #     disable = expanders[perm[max_leaves:]]
+        #     spawn_counts_final[disable] = 0
 
         if ensure_progress and (remaining_capacity >= 2).any():
             for g in range(num_graphs):
@@ -235,7 +244,7 @@ class Expansion(Method):
 
         base_N = adj_reduced.size(0)
         leaf_mask_updated = leaf_mask.clone()
-        expanded_mask = spawn_counts_final == 2
+        expanded_mask = spawn_counts_final > 0
         if expanded_mask.any():
             leaf_mask_updated[leaf_idx[expanded_mask]] = False
         new_positions = []
@@ -346,7 +355,7 @@ class Expansion(Method):
                 features.append(new_flag)
                 feats_used += 1
 
-            if feats_used < avail_feats_dim:
+            if self.use_size_ratio and feats_used < avail_feats_dim:
                 ratio_graph = node_counts_per_graph.to(pos_new.dtype) / target_size.to(pos_new.dtype).clamp_min(1.0)
                 ratio_nodes = ratio_graph[batch_new].unsqueeze(-1)
                 features.append(ratio_nodes)
@@ -411,7 +420,7 @@ class Expansion(Method):
         leaf_expansion_next = (expansion_score > map_threshold).long() + 1
 
         remaining_capacity_new = target_size.to(device) - node_counts_per_graph
-        terminated = (remaining_capacity_new < 2).all() or leaf_idx_next.numel() == 0
+        terminated = leaf_idx_next.numel() == 0 # (remaining_capacity_new < 2).all() or
 
         return (
             adj_new,
@@ -571,8 +580,8 @@ class Expansion(Method):
                 features.append(new_mask_tensor.unsqueeze(-1))
                 feats_used += 1
 
-            # Graph size ratio feature (current nodes / target nodes), broadcast per node
-            if feats_used < avail_feats_dim:
+            # Graph size ratio feature (current nodes / total_tree_size), broadcast per node
+            if self.use_size_ratio and feats_used < avail_feats_dim:
                 size_ratio = size_ratio_feature_from_batch(
                     batch=batch,
                     device=pos_gt.device,

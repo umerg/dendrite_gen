@@ -18,7 +18,7 @@ import pickle
 import sys
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Literal
 
 import networkx as nx
 import numpy as np
@@ -30,6 +30,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from utils.data_loading import load_swc_graphs_from_dir
+from utils.tmd import compute_tmd_barcode_diagram
 
 try:  # allow running as module or script
     from .plot import (
@@ -37,8 +38,25 @@ try:  # allow running as module or script
         plot_pointcloud_pair_separate,
         plot_graph_single_angles,
         plot_pointcloud_single_angles,
+        plot_graph_overlay_azimuths,
+        plot_persistence_diagram_overlay,
+        plot_tornado_histogram,
         GT_COLOR,
         PRED_COLOR,
+    )
+    from .geometric_metric import (
+        bbox_diag_length,
+        height_z_range,
+        precision_recall_f1_radius,
+        span_xy_diameter,
+    )
+    from .structural_metrics import (
+        bifurcation_angle_values,
+        bottleneck_distance,
+        branch_length_values,
+        graph_edit_distance_topology,
+        mean_branch_amplitude,
+        mean_branch_length,
     )
 except Exception:
     from plot import (
@@ -46,8 +64,25 @@ except Exception:
         plot_pointcloud_pair_separate,
         plot_graph_single_angles,
         plot_pointcloud_single_angles,
+        plot_graph_overlay_azimuths,
+        plot_persistence_diagram_overlay,
+        plot_tornado_histogram,
         GT_COLOR,
         PRED_COLOR,
+    )
+    from geometric_metric import (
+        bbox_diag_length,
+        height_z_range,
+        precision_recall_f1_radius,
+        span_xy_diameter,
+    )
+    from structural_metrics import (
+        bifurcation_angle_values,
+        bottleneck_distance,
+        branch_length_values,
+        graph_edit_distance_topology,
+        mean_branch_amplitude,
+        mean_branch_length,
     )
 
 
@@ -78,6 +113,41 @@ def _pos_to_xyz(pos: Any) -> np.ndarray:
     if arr.size < 3:
         arr = np.pad(arr, (0, 3 - arr.size), mode="constant", constant_values=0.0)
     return arr[:3]
+
+
+def _ensure_root_from_origin(G: nx.Graph, *, tol: float = 1e-5) -> int | None:
+    """
+    Ensure G.graph["root"] is set. If missing, choose node closest to origin.
+
+    Preference: any node with ||pos|| <= tol; if multiple, pick the closest.
+    Fallback: pick the overall closest node.
+    """
+    if "root" in G.graph and G.graph["root"] in G.nodes:
+        return G.graph["root"]
+    if G.number_of_nodes() == 0:
+        return None
+
+    best_node = None
+    best_norm = None
+    within_tol: list[tuple[int, float]] = []
+    for nid in G.nodes:
+        pos = _pos_to_xyz(G.nodes[nid].get("pos", np.zeros(3)))
+        norm = float(np.linalg.norm(pos))
+        if norm <= tol:
+            within_tol.append((nid, norm))
+        if best_norm is None or norm < best_norm:
+            best_norm = norm
+            best_node = nid
+
+    if within_tol:
+        within_tol.sort(key=lambda x: x[1])
+        root = within_tol[0][0]
+    else:
+        root = best_node
+
+    if root is not None:
+        G.graph["root"] = root
+    return root
 
 
 def _sample_points_on_graph(G: nx.Graph, spacing: float) -> np.ndarray:
@@ -115,12 +185,16 @@ def _sample_points_on_graph(G: nx.Graph, spacing: float) -> np.ndarray:
     return np.vstack(points).astype(np.float64, copy=False)
 
 
-def _chamfer_distance(a: np.ndarray, b: np.ndarray, *, squared: bool = False) -> float:
-    """Symmetric Chamfer distance using nearest-neighbor distances."""
+def _chamfer_components(
+    a: np.ndarray, b: np.ndarray, *, squared: bool = False
+) -> tuple[float, float]:
+    """Return one-sided Chamfer means: a->b and b->a."""
     if a.size == 0 and b.size == 0:
-        return 0.0
-    if a.size == 0 or b.size == 0:
-        return float("inf")
+        return 0.0, 0.0
+    if a.size == 0:
+        return float("inf"), 0.0
+    if b.size == 0:
+        return 0.0, float("inf")
 
     tree_b = cKDTree(b)
     dist_a, _ = tree_b.query(a, k=1)
@@ -128,8 +202,29 @@ def _chamfer_distance(a: np.ndarray, b: np.ndarray, *, squared: bool = False) ->
     dist_b, _ = tree_a.query(b, k=1)
 
     if squared:
-        return float(np.mean(dist_a ** 2) + np.mean(dist_b ** 2))
-    return float(np.mean(dist_a) + np.mean(dist_b))
+        return float(np.mean(dist_a ** 2)), float(np.mean(dist_b ** 2))
+    return float(np.mean(dist_a)), float(np.mean(dist_b))
+
+
+def _chamfer_distance(a: np.ndarray, b: np.ndarray, *, squared: bool = False) -> float:
+    """Symmetric Chamfer distance using nearest-neighbor distances."""
+    c_ab, c_ba = _chamfer_components(a, b, squared=squared)
+    return float(c_ab + c_ba)
+
+
+def _barcode_to_list(barcode: np.ndarray) -> list[list[float]]:
+    if barcode.size == 0:
+        return []
+    return barcode.astype(float).tolist()
+
+
+def _diagram_to_list(diagram: Any) -> list[list[float]]:
+    if diagram is None:
+        return []
+    pairs = diagram.as_pairs()
+    if pairs.size == 0:
+        return []
+    return pairs.astype(float).tolist()
 
 
 def _extract_pred_graphs(payload: Any, ema_key: str | None) -> list[nx.Graph]:
@@ -254,15 +349,45 @@ def _summarize(values: list[float]) -> dict[str, float]:
     }
 
 
-def run_chamfer(
+def _global_hist_edges(
+    values: np.ndarray,
+    *,
+    bins: int,
+    default_range: tuple[float, float],
+) -> np.ndarray:
+    if bins < 1:
+        raise ValueError(f"bins must be >= 1, got {bins}")
+    values = np.asarray(values, dtype=np.float64).reshape(-1)
+    if values.size == 0:
+        lo, hi = default_range
+    else:
+        lo = float(np.nanmin(values))
+        hi = float(np.nanmax(values))
+        if not np.isfinite(lo) or not np.isfinite(hi):
+            lo, hi = default_range
+    if not np.isfinite(lo) or not np.isfinite(hi):
+        lo, hi = default_range
+    if hi <= lo:
+        hi = lo + 1e-6
+    return np.linspace(lo, hi, bins + 1, dtype=np.float64)
+
+
+def run_metrics(
     gt_dir: Path,
     pred_pkl: Path,
     ema_key: str | None,
     spacing: float,
     squared: bool,
+    tmd_normalize: Literal["minmax", "max", "none"] = "minmax",
+    f1_radius: float = 0.05,
+    ged_enabled: bool = False,
+    ged_mode: Literal["raw", "normalized", "both"] = "raw",
+    ged_normalization: Literal["nodes_edges", "nodes", "edges"] = "nodes_edges",
+    ged_timeout: float | None = None,
     plot_dir: Path | None = None,
     plot_max: int = 12,
     plot_pairs: bool = False,
+    hist_bins: int = 32,
 ) -> dict[str, Any]:
     gt_dir = Path(gt_dir)
     pred_pkl = Path(pred_pkl)
@@ -277,6 +402,35 @@ def run_chamfer(
     pred_graphs = _extract_pred_graphs(payload, ema_key)
     if len(pred_graphs) == 0:
         raise ValueError("No predicted graphs found in pickle.")
+
+    for g in gt_graphs:
+        _ensure_root_from_origin(g)
+    for g in pred_graphs:
+        _ensure_root_from_origin(g)
+
+    length_bin_edges: np.ndarray | None = None
+    angle_bin_edges: np.ndarray | None = None
+    if plot_dir is not None:
+        all_lengths: list[np.ndarray] = []
+        all_angles: list[np.ndarray] = []
+        for g in gt_graphs:
+            all_lengths.append(branch_length_values(g))
+            all_angles.append(bifurcation_angle_values(g) if g.number_of_nodes() else np.zeros((0,), dtype=np.float64))
+        for g in pred_graphs:
+            all_lengths.append(branch_length_values(g))
+            all_angles.append(bifurcation_angle_values(g) if g.number_of_nodes() else np.zeros((0,), dtype=np.float64))
+
+        if any(arr.size for arr in all_lengths):
+            length_vals = np.concatenate([arr for arr in all_lengths if arr.size], axis=0)
+        else:
+            length_vals = np.zeros((0,), dtype=np.float64)
+        if any(arr.size for arr in all_angles):
+            angle_vals = np.concatenate([arr for arr in all_angles if arr.size], axis=0)
+        else:
+            angle_vals = np.zeros((0,), dtype=np.float64)
+
+        length_bin_edges = _global_hist_edges(length_vals, bins=hist_bins, default_range=(0.0, 1.0))
+        angle_bin_edges = _global_hist_edges(angle_vals, bins=hist_bins, default_range=(0.0, 180.0))
 
     # Debug: sizes overview
     gt_sizes = [g.number_of_nodes() for g in gt_graphs]
@@ -298,6 +452,10 @@ def run_chamfer(
     chamfers: list[float] = []
     by_size: dict[int, list[float]] = defaultdict(list)
 
+    ged_raw_vals: list[float] = []
+    ged_norm_vals: list[float] = []
+    ged_timeouts = 0
+
     for idx_pair, pair in enumerate(pairs):
         gt_idx = pair["gt_idx"]
         pred_idx = pair["pred_idx"]
@@ -305,12 +463,74 @@ def run_chamfer(
         pred = pred_graphs[pred_idx]
         gt_pts = _sample_points_on_graph(gt, spacing)
         pred_pts = _sample_points_on_graph(pred, spacing)
-        dist = _chamfer_distance(gt_pts, pred_pts, squared=squared)
+        chamfer_ab, chamfer_ba = _chamfer_components(gt_pts, pred_pts, squared=squared)
+        dist = float(chamfer_ab + chamfer_ba)
+        mean_len_gt = mean_branch_length(gt)
+        mean_len_pred = mean_branch_length(pred)
+        mean_amp_gt = mean_branch_amplitude(gt)
+        mean_amp_pred = mean_branch_amplitude(pred)
+        f1_sampled = precision_recall_f1_radius(gt_pts, pred_pts, radius=f1_radius)
+        gt_nodes = np.stack([_pos_to_xyz(gt.nodes[n].get("pos", np.zeros(3))) for n in gt.nodes()], axis=0) if gt.number_of_nodes() else np.zeros((0, 3), dtype=np.float64)
+        pred_nodes = np.stack([_pos_to_xyz(pred.nodes[n].get("pos", np.zeros(3))) for n in pred.nodes()], axis=0) if pred.number_of_nodes() else np.zeros((0, 3), dtype=np.float64)
+        f1_nodes = precision_recall_f1_radius(gt_nodes, pred_nodes, radius=f1_radius)
+        height_gt = height_z_range(gt_nodes)
+        height_pred = height_z_range(pred_nodes)
+        span_gt = span_xy_diameter(gt_nodes)
+        span_pred = span_xy_diameter(pred_nodes)
+        bbox_diag_gt = bbox_diag_length(gt_nodes)
+        bbox_diag_pred = bbox_diag_length(pred_nodes)
 
         size = gt.number_of_nodes()
         pred_size = pred.number_of_nodes()
         chamfers.append(dist)
         by_size[size].append(dist)
+
+        gt_barcode, gt_diag = compute_tmd_barcode_diagram(
+            gt,
+            filtration="path",
+            normalize_mode=tmd_normalize,
+            weight_edges_by_euclidean=True, # basically geodisc path length instead of number of hops
+            simplify_to_critical_tree=True,
+        )
+        pred_barcode, pred_diag = compute_tmd_barcode_diagram(
+            pred,
+            filtration="path",
+            normalize_mode=tmd_normalize,
+            weight_edges_by_euclidean=True, # basically geodisc path length instead of number of hops
+            simplify_to_critical_tree=True,
+        )
+        tmd_bn = bottleneck_distance(gt_diag, pred_diag, canonicalize=False)
+
+        ged_raw = None
+        ged_norm = None
+        if ged_enabled:
+            ged_raw = graph_edit_distance_topology(
+                gt,
+                pred,
+                normalize=False,
+                timeout=ged_timeout,
+            )
+            if ged_raw is None:
+                ged_timeouts += 1
+            if ged_mode in ("normalized", "both"):
+                if ged_raw is None:
+                    ged_norm = None
+                else:
+                    if ged_normalization == "nodes":
+                        denom = max(gt.number_of_nodes(), pred.number_of_nodes())
+                    elif ged_normalization == "edges":
+                        denom = max(gt.number_of_edges(), pred.number_of_edges())
+                    else:
+                        denom = max(
+                            gt.number_of_nodes() + gt.number_of_edges(),
+                            pred.number_of_nodes() + pred.number_of_edges(),
+                        )
+                    ged_norm = 0.0 if denom <= 0 else float(ged_raw) / float(denom)
+
+            if ged_mode in ("raw", "both") and ged_raw is not None:
+                ged_raw_vals.append(float(ged_raw))
+            if ged_mode in ("normalized", "both") and ged_norm is not None:
+                ged_norm_vals.append(float(ged_norm))
 
         tree_entry: dict[str, Any] = {
             "gt_index": int(gt_idx),
@@ -323,7 +543,37 @@ def run_chamfer(
             "num_points_gt": int(gt_pts.shape[0]),
             "num_points_pred": int(pred_pts.shape[0]),
             "chamfer": float(dist),
+            "chamfer_gt_to_pred": float(chamfer_ab),
+            "chamfer_pred_to_gt": float(chamfer_ba),
+            "mean_branch_length_gt": float(mean_len_gt),
+            "mean_branch_length_pred": float(mean_len_pred),
+            "mean_branch_amplitude_deg_gt": float(mean_amp_gt),
+            "mean_branch_amplitude_deg_pred": float(mean_amp_pred),
+            "f1_sampled": float(f1_sampled["f1"]),
+            "precision_sampled": float(f1_sampled["precision"]),
+            "recall_sampled": float(f1_sampled["recall"]),
+            "f1_nodes": float(f1_nodes["f1"]),
+            "precision_nodes": float(f1_nodes["precision"]),
+            "recall_nodes": float(f1_nodes["recall"]),
+            "height_gt": float(height_gt),
+            "height_pred": float(height_pred),
+            "span_xy_gt": float(span_gt),
+            "span_xy_pred": float(span_pred),
+            "bbox_diag_gt": float(bbox_diag_gt),
+            "bbox_diag_pred": float(bbox_diag_pred),
+            "tmd_path_num_bars_gt": int(gt_barcode.shape[0]),
+            "tmd_path_num_bars_pred": int(pred_barcode.shape[0]),
+            "tmd_path_barcode_gt": _barcode_to_list(gt_barcode),
+            "tmd_path_barcode_pred": _barcode_to_list(pred_barcode),
+            "tmd_path_pd_gt": _diagram_to_list(gt_diag),
+            "tmd_path_pd_pred": _diagram_to_list(pred_diag),
+            "tmd_path_bottleneck": float(tmd_bn),
         }
+        if ged_enabled:
+            tree_entry["ged_topology_raw"] = float(ged_raw) if ged_raw is not None else None
+            tree_entry["ged_topology_norm"] = (
+                float(ged_norm) if ged_norm is not None and ged_mode in ("normalized", "both") else None
+            )
 
         if plot_dir is not None and idx_pair < plot_max:
             plot_dir = Path(plot_dir)
@@ -336,7 +586,7 @@ def run_chamfer(
                     stem=stem,
                     file_tag="graph",
                     title_gt="Ground Truth Tree",
-                    title_pred="Generated Tree",
+                    title_pred="Predicted Tree",
                 )
                 points_paths = plot_pointcloud_pair_separate(
                     gt_pts,
@@ -344,7 +594,7 @@ def run_chamfer(
                     out_dir=plot_dir,
                     stem=stem,
                     title_gt="Ground Truth Tree",
-                    title_pred="Generated Tree",
+                    title_pred="Predicted Tree",
                     color_gt=GT_COLOR,
                     color_pred=PRED_COLOR,
                     n_nodes_gt=gt.number_of_nodes(),
@@ -357,7 +607,7 @@ def run_chamfer(
                     stem=stem,
                     file_tag="skeleton",
                     title_gt="Ground Truth Tree",
-                    title_pred="Generated Tree",
+                    title_pred="Predicted Tree",
                     node_color_gt=GT_COLOR,
                     node_color_pred=PRED_COLOR,
                     edge_color_gt=GT_COLOR,
@@ -382,7 +632,7 @@ def run_chamfer(
                 out_dir=plot_dir,
                 stem=f"pred{pred_idx:04d}",
                 file_tag="graph",
-                title="Generated Tree",
+                title="Predicted Tree",
                 node_color=PRED_COLOR,
                 edge_color="lightgray",
                 show_nodes=True,
@@ -402,7 +652,7 @@ def run_chamfer(
                 out_dir=plot_dir,
                 stem=f"pred{pred_idx:04d}",
                 file_tag="points",
-                title="Generated Tree",
+                title="Predicted Tree",
                 color=PRED_COLOR,
                 n_nodes=pred.number_of_nodes(),
             )
@@ -423,13 +673,73 @@ def run_chamfer(
                 out_dir=plot_dir,
                 stem=f"pred{pred_idx:04d}",
                 file_tag="skeleton",
-                title="Generated Tree",
+                title="Predicted Tree",
                 node_color=PRED_COLOR,
                 edge_color=PRED_COLOR,
                 show_nodes=False,
                 show_edges=True,
                 title_suffix="skeleton",
             )
+            overlay_paths = plot_graph_overlay_azimuths(
+                gt,
+                pred,
+                out_dir=plot_dir,
+                stem=stem,
+                file_tag="overlay",
+                title="GT + Predicted Tree Overlay",
+                node_color_gt=GT_COLOR,
+                node_color_pred=PRED_COLOR,
+                edge_color_gt=GT_COLOR,
+                edge_color_pred=PRED_COLOR,
+                show_nodes=False,
+            )
+            pd_overlay_path = plot_persistence_diagram_overlay(
+                gt_diag,
+                pred_diag,
+                out_dir=plot_dir,
+                stem=stem,
+                file_tag="tmd_pd_path",
+                title="PD (Path Length from Root)",
+                color_gt=GT_COLOR,
+                color_pred=PRED_COLOR,
+            )
+            hist_paths: list[Path] = []
+            if length_bin_edges is not None:
+                gt_len_vals = branch_length_values(gt)
+                pred_len_vals = branch_length_values(pred)
+                hist_paths.append(
+                    plot_tornado_histogram(
+                        gt_len_vals,
+                        pred_len_vals,
+                        bin_edges=length_bin_edges,
+                        out_dir=plot_dir,
+                        stem=stem,
+                        file_tag="branch_length_hist",
+                        title="Branch Path Length",
+                        color_gt=GT_COLOR,
+                        color_pred=PRED_COLOR,
+                        value_label="Length (metres)",
+                        xlim=(-3.0, 3.0)
+                    )
+                )
+            if angle_bin_edges is not None:
+                gt_ang_vals = bifurcation_angle_values(gt) if gt.number_of_nodes() else np.zeros((0,), dtype=np.float64)
+                pred_ang_vals = bifurcation_angle_values(pred) if pred.number_of_nodes() else np.zeros((0,), dtype=np.float64)
+                hist_paths.append(
+                    plot_tornado_histogram(
+                        gt_ang_vals,
+                        pred_ang_vals,
+                        bin_edges=angle_bin_edges,
+                        out_dir=plot_dir,
+                        stem=stem,
+                        file_tag="bifurcation_angle_hist",
+                        title="Bifurcation Angles",
+                        color_gt=GT_COLOR,
+                        color_pred=PRED_COLOR,
+                        value_label="Angle (deg)",
+                        xlim=(-0.025, 0.025)
+                    )
+                )
             if plot_pairs:
                 tree_entry["plot_graph_paths"] = [str(p) for p in graph_paths]
                 tree_entry["plot_points_paths"] = [str(p) for p in points_paths]
@@ -437,6 +747,10 @@ def run_chamfer(
             tree_entry["plot_graph_single_paths"] = [str(p) for p in gt_graph_single + pred_graph_single]
             tree_entry["plot_points_single_paths"] = [str(p) for p in gt_points_single + pred_points_single]
             tree_entry["plot_skeleton_single_paths"] = [str(p) for p in gt_skeleton_single + pred_skeleton_single]
+            tree_entry["plot_overlay_paths"] = [str(p) for p in overlay_paths]
+            tree_entry["plot_tmd_pd_path"] = str(pd_overlay_path)
+            if hist_paths:
+                tree_entry["plot_hist_paths"] = [str(p) for p in hist_paths]
 
         per_tree.append(
             tree_entry
@@ -445,19 +759,73 @@ def run_chamfer(
     summary = _summarize(chamfers)
     per_size_summary = {str(k): _summarize(v) for k, v in sorted(by_size.items())}
 
-    return {
+    result: dict[str, Any] = {
         "config": {
             "gt_dir": str(gt_dir),
             "pred_pkl": str(pred_pkl),
             "ema_key": ema_key,
             "spacing": float(spacing),
             "squared": bool(squared),
+            "tmd": {
+                "filtration": "path",
+                "normalize_mode": tmd_normalize,
+                "weight_edges_by_euclidean": True,
+                "simplify_to_critical_tree": True,
+            },
+            "f1_radius": float(f1_radius),
+            "hist_bins": int(hist_bins),
         },
         "summary": summary,
         "per_size_summary": per_size_summary,
         "per_tree": per_tree,
         "unmatched": unmatched,
     }
+    if ged_enabled:
+        result["config"]["ged"] = {
+            "mode": ged_mode,
+            "normalization": ged_normalization,
+            "timeout": ged_timeout,
+        }
+        result["ged_summary"] = _summarize(ged_raw_vals) if ged_mode in ("raw", "both") else None
+        result["ged_norm_summary"] = _summarize(ged_norm_vals) if ged_mode in ("normalized", "both") else None
+        result["ged_timeouts"] = int(ged_timeouts)
+    return result
+
+
+def run_chamfer(
+    gt_dir: Path,
+    pred_pkl: Path,
+    ema_key: str | None,
+    spacing: float,
+    squared: bool,
+    tmd_normalize: Literal["minmax", "max", "none"] = "minmax",
+    f1_radius: float = 0.05,
+    ged_enabled: bool = False,
+    ged_mode: Literal["raw", "normalized", "both"] = "raw",
+    ged_normalization: Literal["nodes_edges", "nodes", "edges"] = "nodes_edges",
+    ged_timeout: float | None = None,
+    plot_dir: Path | None = None,
+    plot_max: int = 12,
+    plot_pairs: bool = False,
+    hist_bins: int = 32,
+) -> dict[str, Any]:
+    return run_metrics(
+        gt_dir=gt_dir,
+        pred_pkl=pred_pkl,
+        ema_key=ema_key,
+        spacing=spacing,
+        squared=squared,
+        tmd_normalize=tmd_normalize,
+        f1_radius=f1_radius,
+        ged_enabled=ged_enabled,
+        ged_mode=ged_mode,
+        ged_normalization=ged_normalization,
+        ged_timeout=ged_timeout,
+        plot_dir=plot_dir,
+        plot_max=plot_max,
+        plot_pairs=plot_pairs,
+        hist_bins=hist_bins,
+    )
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -467,24 +835,57 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ema-key", type=str, default=None, help="EMA key inside pickle (e.g., 'ema_0.999').")
     parser.add_argument("--spacing", type=float, default=DEFAULT_POINT_SPACING, help="Point sampling spacing.")
     parser.add_argument("--squared", action="store_true", help="Use squared distances for Chamfer.")
+    parser.add_argument("--tmd-normalize", type=str, default="minmax", choices=["minmax", "max", "none"],
+                        help="Normalization for TMD filtrations before PD (minmax, max, none).")
+    parser.add_argument("--f1-radius", type=float, default=0.2, help="Neighborhood radius for F1/precision/recall.")
+    parser.add_argument("--ged", "--ted", dest="ged", action="store_true",
+                        help="Compute topology-only tree edit distance (zss).")
+    parser.add_argument(
+        "--ged-mode",
+        type=str,
+        default="raw",
+        choices=["raw", "normalized", "both"],
+        help="TED reporting mode: raw, normalized, or both.",
+    )
+    parser.add_argument(
+        "--ged-normalization",
+        type=str,
+        default="nodes_edges",
+        choices=["nodes_edges", "nodes", "edges"],
+        help="Normalization denominator for TED when using normalized mode.",
+    )
+    parser.add_argument(
+        "--ged-timeout",
+        type=float,
+        default=None,
+        help="Timeout (seconds) for each TED computation; ignored for zss.",
+    )
     parser.add_argument("--plot-dir", type=Path, default=None, help="Optional directory to save plots.")
     parser.add_argument("--plot-max", type=int, default=12, help="Max number of graph pairs to plot.")
     parser.add_argument("--plot-pairs", action="store_true", help="Also save side-by-side GT/pred plots.")
+    parser.add_argument("--hist-bins", type=int, default=32, help="Histogram bin count for branch metrics.")
     parser.add_argument("--output-json", type=Path, default=None, help="Optional path to save JSON output.")
     return parser
 
 
 def main() -> None:
     args = build_arg_parser().parse_args()
-    results = run_chamfer(
+    results = run_metrics(
         gt_dir=args.gt_dir,
         pred_pkl=args.pred_pkl,
         ema_key=args.ema_key,
         spacing=args.spacing,
         squared=args.squared,
+        tmd_normalize=args.tmd_normalize,
+        f1_radius=args.f1_radius,
+        ged_enabled=args.ged,
+        ged_mode=args.ged_mode,
+        ged_normalization=args.ged_normalization,
+        ged_timeout=args.ged_timeout,
         plot_dir=args.plot_dir,
         plot_max=args.plot_max,
         plot_pairs=args.plot_pairs,
+        hist_bins=args.hist_bins,
     )
 
     if args.output_json is not None:
@@ -496,16 +897,60 @@ def main() -> None:
     print("Chamfer summary:")
     print(f"  count={summary['count']} mean={summary['mean']:.6f} std={summary['std']:.6f} "
           f"min={summary['min']:.6f} max={summary['max']:.6f} median={summary['median']:.6f}")
+    if "ged" in results.get("config", {}):
+        ged_summary = results.get("ged_summary")
+        ged_norm_summary = results.get("ged_norm_summary")
+        if ged_summary is not None:
+            print("TED (topology) summary:")
+            print(f"  count={ged_summary['count']} mean={ged_summary['mean']:.6f} std={ged_summary['std']:.6f} "
+                  f"min={ged_summary['min']:.6f} max={ged_summary['max']:.6f} "
+                  f"median={ged_summary['median']:.6f}")
+        if ged_norm_summary is not None:
+            print("TED (topology, normalized) summary:")
+            print(f"  count={ged_norm_summary['count']} mean={ged_norm_summary['mean']:.6f} std={ged_norm_summary['std']:.6f} "
+                  f"min={ged_norm_summary['min']:.6f} max={ged_norm_summary['max']:.6f} "
+                  f"median={ged_norm_summary['median']:.6f}")
+        if results.get("ged_timeouts", 0):
+            print(f"TED timeouts: {results.get('ged_timeouts', 0)}")
     if results["per_tree"]:
         print("Per-graph stats:")
+        include_ged = "ged" in results.get("config", {})
         for item in results["per_tree"]:
+            ged_str = ""
+            if include_ged:
+                ged_raw_val = item.get("ged_topology_raw")
+                ged_norm_val = item.get("ged_topology_norm")
+                if ged_raw_val is not None:
+                    ged_str += f"ted_raw={float(ged_raw_val):.3f} "
+                if ged_norm_val is not None:
+                    ged_str += f"ted_norm={float(ged_norm_val):.4f} "
             print(
                 f"  gt={item['gt_index']}({item['gt_name']}) "
                 f"pred={item['pred_index']} "
                 f"n(gt/pred)={item['num_nodes']}/{item['pred_num_nodes']} "
                 f"match={item.get('match_type','exact')} diff={item.get('size_diff',0)} "
                 f"pts(gt/pred)={item['num_points_gt']}/{item['num_points_pred']} "
-                f"chamfer={item['chamfer']:.6f}"
+                f"chamfer={item['chamfer']:.6f} "
+                f"chamfer(gt->pred/pred->gt)={item.get('chamfer_gt_to_pred', float('nan')):.6f}/"
+                f"{item.get('chamfer_pred_to_gt', float('nan')):.6f} "
+                f"mean_len(gt/pred)={item.get('mean_branch_length_gt', float('nan')):.4f}/"
+                f"{item.get('mean_branch_length_pred', float('nan')):.4f} "
+                f"mean_amp_deg(gt/pred)={item.get('mean_branch_amplitude_deg_gt', float('nan')):.2f}/"
+                f"{item.get('mean_branch_amplitude_deg_pred', float('nan')):.2f} "
+                f"tmd_bn={item.get('tmd_path_bottleneck', float('nan')):.6f} "
+                f"{ged_str}"
+                f"f1_samp={item.get('f1_sampled', float('nan')):.3f} "
+                f"p/r_samp={item.get('precision_sampled', float('nan')):.3f}/"
+                f"{item.get('recall_sampled', float('nan')):.3f} "
+                f"f1_nodes={item.get('f1_nodes', float('nan')):.3f} "
+                f"p/r_nodes={item.get('precision_nodes', float('nan')):.3f}/"
+                f"{item.get('recall_nodes', float('nan')):.3f} "
+                f"height(gt/pred)={item.get('height_gt', float('nan')):.3f}/"
+                f"{item.get('height_pred', float('nan')):.3f} "
+                f"span_xy(gt/pred)={item.get('span_xy_gt', float('nan')):.3f}/"
+                f"{item.get('span_xy_pred', float('nan')):.3f} "
+                f"bbox_diag(gt/pred)={item.get('bbox_diag_gt', float('nan')):.3f}/"
+                f"{item.get('bbox_diag_pred', float('nan')):.3f}"
             )
     if results["unmatched"]:
         print("Unmatched sizes:")

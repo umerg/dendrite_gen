@@ -153,11 +153,13 @@ def get_expansion_items(cfg: DictConfig, train_graphs, diffusion=None):
                 f"Diffusion-based runs require method 'expansion', got '{method_name}'."
             )
         expansion_loss_weight = getattr(cfg.method, "expansion_loss_weight", 1.0)
+        use_size_ratio = getattr(cfg.method, "use_size_ratio", True)
         method = gg.method.Expansion(
             diffusion=diffusion,
             deterministic_expansion=cfg.method.deterministic_expansion,
             red_threshold=cfg.reduction.red_threshold,
             expansion_loss_weight=expansion_loss_weight,
+            use_size_ratio=use_size_ratio,
         )
     elif method_name == "expansion":
         method = gg.method.Expansion_OneShot(
