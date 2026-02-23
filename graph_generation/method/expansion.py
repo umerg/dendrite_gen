@@ -1,3 +1,4 @@
+import time
 import networkx as nx
 import torch as th
 from torch.nn import Module
@@ -6,6 +7,13 @@ from torch_sparse import SparseTensor
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def _t(device: th.device) -> float:
+    """Return current wall time, syncing CUDA if needed for accurate GPU timing."""
+    if device.type == 'cuda':
+        th.cuda.synchronize(device)
+    return time.perf_counter()
 
 from .helpers import (
     build_directed_edge_index,
@@ -142,6 +150,8 @@ class Expansion(Method):
             raise ValueError("Diffusion module must be provided for sampling.")
 
         device = pos.device
+        _t_start = _t(device)
+        _t_leaf_loop = _t_cat_growth = _t_sparse_rebuild = _t_diffusion_sample = _t_geo_lr_mask = 0.0
         parent_idx = parent_idx_1b - 1
         num_graphs = int(target_size.numel())
 
@@ -254,6 +264,7 @@ class Expansion(Method):
         lr_assign_new = []
         running_child_index = 0
 
+        _t_loop_0 = _t(device)
         for leaf_global, sc in zip(leaf_idx.tolist(), spawn_counts_final.tolist()):
             if sc == 0:
                 continue
@@ -271,6 +282,8 @@ class Expansion(Method):
         if running_child_index != total_new_children:
             raise RuntimeError("Mismatch when creating child nodes.")
 
+        _t_leaf_loop = _t(device) - _t_loop_0
+        _t_cat_0 = _t(device)
         new_pos_tensor = th.cat(new_positions, dim=0) if new_positions else pos.new_empty((0, pos.size(1)))
         pos_new = th.cat([pos, new_pos_tensor], dim=0)
         parent_idx_new_0b = th.cat(
@@ -284,6 +297,8 @@ class Expansion(Method):
             [geo_lr_assign, th.tensor(lr_assign_new, device=device, dtype=th.long)], dim=0
         )
 
+        _t_cat_growth = _t(device) - _t_cat_0
+        _t_sparse_0 = _t(device)
         row_old, col_old, val_old = adj_reduced.coo()
         new_rows = []
         new_cols = []
@@ -305,6 +320,7 @@ class Expansion(Method):
             sparse_sizes=(pos_new.size(0), pos_new.size(0)),
         )
 
+        _t_sparse_rebuild = _t(device) - _t_sparse_0
         leaf_idx_next = th.arange(base_N, base_N + total_new_children, device=device, dtype=leaf_idx.dtype)
         new_leaf_flags = th.ones((leaf_idx_next.numel(),), device=device, dtype=th.bool)
         leaf_mask_next = th.cat([leaf_mask_updated, new_leaf_flags], dim=0)
@@ -381,6 +397,7 @@ class Expansion(Method):
 
         leaf_parent_idx_next = parent_idx_new_0b[leaf_idx_next]
         model_kwargs = {"tmd": tmd} if tmd is not None else None
+        _t_diff_0 = _t(device)
         rel_pred, exp_pred = self.diffusion.sample(
             node_feats=node_feats,
             edge_index=edge_index,
@@ -394,9 +411,11 @@ class Expansion(Method):
             model_kwargs=model_kwargs,
         )
 
+        _t_diffusion_sample = _t(device) - _t_diff_0
         parent_pos_for_children = pos_new[leaf_parent_idx_next]
         pos_new[leaf_idx_next] = parent_pos_for_children + rel_pred
 
+        _t_geo_0 = _t(device)
         if leaf_idx_next.numel() > 0:
             geo_lr_mask = compute_geo_lr_mask(pos_new, parent_idx_new_0b, debug=getattr(self, "debug", False))
             parent_new = parent_idx_new_0b[leaf_idx_next]
@@ -413,6 +432,15 @@ class Expansion(Method):
                 geo_lr_assign_next[leaf_idx_next[valid]] = (~geo_left).to(
                     dtype=geo_lr_assign_next.dtype
                 )
+
+        _t_geo_lr_mask = _t(device) - _t_geo_0
+        logger.info(
+            "[expand step=%d N=%d L=%d] leaf_loop=%.4fs cat_growth=%.4fs "
+            "sparse_rebuild=%.4fs diffusion_sample=%.4fs geo_lr_mask=%.4fs total=%.4fs",
+            step, pos_new.size(0), int(leaf_idx_next.numel()),
+            _t_leaf_loop, _t_cat_growth, _t_sparse_rebuild,
+            _t_diffusion_sample, _t_geo_lr_mask, _t(device) - _t_start,
+        )
 
         if exp_pred.dim() == 1:
             exp_pred = exp_pred.unsqueeze(-1)
