@@ -552,8 +552,10 @@ class Expansion(Method):
         leaf_rel_pos = leaf_rel_targets(pos_gt, leaf_idx_train, leaf_parent_idx)  # [L,3]
 
         # --- compute geometric left/right mask for siblings
+        _t_glr_0 = _t(pos_gt.device)
         geo_lr_mask = compute_geo_lr_mask(pos_gt, parent_idx, debug=getattr(self, "debug", False))
-         
+        _t_geo_lr_loss = _t(pos_gt.device) - _t_glr_0
+
         # --- prepare EGNN input (positions + minimal node features)
         feats_total = getattr(model, 'feats_dim', 0)
         tmd_hidden_dim = getattr(model, "tmd_hidden_dim", 0)
@@ -646,6 +648,7 @@ class Expansion(Method):
         #     leaf_targets_per_node=leaf_targets_per_node,
         # )
 
+        _t_diff_loss_0 = _t(pos_gt.device)
         expansion_loss, position_loss = self.diffusion(
             node_feats=node_feats,
             edge_index=edge_index,
@@ -659,6 +662,12 @@ class Expansion(Method):
             leaf_parent_idx=leaf_parent_idx,
             model=model,
             tmd=tmd,
+        )
+        _t_diff_loss = _t(pos_gt.device) - _t_diff_loss_0
+        logger.info(
+            "[get_loss N=%d L=%d] geo_lr_mask=%.4fs diffusion_forward=%.4fs",
+            int(pos_gt.size(0)), int(leaf_idx_train.numel()),
+            _t_geo_lr_loss, _t_diff_loss,
         )
 
         loss = position_loss + self.expansion_loss_weight * expansion_loss

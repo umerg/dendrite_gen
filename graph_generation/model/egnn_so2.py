@@ -1,4 +1,5 @@
 import os
+import time
 from pathlib import Path
 import logging
 log = logging.getLogger(__name__)
@@ -778,8 +779,11 @@ class SO2_EGNN_Network(nn.Module):
         pre_geom = None
         static_coords = all((not getattr(L, 'update_coors', True)) for L in self._iter_egnn_layers()) # bit redundant for now as all layers same, but future-proof
         if parent_idx is not None and static_coords:
+            _t0_geom = time.perf_counter()
             pre_geom = self._compute_static_so2_geometry(x[:, :self.pos_dim], edge_index, parent_idx) # we will be precomputing in current set-up
+            log.debug("[SO2_EGNN_Network.forward N=%d E=%d] static_geometry=%.4fs", x.size(0), edge_index.size(1), time.perf_counter() - _t0_geom)
 
+        _t0_mpnn = time.perf_counter()
         for i,layer in enumerate(self.mpnn_layers):
             
             # EDGES - Embedd each dim to its target dimensions:
@@ -812,6 +816,13 @@ class SO2_EGNN_Network(nn.Module):
                 edge_index, edge_attr, _ = recalc_edge(x) # returns attr, idx, any_other_info
                 edges_need_embedding = True
             
+        if x.is_cuda:
+            torch.cuda.synchronize()
+        log.debug(
+            "[SO2_EGNN_Network.forward N=%d E=%d n_layers=%d] mpnn_total=%.4fs",
+            x.size(0), edge_index.size(1), self.n_layers, time.perf_counter() - _t0_mpnn,
+        )
+
         # decode per-node parent-relative offsets
         coors, feats = x[:, :self.pos_dim], x[:, self.pos_dim:]
         N = coors.size(0)
@@ -819,6 +830,7 @@ class SO2_EGNN_Network(nn.Module):
             raise ValueError("parent_idx is required to decode parent-relative offsets.")
 
         # head
+        _t0_head = time.perf_counter()
         if not self.LR_offset_head:
             offset_state = self.offset_head(feats)
         else:
@@ -832,6 +844,10 @@ class SO2_EGNN_Network(nn.Module):
         rel_pred = offset_state[:, :3]
         expansion_pred = offset_state[:, 3:4]
 
+        log.debug(
+            "[SO2_EGNN_Network.forward N=%d] offset_head=%.4fs",
+            x.size(0), time.perf_counter() - _t0_head,
+        )
         return {"node_state": x, "rel_pred": rel_pred, "expansion_pred": expansion_pred}
 
     def __repr__(self):

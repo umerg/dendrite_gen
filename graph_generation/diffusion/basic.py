@@ -1,8 +1,12 @@
+import logging
 import math
+import time
 
 import torch as th
 import torch.nn.functional as F
 from torch.nn import Module
+
+logger = logging.getLogger(__name__)
 
 
 class DenoisingDiffusionModel(Module):
@@ -74,6 +78,9 @@ class DenoisingDiffusionModel(Module):
         node_feats_t = th.cat([node_feats, e_feat, log_sigma_node], dim=-1)
 
         x_in = th.cat([P_t, node_feats_t], dim=-1)
+        if device.type == 'cuda':
+            th.cuda.synchronize(device)
+        _t0_model = time.perf_counter()
         out = model(
             x=x_in,
             edge_index=edge_index,
@@ -81,6 +88,12 @@ class DenoisingDiffusionModel(Module):
             edge_attr=edge_attr,
             parent_idx=parent_idx,
             tmd=tmd,
+        )
+        if device.type == 'cuda':
+            th.cuda.synchronize(device)
+        logger.info(
+            "[diffusion.forward N=%d L=%d] model_call=%.4fs",
+            P_0.size(0), num_leaves, time.perf_counter() - _t0_model,
         )
         if not isinstance(out, dict):
             raise ValueError("Model must return dict with 'rel_pred' and 'expansion_pred'.")
@@ -151,22 +164,34 @@ class DenoisingDiffusionModel(Module):
         C0_pred = th.zeros_like(C)
         e0_pred = th.zeros_like(e)
 
+        def _st() -> float:
+            if device.type == 'cuda':
+                th.cuda.synchronize(device)
+            return time.perf_counter()
+
+        _acc_clone, _acc_alloc, _acc_model = 0.0, 0.0, 0.0
+
         for step in range(self.num_steps):
             sigma_cur = float(sigmas[step].item())
             sigma_next = float(sigmas[step + 1].item())
             sigma_cur_clamped = max(sigma_cur, 1e-12)
             log_sigma = math.log(sigma_cur_clamped)
 
+            _t0 = _st()
             P_cur = P_0.clone()
+            _acc_clone += _st() - _t0
+
             P_cur[leaf_idx] = parent_pos + C
 
+            _t0 = _st()
             e_feat = P_0.new_zeros((N, 1))
             e_feat[leaf_idx] = e
-
             log_sigma_feat = P_0.new_full((N, 1), log_sigma)
             node_feats_t = th.cat([node_feats, e_feat, log_sigma_feat], dim=-1)
             x_in = th.cat([P_cur, node_feats_t], dim=-1)
+            _acc_alloc += _st() - _t0
 
+            _t0 = _st()
             out = model(
                 x=x_in,
                 edge_index=edge_index,
@@ -175,6 +200,8 @@ class DenoisingDiffusionModel(Module):
                 parent_idx=parent_idx,
                 **model_kwargs,
             )
+            _acc_model += _st() - _t0
+
             if not isinstance(out, dict):
                 raise ValueError("Model must return dict with 'rel_pred' and 'expansion_pred'.")
             rel_pred_all = out["rel_pred"]
@@ -192,4 +219,9 @@ class DenoisingDiffusionModel(Module):
             C = C0_pred + sigma_next * eps_C
             e = e0_pred + sigma_next * eps_e
 
+        logger.info(
+            "[diffusion.sample num_steps=%d N=%d L=%d] "
+            "clone_total=%.4fs alloc+cat_total=%.4fs model_total=%.4fs",
+            self.num_steps, N, L, _acc_clone, _acc_alloc, _acc_model,
+        )
         return C0_pred, e0_pred
