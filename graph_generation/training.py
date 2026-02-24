@@ -268,16 +268,23 @@ class Trainer:
                 if sizes.numel() > 0:
                     unique_sizes = sorted({int(size) for size in sizes.tolist()})
 
+        _t0 = time()
         loss, loss_terms = self.method.get_loss(
             batch=batch, model=self.model,
         )
+        loss_terms["t_forward"] = time() - _t0
 
         self.optimizer.zero_grad(set_to_none=True)
+        _t0 = time()
         loss.backward()
+        loss_terms["t_backward"] = time() - _t0
+
+        _t0 = time()
         self.optimizer.step()
         if self.scheduler is not None:
             # Step LR scheduler once per global training step
             self.scheduler.step()
+        loss_terms["t_optimizer"] = time() - _t0
 
         for model in list(self.ema_models.values()):
             if model is not None:
@@ -290,6 +297,7 @@ class Trainer:
         print(f"Running validation at {self.step} steps.")
         if hasattr(self, 'logger'):
             self.logger.info(f"Running validation at step {self.step}")
+        _t_val_start = time()
 
         # --- VALIDATION LOOP (metrics + optional plots) ---
         # We gate metric computation & test-trigger logic with cfg.validation.enable_metrics.
@@ -325,6 +333,7 @@ class Trainer:
                 # Metrics disabled: insert placeholder
                 val_results[f"ema_{beta}"]["metrics_disabled"] = True
 
+        self.logger.info("[validation step=%d] total=%.1fs", self.step, time() - _t_val_start)
         # Log results (test_results empty if metrics disabled & no improvements tracked)
         self.log({"validation": val_results, "test": test_results})
 
@@ -367,6 +376,7 @@ class Trainer:
         results = {}
 
         # Generate graphs
+        _t0_gen = time()
         pred_graphs = []
         cursor = 0
         for batch in batches:
@@ -386,6 +396,7 @@ class Trainer:
         results["pred_graphs"] = [pred_graphs[i] for i in inv_perm]
         if self.device == "cuda":
             th.cuda.empty_cache()
+        _t_generation = time() - _t0_gen
 
         # Consistency assertions: all graphs must have 'pos' attribute per node
         def _assert_geometric(graphs: list[nx.Graph]):
@@ -404,6 +415,7 @@ class Trainer:
 
         # Metric computation gated
         enable_metrics = getattr(self.cfg.validation, 'enable_metrics', True)
+        _t0_metrics = time()
         if enable_metrics:
             # Validate graphs (original metric loop)
             for metric in self.metrics:
@@ -426,6 +438,12 @@ class Trainer:
                         )
         else:
             results['metrics_disabled'] = True
+        _t_metrics = time() - _t0_metrics
+
+        self.logger.info(
+            "[evaluate beta=%s n_graphs=%d] generation=%.1fs metrics=%.1fs",
+            beta, len(eval_graphs), _t_generation, _t_metrics,
+        )
 
         # Example plot generation gated
         enable_plots = getattr(self.cfg.validation, 'enable_plots', True)
