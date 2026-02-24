@@ -209,8 +209,11 @@ class Trainer:
             last_step = self.step == self.cfg.training.num_steps
 
             step_start_time = time()
+            _t0_data = time()
             batch = next(self.train_iterator)
+            t_data_load = time() - _t0_data
             loss_terms = self.run_step(batch)
+            loss_terms["t_data_load"] = t_data_load
             if self.cfg.training.log_interval > 0 and (
                 self.step % self.cfg.training.log_interval == 0 or last_step
             ):
@@ -258,7 +261,9 @@ class Trainer:
         # process = psutil.Process()
         # print(f"RAM usage before step: {process.memory_info().rss / 1024 ** 2:.2f} MB")
 
+        _t0_transfer = time()
         batch = batch.to(self.device, non_blocking=True)
+        t_gpu_transfer = time() - _t0_transfer
 
         if getattr(self.cfg, "debugging", False):
             batch_vec = getattr(batch, "batch", None)
@@ -286,9 +291,12 @@ class Trainer:
             self.scheduler.step()
         loss_terms["t_optimizer"] = time() - _t0
 
+        _t0_ema = time()
         for model in list(self.ema_models.values()):
             if model is not None:
                 model.update(step=self.step)
+        loss_terms["t_ema"] = time() - _t0_ema
+        loss_terms["t_gpu_transfer"] = t_gpu_transfer
         # Optionally log current LR
         loss_terms["lr"] = float(self.optimizer.param_groups[0]["lr"])
         return loss_terms
