@@ -175,43 +175,68 @@ def compute_geo_lr_mask(
 
     lr_mask = th.zeros((N,), dtype=th.bool, device=device)
 
-    handled_parents = th.zeros((N,), dtype=th.bool, device=device)
-    root_nodes = (parent == -1).nonzero(as_tuple=False).flatten()
-    if not root_nodes.numel():
+    # --- vectorized root-children handling (replaces loop over root_nodes) ---
+    is_root = (parent == -1)                                      # [N]
+    parent_clamped = parent.clamp(min=0)                          # [N], safe for indexing
+    parent_is_root_node = has_parent & is_root[parent_clamped]    # [N] children of roots
+    if not is_root.any():
         logger.warning("[GeoLR] No root with parent==-1 found; override skipped for this graph.")
     else:
-        for r in root_nodes.tolist():
-            child_idx = (parent == r).nonzero(as_tuple=False).flatten()
-            if child_idx.numel() == 0:
-                continue
-            if child_idx.numel() == 1:
-                lr_mask[child_idx[0]] = True  # single child: assign as left (index 0)
-            else:
-                parent_z = pos[r, -1]
-                child_z = pos[child_idx, -1]
-                lr_mask[child_idx] = child_z >= parent_z
-            handled_parents[r] = True
+        counts = scatter(
+            th.ones(N, device=device, dtype=pos.dtype),
+            parent_clamped, dim=0, dim_size=N, reduce='sum',
+        )                                                          # [N] child-count per node
+        sibling_count = counts[parent_clamped]                    # [N]
+        single_root_ch = parent_is_root_node & (sibling_count == 1)
+        multi_root_ch  = parent_is_root_node & (sibling_count > 1)
+        lr_mask = lr_mask.masked_fill(single_root_ch, True)
+        if multi_root_ch.any():
+            lr_mask[multi_root_ch] = (
+                pos[multi_root_ch, -1] >= pos[parent_clamped[multi_root_ch], -1]
+            )
+    handled_parents = is_root                                      # [N] bool
 
-    unique_parents = parent.unique()
-    for p in unique_parents.tolist():
-        if p < 0:
-            continue
-        if handled_parents[p]:
-            continue
-        child_idx = (parent == p).nonzero(as_tuple=False).flatten()
-        if child_idx.numel() != 2:
-            continue
-        s = sinpsi[child_idx, 0]
-        c = cospsi[child_idx, 0]
-        if (s[0] * s[1] < -tol):
-            lr_mask[child_idx[0]] = bool(s[0] > 0)
-            lr_mask[child_idx[1]] = bool(s[1] > 0)
-        else:
-            theta = th.atan2(s, c)
-            idx_left = child_idx[int(th.argmax(theta))]
-            lr_mask[idx_left] = True
+    # --- vectorized binary-parent handling (replaces loop over unique_parents) ---
+    if not is_root.any():
+        counts = scatter(
+            th.ones(N, device=device, dtype=pos.dtype),
+            parent_clamped, dim=0, dim_size=N, reduce='sum',
+        )
+    binary_parents = (counts == 2) & ~handled_parents             # [N]
+    in_binary = has_parent & binary_parents[parent_clamped] & ~parent_is_root_node  # [N]
+
+    if in_binary.any():
+        s = sinpsi[:, 0]                                           # [N]
+        c = cospsi[:, 0]                                           # [N]
+        s_bin = s[in_binary]
+        p_bin = parent_clamped[in_binary]
+
+        # Product s0*s1 per parent via identity: (s0+s1)^2 - s0^2 - s1^2) / 2
+        sum_s  = scatter(s_bin,      p_bin, dim=0, dim_size=N, reduce='sum')
+        sum_s2 = scatter(s_bin ** 2, p_bin, dim=0, dim_size=N, reduce='sum')
+        product = (sum_s ** 2 - sum_s2) * 0.5                     # [N]
+
+        # Case 1: opposite-sign sines → left child is the one with sin > 0
+        case1_parent = (product < -tol) & binary_parents
+        case1_nodes  = in_binary & case1_parent[parent_clamped]
+        if case1_nodes.any():
+            lr_mask[case1_nodes] = s[case1_nodes] > 0
+
+        # Case 2: same-sign or near-zero → left child is the one with larger atan2 angle
+        case2_parent = binary_parents & ~case1_parent
+        case2_nodes  = in_binary & case2_parent[parent_clamped]
+        if case2_nodes.any():
+            theta = th.atan2(s, c)                                 # [N]
+            max_theta = scatter(
+                theta[case2_nodes], parent_clamped[case2_nodes],
+                dim=0, dim_size=N, reduce='max',
+            )                                                      # [N]
+            lr_mask[case2_nodes] = (
+                theta[case2_nodes] >= max_theta[parent_clamped[case2_nodes]] - 1e-7
+            )
 
     if debug:
+        unique_parents = parent.unique()
         for p in unique_parents.tolist():
             if p < 0:
                 continue
