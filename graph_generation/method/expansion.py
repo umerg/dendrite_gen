@@ -21,6 +21,7 @@ from .helpers import (
     decode_parent_indices,
     leaf_rel_targets,
     plot_diffusion_debug_trees,
+    precompute_full_geometry,
     select_training_leaf_indices,
     size_ratio_feature_from_batch,
 )
@@ -551,9 +552,14 @@ class Expansion(Method):
         # --- relative position conformation matrix for new/train leaves 
         leaf_rel_pos = leaf_rel_targets(pos_gt, leaf_idx_train, leaf_parent_idx)  # [L,3]
 
-        # --- compute geometric left/right mask for siblings
+        # --- compute full geometry on P_0 (geo_lr + SO(2) angles + edge decomposition)
         _t_glr_0 = _t(pos_gt.device)
-        geo_lr_mask = compute_geo_lr_mask(pos_gt, parent_idx, debug=getattr(self, "debug", False))
+        uhat = model.uhat
+        pre_geom_p0 = precompute_full_geometry(
+            pos_gt, parent_idx, edge_index, uhat,
+            debug=getattr(self, "debug", False),
+        )
+        geo_lr_mask = pre_geom_p0['geo_lr_mask']
         _t_geo_lr_loss = _t(pos_gt.device) - _t_glr_0
 
         # --- prepare EGNN input (positions + minimal node features)
@@ -662,6 +668,7 @@ class Expansion(Method):
             leaf_parent_idx=leaf_parent_idx,
             model=model,
             tmd=tmd,
+            pre_geom_p0=pre_geom_p0,
         )
         _t_diff_loss = _t(pos_gt.device) - _t_diff_loss_0
         logger.info(

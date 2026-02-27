@@ -35,119 +35,11 @@ except:
 
 from .egnn_pytorch import *
 
-def compute_branch_angles_parent_centric(
-    coors: torch.Tensor,
-    parent_idx: torch.Tensor,
-    uhat: torch.Tensor,
-    eps: float = 1e-8,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Returns (cosψ, sinψ, cosθ) per node i (> root), describing the angle of the branch
-    parent(i) -> i relative to the incoming direction at parent(i), plus the angle
-    between parent(i)->i and uhat.
-
-    Also returns cosθ per node, where θ is the angle between parent(i)->i and uhat.
-    """
-    N = coors.size(0)
-
-    parent = parent_idx.clone()
-    has_parent = parent >= 0
-
-    # grandparent of each node
-    gp = parent.new_full((N,), -1)
-    gp[has_parent] = parent_idx[parent[has_parent]].clamp(min=-1)
-
-    # incoming direction at parent
-    v_in = torch.zeros_like(coors)
-    has_gp = gp >= 0
-    if has_gp.any():
-        sel = has_gp.nonzero(as_tuple=False).flatten()
-        v_in[sel] = coors[parent[sel]] - coors[gp[sel]]
-    fallback_mask = has_parent & ~has_gp
-    if fallback_mask.any():
-        sel = fallback_mask.nonzero(as_tuple=False).flatten()
-        v_in[sel] = coors[sel] - coors[parent[sel]]
-
-    # outgoing direction parent -> child
-    v_out = torch.zeros_like(coors)
-    if has_parent.any():
-        sel = has_parent.nonzero(as_tuple=False).flatten()
-        v_out[sel] = coors[sel] - coors[parent[sel]]
-
-    # project onto plane orthogonal to axis
-    du_in = (v_in @ uhat).unsqueeze(-1)
-    du_out = (v_out @ uhat).unsqueeze(-1)
-    v_in_perp = v_in - du_in * uhat
-    v_out_perp = v_out - du_out * uhat
-
-    nin = v_in_perp.norm(dim=-1, keepdim=True)
-    nout = v_out_perp.norm(dim=-1, keepdim=True)
-    v_in_unit = v_in_perp / (nin + eps)
-    v_out_unit = v_out_perp / (nout + eps)
-
-    cospsi = (v_in_unit * v_out_unit).sum(dim=-1, keepdim=True)
-    cross = torch.cross(v_in_unit, v_out_unit, dim=-1)
-    sinpsi = (cross * uhat).sum(dim=-1, keepdim=True)
-
-    v_out_norm = (nout.pow(2) + du_out.pow(2)).sqrt()
-    cos_theta = du_out / (v_out_norm + eps)
-
-    cospsi = torch.where(has_parent.view(-1, 1), cospsi, torch.ones_like(cospsi))
-    sinpsi = torch.where(has_parent.view(-1, 1), sinpsi, torch.zeros_like(sinpsi))
-    cos_theta = torch.where(has_parent.view(-1, 1), cos_theta, torch.ones_like(cos_theta))
-    return cospsi, sinpsi, cos_theta
-
-def assign_branch_angles_to_edges(
-    edge_index: torch.Tensor,
-    parent_idx: torch.Tensor,
-    cospsi_node: torch.Tensor,
-    sinpsi_node: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Assign node-level branch angles (cosψ/sinψ) to directed edges."""
-    src, dst = edge_index
-    device = cospsi_node.device
-    dtype = cospsi_node.dtype
-    num_edges = src.size(0)
-    cos_edge = torch.zeros((num_edges, 1), device=device, dtype=dtype)
-    sin_edge = torch.zeros_like(cos_edge)
-
-    mask_parent_to_child = (parent_idx[dst] == src)
-    if mask_parent_to_child.any():
-        child_idx = dst[mask_parent_to_child]
-        cos_edge[mask_parent_to_child] = cospsi_node[child_idx]
-        sin_edge[mask_parent_to_child] = sinpsi_node[child_idx]
-
-    mask_child_to_parent = (parent_idx[src] == dst)
-    if mask_child_to_parent.any():
-        child_idx = src[mask_child_to_parent]
-        cos_edge[mask_child_to_parent] = cospsi_node[child_idx]
-        sin_edge[mask_child_to_parent] = sinpsi_node[child_idx]
-
-    return cos_edge, sin_edge
-
-def assign_parent_scalar_to_edges(
-    edge_index: torch.Tensor,
-    parent_idx: torch.Tensor,
-    scalar_node: torch.Tensor,
-) -> torch.Tensor:
-    """Assign parent-centric per-node scalar to directed edges (both directions share child value)."""
-    src, dst = edge_index
-    device = scalar_node.device
-    dtype = scalar_node.dtype
-    num_edges = src.size(0)
-    scalar_edge = torch.zeros((num_edges, 1), device=device, dtype=dtype)
-
-    mask_parent_to_child = (parent_idx[dst] == src)
-    if mask_parent_to_child.any():
-        child_idx = dst[mask_parent_to_child]
-        scalar_edge[mask_parent_to_child] = scalar_node[child_idx]
-
-    mask_child_to_parent = (parent_idx[src] == dst)
-    if mask_child_to_parent.any():
-        child_idx = src[mask_child_to_parent]
-        scalar_edge[mask_child_to_parent] = scalar_node[child_idx]
-
-    return scalar_edge
+from graph_generation.method.helpers import (
+    compute_branch_angles_parent_centric,
+    assign_branch_angles_to_edges,
+    assign_parent_scalar_to_edges,
+)
 
 # global linear attention
 
@@ -734,7 +626,8 @@ class SO2_EGNN_Network(nn.Module):
     def forward(self, x, edge_index, batch, edge_attr,
                 bsize=None, recalc_edge=None, verbose=0,
                 parent_idx: Optional[torch.Tensor] = None,
-                tmd: Optional[torch.Tensor] = None):
+                tmd: Optional[torch.Tensor] = None,
+                pre_geom: Optional[dict] = None):
         """ Recalculate edge features every `self.recalc_edge` with the
             `recalc_edge` function if self.recalc_edge is set.
 
@@ -776,12 +669,13 @@ class SO2_EGNN_Network(nn.Module):
         # regulates wether to embedd edges each layer
         edges_need_embedding = True  
         # Precompute static geometry if coordinates will remain fixed (update_coors False in all layers)
-        pre_geom = None
-        static_coords = all((not getattr(L, 'update_coors', True)) for L in self._iter_egnn_layers()) # bit redundant for now as all layers same, but future-proof
-        if parent_idx is not None and static_coords:
-            _t0_geom = time.perf_counter()
-            pre_geom = self._compute_static_so2_geometry(x[:, :self.pos_dim], edge_index, parent_idx) # we will be precomputing in current set-up
-            log.debug("[SO2_EGNN_Network.forward N=%d E=%d] static_geometry=%.4fs", x.size(0), edge_index.size(1), time.perf_counter() - _t0_geom)
+        # If pre_geom was passed in (precomputed externally), skip internal computation.
+        if pre_geom is None:
+            static_coords = all((not getattr(L, 'update_coors', True)) for L in self._iter_egnn_layers()) # bit redundant for now as all layers same, but future-proof
+            if parent_idx is not None and static_coords:
+                _t0_geom = time.perf_counter()
+                pre_geom = self._compute_static_so2_geometry(x[:, :self.pos_dim], edge_index, parent_idx) # we will be precomputing in current set-up
+                log.debug("[SO2_EGNN_Network.forward N=%d E=%d] static_geometry=%.4fs", x.size(0), edge_index.size(1), time.perf_counter() - _t0_geom)
 
         _t0_mpnn = time.perf_counter()
         for i,layer in enumerate(self.mpnn_layers):

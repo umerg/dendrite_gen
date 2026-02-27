@@ -3,6 +3,7 @@ import logging
 from pathlib import Path
 from typing import Optional, Tuple
 
+import torch
 import torch as th
 from torch_scatter import scatter
 
@@ -107,10 +108,138 @@ def global_inplane_basis(uhat: th.Tensor, eps: float = 1e-8) -> Tuple[th.Tensor,
     return e1, e2
 
 
+def compute_branch_angles_parent_centric(
+    coors: torch.Tensor,
+    parent_idx: torch.Tensor,
+    uhat: torch.Tensor,
+    eps: float = 1e-8,
+    return_intermediates: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict]:
+    """
+    Returns (cosψ, sinψ, cosθ) per node i (> root), describing the angle of the branch
+    parent(i) -> i relative to the incoming direction at parent(i), plus the angle
+    between parent(i)->i and uhat.
+
+    If return_intermediates=True, additionally returns a dict with v_in, v_out, has_gp
+    needed for leaf patching.
+    """
+    N = coors.size(0)
+
+    parent = parent_idx.clone()
+    has_parent = parent >= 0
+
+    # grandparent of each node
+    gp = parent.new_full((N,), -1)
+    gp[has_parent] = parent_idx[parent[has_parent]].clamp(min=-1)
+
+    # incoming direction at parent
+    v_in = torch.zeros_like(coors)
+    has_gp = gp >= 0
+    if has_gp.any():
+        sel = has_gp.nonzero(as_tuple=False).flatten()
+        v_in[sel] = coors[parent[sel]] - coors[gp[sel]]
+    fallback_mask = has_parent & ~has_gp
+    if fallback_mask.any():
+        sel = fallback_mask.nonzero(as_tuple=False).flatten()
+        v_in[sel] = coors[sel] - coors[parent[sel]]
+
+    # outgoing direction parent -> child
+    v_out = torch.zeros_like(coors)
+    if has_parent.any():
+        sel = has_parent.nonzero(as_tuple=False).flatten()
+        v_out[sel] = coors[sel] - coors[parent[sel]]
+
+    # project onto plane orthogonal to axis
+    du_in = (v_in @ uhat).unsqueeze(-1)
+    du_out = (v_out @ uhat).unsqueeze(-1)
+    v_in_perp = v_in - du_in * uhat
+    v_out_perp = v_out - du_out * uhat
+
+    nin = v_in_perp.norm(dim=-1, keepdim=True)
+    nout = v_out_perp.norm(dim=-1, keepdim=True)
+    v_in_unit = v_in_perp / (nin + eps)
+    v_out_unit = v_out_perp / (nout + eps)
+
+    cospsi = (v_in_unit * v_out_unit).sum(dim=-1, keepdim=True)
+    cross = torch.cross(v_in_unit, v_out_unit, dim=-1)
+    sinpsi = (cross * uhat).sum(dim=-1, keepdim=True)
+
+    v_out_norm = (nout.pow(2) + du_out.pow(2)).sqrt()
+    cos_theta = du_out / (v_out_norm + eps)
+
+    cospsi = torch.where(has_parent.view(-1, 1), cospsi, torch.ones_like(cospsi))
+    sinpsi = torch.where(has_parent.view(-1, 1), sinpsi, torch.zeros_like(sinpsi))
+    cos_theta = torch.where(has_parent.view(-1, 1), cos_theta, torch.ones_like(cos_theta))
+
+    if return_intermediates:
+        intermediates = {
+            'v_in': v_in,
+            'v_out': v_out,
+            'has_gp': has_gp,
+        }
+        return cospsi, sinpsi, cos_theta, intermediates
+    return cospsi, sinpsi, cos_theta
+
+
+def assign_branch_angles_to_edges(
+    edge_index: torch.Tensor,
+    parent_idx: torch.Tensor,
+    cospsi_node: torch.Tensor,
+    sinpsi_node: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Assign node-level branch angles (cosψ/sinψ) to directed edges."""
+    src, dst = edge_index
+    device = cospsi_node.device
+    dtype = cospsi_node.dtype
+    num_edges = src.size(0)
+    cos_edge = torch.zeros((num_edges, 1), device=device, dtype=dtype)
+    sin_edge = torch.zeros_like(cos_edge)
+
+    mask_parent_to_child = (parent_idx[dst] == src)
+    if mask_parent_to_child.any():
+        child_idx = dst[mask_parent_to_child]
+        cos_edge[mask_parent_to_child] = cospsi_node[child_idx]
+        sin_edge[mask_parent_to_child] = sinpsi_node[child_idx]
+
+    mask_child_to_parent = (parent_idx[src] == dst)
+    if mask_child_to_parent.any():
+        child_idx = src[mask_child_to_parent]
+        cos_edge[mask_child_to_parent] = cospsi_node[child_idx]
+        sin_edge[mask_child_to_parent] = sinpsi_node[child_idx]
+
+    return cos_edge, sin_edge
+
+
+def assign_parent_scalar_to_edges(
+    edge_index: torch.Tensor,
+    parent_idx: torch.Tensor,
+    scalar_node: torch.Tensor,
+) -> torch.Tensor:
+    """Assign parent-centric per-node scalar to directed edges (both directions share child value)."""
+    src, dst = edge_index
+    device = scalar_node.device
+    dtype = scalar_node.dtype
+    num_edges = src.size(0)
+    scalar_edge = torch.zeros((num_edges, 1), device=device, dtype=dtype)
+
+    mask_parent_to_child = (parent_idx[dst] == src)
+    if mask_parent_to_child.any():
+        child_idx = dst[mask_parent_to_child]
+        scalar_edge[mask_parent_to_child] = scalar_node[child_idx]
+
+    mask_child_to_parent = (parent_idx[src] == dst)
+    if mask_child_to_parent.any():
+        child_idx = src[mask_child_to_parent]
+        scalar_edge[mask_child_to_parent] = scalar_node[child_idx]
+
+    return scalar_edge
+
+
 def compute_geo_lr_mask(
     pos: th.Tensor,
     parent_idx: th.Tensor,
     *,
+    uhat: th.Tensor | None = None,
     debug: bool = False,
     eps: float = 1e-8,
     tol: float = 1e-6,
@@ -133,8 +262,9 @@ def compute_geo_lr_mask(
             gp_values[positive_mask] = parent[parents[positive_mask]].clamp(min=-1)
         gp[has_parent] = gp_values
 
-    uhat = pos.new_zeros((pos.size(1),), dtype=dtype)
-    uhat[-1] = 1.0
+    if uhat is None:
+        uhat = pos.new_zeros((pos.size(1),), dtype=dtype)
+        uhat[-1] = 1.0
     global_e1, _ = global_inplane_basis(uhat, eps=eps)
     uhat_vec = uhat.view(1, -1)
 
@@ -378,6 +508,187 @@ def compute_geo_lr_mask_f2(
                 )
 
     return lr_mask
+
+
+def precompute_full_geometry(
+    pos: th.Tensor,
+    parent_idx: th.Tensor,
+    edge_index: th.Tensor,
+    uhat: th.Tensor,
+    *,
+    eps: float = 1e-8,
+    tol: float = 1e-6,
+    debug: bool = False,
+) -> dict:
+    """Compute all geometry (geo_lr_mask + SO(2) edge/node features) once on P_0.
+
+    Returns a dict compatible with the ``pre_geom`` format expected by
+    ``SO2_EGNN.forward()`` plus extras needed for leaf-patching.
+    """
+    # 1. geo_lr_mask (node feature for left/right sibling assignment)
+    geo_lr_mask = compute_geo_lr_mask(pos, parent_idx, uhat=uhat, debug=debug, eps=eps, tol=tol)
+
+    # 2. Node-level branch angles with intermediates for later patching
+    cospsi_node, sinpsi_node, cos_theta_node, intermediates = compute_branch_angles_parent_centric(
+        pos, parent_idx, uhat, eps=eps, return_intermediates=True,
+    )
+
+    # 3. Edge-level SO(2) decomposition
+    src, dst = edge_index
+    rel_coors = pos[dst] - pos[src]                         # (E, 3)
+    du = (rel_coors @ uhat)                                  # (E,)
+    r_par = du[:, None] * uhat                               # (E, 3)
+    r_perp = rel_coors - r_par                               # (E, 3)
+    rho = r_perp.norm(dim=-1, keepdim=True).clamp_min(eps)   # (E, 1)
+    du = du[:, None]                                         # (E, 1)
+
+    # 4. Assign node angles to edges
+    cospsi_edge, sinpsi_edge = assign_branch_angles_to_edges(
+        edge_index, parent_idx, cospsi_node, sinpsi_node,
+    )
+    cos_theta_edge = assign_parent_scalar_to_edges(
+        edge_index, parent_idx, cos_theta_node,
+    )
+
+    return {
+        # edge-level (used by SO2_EGNN layers)
+        'rel_coors': rel_coors,
+        'r_perp': r_perp,
+        'rho': rho,
+        'du': du,
+        'cospsi_edge': cospsi_edge,
+        'sinpsi_edge': sinpsi_edge,
+        'cos_theta_edge': cos_theta_edge,
+        # node-level
+        'cospsi_node': cospsi_node,
+        'sinpsi_node': sinpsi_node,
+        'cos_theta_node': cos_theta_node,
+        # for geo_lr feature
+        'geo_lr_mask': geo_lr_mask,
+        # intermediates for leaf patching
+        'v_in': intermediates['v_in'],
+        'v_out': intermediates['v_out'],
+        'has_gp': intermediates['has_gp'],
+    }
+
+
+def patch_geometry_for_noised_leaves(
+    pre_geom_p0: dict,
+    P_t: th.Tensor,
+    leaf_idx_train: th.Tensor,
+    parent_idx: th.Tensor,
+    edge_index: th.Tensor,
+    uhat: th.Tensor,
+    *,
+    eps: float = 1e-8,
+) -> dict:
+    """Patch P_0 geometry for noised leaf positions in P_t.
+
+    Only leaf-related node angles and affected edges are recomputed;
+    everything else is reused from *pre_geom_p0*.
+    """
+    if leaf_idx_train.numel() == 0:
+        return pre_geom_p0
+
+    device = P_t.device
+    N = P_t.size(0)
+    src, dst = edge_index
+
+    # --- 1. Identify affected edges (any edge touching a noised leaf) ---
+    leaf_set = th.zeros(N, dtype=th.bool, device=device)
+    leaf_set[leaf_idx_train] = True
+    affected = leaf_set[src] | leaf_set[dst]  # (E,) bool
+
+    # --- 2. Patch node-level angles for leaf nodes ---
+    parent = parent_idx
+    parent_clamped = parent.clamp(min=0)
+
+    # v_out_new for leaves: P_t[leaf] - P_t[parent[leaf]]
+    # (parent pos is unchanged in P_t since parents are internal)
+    v_out_new = P_t[leaf_idx_train] - P_t[parent_clamped[leaf_idx_train]]  # (L, 3)
+
+    # v_in reused from P_0 for most leaves (parent/grandparent are internal, unchanged)
+    v_in_p0 = pre_geom_p0['v_in']                           # (N, 3)
+    has_gp_p0 = pre_geom_p0['has_gp']                       # (N,) bool
+    v_in_leaf = v_in_p0[leaf_idx_train]                      # (L, 3)
+
+    # For root-child leaves (no grandparent): v_in = v_out (current EGNN fallback behaviour)
+    is_root_child_leaf = ~has_gp_p0[leaf_idx_train] & (parent[leaf_idx_train] >= 0)
+    if is_root_child_leaf.any():
+        v_in_leaf = v_in_leaf.clone()
+        v_in_leaf[is_root_child_leaf] = v_out_new[is_root_child_leaf]
+
+    # Perpendicular projections
+    du_in = (v_in_leaf @ uhat).unsqueeze(-1)                 # (L, 1)
+    du_out = (v_out_new @ uhat).unsqueeze(-1)                # (L, 1)
+    v_in_perp = v_in_leaf - du_in * uhat                     # (L, 3)
+    v_out_perp = v_out_new - du_out * uhat                   # (L, 3)
+
+    nin = v_in_perp.norm(dim=-1, keepdim=True)
+    nout = v_out_perp.norm(dim=-1, keepdim=True)
+    v_in_unit = v_in_perp / (nin + eps)
+    v_out_unit = v_out_perp / (nout + eps)
+
+    cospsi_leaf = (v_in_unit * v_out_unit).sum(dim=-1, keepdim=True)
+    cross = th.cross(v_in_unit, v_out_unit, dim=-1)
+    sinpsi_leaf = (cross * uhat).sum(dim=-1, keepdim=True)
+
+    v_out_norm = (nout.pow(2) + du_out.pow(2)).sqrt()
+    cos_theta_leaf = du_out / (v_out_norm + eps)
+
+    # For nodes without a valid parent, angles are trivial (shouldn't happen for leaves, but safety)
+    has_parent_leaf = parent[leaf_idx_train] >= 0
+    hp = has_parent_leaf.view(-1, 1)
+    cospsi_leaf = th.where(hp, cospsi_leaf, th.ones_like(cospsi_leaf))
+    sinpsi_leaf = th.where(hp, sinpsi_leaf, th.zeros_like(sinpsi_leaf))
+    cos_theta_leaf = th.where(hp, cos_theta_leaf, th.ones_like(cos_theta_leaf))
+
+    # Clone node-level tensors and scatter patched values at leaf indices
+    cospsi_node = pre_geom_p0['cospsi_node'].clone()
+    sinpsi_node = pre_geom_p0['sinpsi_node'].clone()
+    cos_theta_node = pre_geom_p0['cos_theta_node'].clone()
+    cospsi_node[leaf_idx_train] = cospsi_leaf
+    sinpsi_node[leaf_idx_train] = sinpsi_leaf
+    cos_theta_node[leaf_idx_train] = cos_theta_leaf
+
+    # --- 3. Patch edge-level quantities for affected edges ---
+    rel_coors = pre_geom_p0['rel_coors'].clone()
+    rel_coors_new = P_t[dst[affected]] - P_t[src[affected]]
+    rel_coors[affected] = rel_coors_new
+
+    du_edge = pre_geom_p0['du'].clone()                      # (E, 1)
+    rho_edge = pre_geom_p0['rho'].clone()                    # (E, 1)
+    r_perp_edge = pre_geom_p0['r_perp'].clone()              # (E, 3)
+
+    du_new = (rel_coors_new @ uhat).unsqueeze(-1)            # (A, 1)
+    r_par_new = du_new * uhat                                # (A, 3)
+    r_perp_new = rel_coors_new - r_par_new                   # (A, 3)
+    rho_new = r_perp_new.norm(dim=-1, keepdim=True).clamp_min(eps)  # (A, 1)
+
+    du_edge[affected] = du_new
+    rho_edge[affected] = rho_new
+    r_perp_edge[affected] = r_perp_new
+
+    # Reassign edge angle features from patched node angles
+    cospsi_edge, sinpsi_edge = assign_branch_angles_to_edges(
+        edge_index, parent_idx, cospsi_node, sinpsi_node,
+    )
+    cos_theta_edge = assign_parent_scalar_to_edges(
+        edge_index, parent_idx, cos_theta_node,
+    )
+
+    return {
+        'rel_coors': rel_coors,
+        'r_perp': r_perp_edge,
+        'rho': rho_edge,
+        'du': du_edge,
+        'cospsi_edge': cospsi_edge,
+        'sinpsi_edge': sinpsi_edge,
+        'cos_theta_edge': cos_theta_edge,
+        'cospsi_node': cospsi_node,
+        'sinpsi_node': sinpsi_node,
+        'cos_theta_node': cos_theta_node,
+    }
 
 
 def decode_parent_indices(batch) -> th.Tensor:

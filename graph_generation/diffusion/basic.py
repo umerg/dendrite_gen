@@ -6,6 +6,8 @@ import torch as th
 import torch.nn.functional as F
 from torch.nn import Module
 
+from graph_generation.method.helpers import patch_geometry_for_noised_leaves
+
 logger = logging.getLogger(__name__)
 
 
@@ -37,6 +39,7 @@ class DenoisingDiffusionModel(Module):
         leaf_parent_idx: th.Tensor,
         model: Module,
         tmd: th.Tensor | None = None,
+        pre_geom_p0: dict | None = None,
     ) -> tuple[th.Tensor, th.Tensor]:
         """Compute σ-conditioned denoising losses for positional + expansion targets."""
         device = P_0.device
@@ -71,6 +74,14 @@ class DenoisingDiffusionModel(Module):
         P_t = P_0.clone()
         P_t[leaf_idx_train] = P_0[leaf_parent_idx] + C_t
 
+        # Patch precomputed P_0 geometry for noised leaf positions
+        pre_geom = None
+        if pre_geom_p0 is not None:
+            pre_geom = patch_geometry_for_noised_leaves(
+                pre_geom_p0, P_t, leaf_idx_train, parent_idx,
+                edge_index, model.uhat,
+            )
+
         N = P_0.size(0)
         e_feat = P_0.new_zeros((N, 1))
         e_feat[leaf_idx_train] = e_t
@@ -88,6 +99,7 @@ class DenoisingDiffusionModel(Module):
             edge_attr=edge_attr,
             parent_idx=parent_idx,
             tmd=tmd,
+            pre_geom=pre_geom,
         )
         if device.type == 'cuda':
             th.cuda.synchronize(device)
