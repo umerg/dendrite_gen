@@ -321,9 +321,12 @@ def compute_geo_lr_mask(
         multi_root_ch  = parent_is_root_node & (sibling_count > 1)
         lr_mask = lr_mask.masked_fill(single_root_ch, True)
         if multi_root_ch.any():
-            lr_mask[multi_root_ch] = (
-                pos[multi_root_ch, -1] >= pos[parent_clamped[multi_root_ch], -1]
-            )
+            # Compare root children with each other (not with root).
+            # Convention: lower z = left (True), higher z = right (False).
+            z_rc = pos[multi_root_ch, -1]
+            p_rc = parent_clamped[multi_root_ch]
+            max_z = scatter(z_rc, p_rc, dim=0, dim_size=N, reduce='max')
+            lr_mask[multi_root_ch] = z_rc < max_z[p_rc] - 1e-7
     handled_parents = is_root                                      # [N] bool
 
     # --- vectorized binary-parent handling (replaces loop over unique_parents) ---
@@ -717,7 +720,10 @@ def select_training_leaf_indices(batch, candidate_attr: str = "new_leaf_idx_from
         raise ValueError("Expected batch.leaf_idx to select leaves for training.")
     candidate = getattr(batch, candidate_attr, None)
     if candidate is None:
-        return base
+        raise ValueError(
+            f"Expected batch.{candidate_attr} to be set (even if empty), "
+            f"but got None. Check your dataset/collation."
+        )
     if isinstance(candidate, th.Tensor):
         new_idx = candidate.to(device=base.device, dtype=base.dtype)
     else:

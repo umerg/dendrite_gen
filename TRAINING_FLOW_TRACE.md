@@ -215,11 +215,10 @@ leaf_expansion_all = batch.leaf_expansion - 1         # [L_total] map {1,2} -> {
 leaf_idx_train = select_training_leaf_indices(batch)  # [L] subset for training
 ```
 
-<!-- <CHNAGE> THE FOLLOWING MAY CUASE SILENT FAILURE - CHANGE THIS TO BREAK IF NEW LEAVES NOT PRESENT -->
 `select_training_leaf_indices` (`helpers.py:713-736`) checks for `batch.new_leaf_idx_from_next`:
 - If present and non-empty, uses those indices (the "new" leaves from the next reduction level)
-- Falls back to `batch.leaf_idx` if not available
-- Filters out any indices where `leaf_mask` is False (safety check). 
+- If `None`, raises `ValueError` — the dataset always creates this attribute (even if empty), so `None` indicates a data pipeline bug
+- Filters out any indices where `leaf_mask` is False (safety check).
 
 ### 5c: Get parent indices for training leaves
 
@@ -323,8 +322,7 @@ This assigns a boolean left/right label to every node based on its geometric rel
    cross = th.cross(v_in_unit, v_out_unit, dim=-1)
    sinpsi = (cross * uhat_vec).sum(dim=-1, keepdim=True)
    ```
-   <!-- <CLARIFY> WHEN VIEWED ALONG uhat? SHOULD THIS NOT BE IN THE PLANE PERPENDICULAR TO uhat? -->
-   `sinpsi` is the signed angle component: positive means "left" of the incoming direction when viewed along `uhat`.
+   `sinpsi` is the signed in-plane angle component. Since `v_in_unit` and `v_out_unit` both lie in the plane perpendicular to `uhat` (projected in step 4), their cross product `v_in_unit × v_out_unit` is a vector parallel (or anti-parallel) to `uhat`. Dotting with `uhat` extracts the signed sine of the rotation angle *within that perpendicular plane*. The sign follows the right-hand rule: positive means the rotation from `v_in` to `v_out` is counterclockwise when looking down the `+uhat` axis, which defines the "left" side.
 
 6. **Root children handling** (lines 309-327):
 
@@ -338,12 +336,14 @@ This assigns a boolean left/right label to every node based on its geometric rel
    **Two root children**:
    ```python
    multi_root_ch = parent_is_root_node & (sibling_count > 1)
-   lr_mask[multi_root_ch] = (
-       pos[multi_root_ch, -1] >= pos[parent_clamped[multi_root_ch], -1]
-   )
+   # Compare root children with each other (not with root).
+   # Convention: lower z = left (True), higher z = right (False).
+   z_rc = pos[multi_root_ch, -1]
+   p_rc = parent_clamped[multi_root_ch]
+   max_z = scatter(z_rc, p_rc, dim=0, dim_size=N, reduce='max')
+   lr_mask[multi_root_ch] = z_rc < max_z[p_rc] - 1e-7
    ```
-   <!-- <CLARIFY> THE GOAL OF THIS COMPARISON SHOULD HAVE BEEN TO COMPARE THE TWO SIBLINGS BUT IT FEELS LIKE WE ARE COMPARING EACH SIBLING WITH ROOT? -->
-   For two children of the root, the child with **higher z-coordinate** (last component, aligned with `uhat=[0,0,1]`) is labeled left. This is a **position-based** assignment using the uhat axis directly, NOT the sinpsi angle (because root children have no grandparent to define a meaningful `v_in`).
+   For root children, the comparison is **sibling-vs-sibling**: `scatter(..., reduce='max')` finds the maximum z among each root's children, and the child with lower z is assigned left (`True`), the child with higher z is assigned right (`False`). This correctly differentiates siblings even when both lie on the same side of the root along `uhat`, matching the behaviour of the reference implementation (`compute_geo_lr_mask_f2`). This is a **position-based** assignment using the uhat axis directly, NOT the sinpsi angle (because root children have no grandparent to define a meaningful `v_in`).
 
 7. **Binary (non-root) parent handling** (lines 329-366):
 
@@ -539,9 +539,8 @@ new_flag = pos_gt.new_zeros((pos_gt.size(0), 1))
 new_flag[leaf_idx_next] = 1.0
 features.append(new_flag)                              # [N, 1]
 
-# <CLARIFY> IS SIZE STILL OPTIONAL?
-
-# 4. Size ratio
+# 4. Size ratio (OPTIONAL: controlled by `self.use_size_ratio`, default `True`)
+# Only included if `use_size_ratio=True` AND `feats_used < avail_feats_dim`
 ratio_graph = node_counts / target_sizes.clamp_min(1.0)
 ratio_nodes = ratio_graph[batch_vec].unsqueeze(-1)
 features.append(ratio_nodes)                           # [N, 1]
@@ -552,11 +551,12 @@ features.append(pad)
 
 node_feats = th.cat(features, dim=-1)                  # [N, avail_feats_dim]
 ```
-<!-- <CLARIFY> THIS IS INTERESTING - CATEGORICAL EDGE FEATS ARE EMBEDDED INSIDE THE SO2 MODEL - IS IT CORRECT TO CONVERT TO FLOAT? IS THIS WHAT WE DID PREVIOUSLY? -->
 **Edge attributes**:
 ```python
 edge_attr = edge_types.unsqueeze(-1).to(pos_gt.dtype)  # [E, 1] values 0.0 or 1.0
 ```
+
+> **Note on float conversion**: The conversion to float here is technically redundant. Inside the model, `embedd_token()` (`egnn_pytorch.py:43-52`) calls `.long()` on the last column(s) of `edge_attr` before passing them to `nn.Embedding` layers (configured with `edge_embedding_nums=[2], edge_embedding_dims=[4]`). So the flow is: int {0,1} -> float {0.0, 1.0} -> long {0, 1} -> embedding lookup. The float cast is harmless (`.long()` on 0.0/1.0 recovers the original ints) but unnecessary. This pattern was inherited from the original EGNN codebase where edge_attr could mix continuous and categorical features in the same tensor -- the last `len(edge_embedding_dims)` columns are treated as categorical indices (cast to long for embedding), while earlier columns remain as continuous floats.
 
 ---
 
@@ -991,9 +991,9 @@ The model is trained to denoise: given noised leaf positions and expansion signa
 
 **geo_lr_mask**:
 - `multi_root_ch` is True for nodes 1 and 2
-- Assignment: `lr_mask[i] = pos[i, -1] >= pos[parent[i], -1]`
-- The child with higher z-coordinate (along uhat) is "left"
-- This uses **absolute position** rather than angular geometry (no meaningful `v_in` for root children)
+- Assignment: siblings are compared with each other via `scatter(..., reduce='max')` on z-coordinates
+- The child with **lower** z-coordinate is "left" (`True`), higher z is "right" (`False`)
+- This uses **sibling-relative position** rather than angular geometry (no meaningful `v_in` for root children)
 
 **Branch angles**:
 - Both nodes 1 and 2 have `has_gp = False`
@@ -1001,7 +1001,7 @@ The model is trained to denoise: given noised leaf positions and expansion signa
 - `cospsi = 1, sinpsi = 0` for both
 - `cos_theta` differs based on their different positions
 
-**Key insight**: For root children, the geo_lr_mask uses a **different method** than the branch angles. The L/R label comes from z-coordinate comparison (absolute, position-based), while the angles use the `v_in = v_out` fallback (giving trivial cospsi=1, sinpsi=0). These are independent features serving different purposes: geo_lr breaks symmetry as a node feature, while angles provide edge-level geometric context.
+**Key insight**: For root children, the geo_lr_mask uses a **different method** than the branch angles. The L/R label comes from sibling-vs-sibling z-coordinate comparison (position-based), while the angles use the `v_in = v_out` fallback (giving trivial cospsi=1, sinpsi=0). These are independent features serving different purposes: geo_lr breaks symmetry as a node feature, while angles provide edge-level geometric context.
 
 ### Case 3: Two-node tree (root + one leaf)
 
