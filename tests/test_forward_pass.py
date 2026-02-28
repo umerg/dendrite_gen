@@ -216,6 +216,85 @@ def test_forward_pass():
     print(f"rel_pred mean norm: {rel_pred.norm(dim=-1).mean().item():.4f}")
 
 
+def test_precomputed_dataset():
+    """Verify PrecomputedRedDataset precomputes all samples at init and yields valid batches."""
+    seed = 456
+    th.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+
+    graphs = _generate_graphs(num_graphs=4, n_min=20, n_max=40, seed=seed)
+    adjs, poses = [], []
+    for G in graphs:
+        A, P, _ = nx_graph_to_adj_pos(G)
+        adjs.append(A)
+        poses.append(P)
+
+    red_factory = gg.depth_reduction.DepthReductionFactory(
+        mode="deterministic",
+        cherry_p=1.0,
+        ensure_progress=True,
+        root=0,
+        contract_root=False,
+    )
+
+    dataset = gg.data.PrecomputedRedDataset(adjs=adjs, poses=poses, red_factory=red_factory)
+
+    # 1) All samples precomputed at init
+    assert len(dataset.samples) > 0, "PrecomputedRedDataset should have precomputed samples"
+    print(f"Precomputed {len(dataset.samples)} samples from {len(adjs)} graphs")
+
+    # 2) Each sample is a ReducedGraphData with expected fields
+    from graph_generation.data import ReducedGraphData
+    for i, s in enumerate(dataset.samples[:5]):
+        assert isinstance(s, ReducedGraphData), f"Sample {i} is not ReducedGraphData"
+        assert hasattr(s, "adj"), f"Sample {i} missing adj"
+        assert hasattr(s, "pos"), f"Sample {i} missing pos"
+        assert hasattr(s, "leaf_idx"), f"Sample {i} missing leaf_idx"
+        assert hasattr(s, "parent_idx_1b"), f"Sample {i} missing parent_idx_1b"
+
+    # 3) Deterministic: rebuilding gives same sample count
+    dataset2 = gg.data.PrecomputedRedDataset(adjs=adjs, poses=poses, red_factory=red_factory)
+    assert len(dataset2.samples) == len(dataset.samples), \
+        "Deterministic reduction should produce same number of samples"
+
+    # 4) DataLoader integration: draw batches from the infinite iterator
+    loader = DataLoader(
+        dataset,
+        batch_size=2,
+        shuffle=False,
+        pin_memory=False,
+        collate_fn=Batch.from_data_list,
+        num_workers=0,
+    )
+    it = iter(loader)
+    for _ in range(3):
+        batch = next(it)
+        assert batch.num_nodes > 0, "Batch should have nodes"
+        assert batch.x.shape[1] == 3, "Expected 3D positions"
+        assert hasattr(batch, "leaf_idx"), "Batch missing leaf_idx"
+
+    # 5) Forward pass through model works with precomputed data
+    cfg = _make_minimal_cfg()
+    model, method = _init_model_and_method(cfg)
+    device = "cuda" if th.cuda.is_available() else "cpu"
+    model = model.to(device)
+    method = method.to(device)
+
+    batch = next(it).to(device)
+    from torch_geometric.utils import to_edge_index as _to_edge_index
+    ei_tmp, _ = _to_edge_index(batch.adj)
+    if ei_tmp.numel() > 0:
+        loss, metrics = method.get_loss(batch=batch, model=model)
+        assert math.isfinite(float(loss.item())), "Loss must be finite"
+        print(f"Precomputed forward pass OK | N={batch.num_nodes} | loss={loss.item():.4f}")
+    else:
+        print("Skipped forward pass (degenerate batch with no edges)")
+
+    print("test_precomputed_dataset PASSED")
+
+
 if __name__ == "__main__":  # Allow ad-hoc execution
     test_forward_pass()
+    test_precomputed_dataset()
     print("Manual run complete.")

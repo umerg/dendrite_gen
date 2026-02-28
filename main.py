@@ -53,22 +53,26 @@ def get_expansion_items(cfg: DictConfig, train_graphs, diffusion=None):
     print("Extraction done.")
 
     print("Creating training reduction sequences...")
-    train_dataset = gg.data.InfiniteRandRedDataset(
-        adjs=adjs,
-        poses=poses,
-        tmds=tmds,
-        red_factory=red_factory,
-    ) # support only for infinite random reduction dataset for expansion
+    # When depth reduction is deterministic, precompute all sequences once
+    if reduction_type == "depth":
+        train_dataset = gg.data.PrecomputedRedDataset(
+            adjs=adjs, poses=poses, tmds=tmds, red_factory=red_factory,
+        )
+        num_workers = 0  # data is precomputed, no worker computation needed
+    else:
+        train_dataset = gg.data.InfiniteRandRedDataset(
+            adjs=adjs, poses=poses, tmds=tmds, red_factory=red_factory,
+        )
+        is_mp = cfg.reduction.num_red_seqs < 0  # if infinite dataset
+        num_workers = min(mp.cpu_count(), cfg.training.max_num_workers) * is_mp
     print("Training reduction sequences created.")
 
     # Dataloader
-    is_mp = cfg.reduction.num_red_seqs < 0  # if infinite dataset
-    num_workers = min(mp.cpu_count(), cfg.training.max_num_workers) * is_mp
     train_dataloader = DataLoader(
         train_dataset,
         batch_size=cfg.training.batch_size,
         shuffle=False,
-        pin_memory=True, 
+        pin_memory=True,
         collate_fn=Batch.from_data_list,
         num_workers=num_workers,
         multiprocessing_context="spawn" if num_workers > 0 else None,

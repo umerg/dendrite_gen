@@ -136,6 +136,35 @@ class FiniteRandRedDataset(RandRedDataset):
             yield seq[j]
 
 
+class PrecomputedRedDataset(RandRedDataset):
+    """
+    Precompute all deterministic reduction sequences once.
+    One epoch = one pass through all samples (N graphs × M_i levels each).
+    Infinite iteration: reshuffles after each epoch.
+    """
+    def __init__(self, adjs, poses, red_factory: ReductionFactory, tmds=None):
+        super().__init__(adjs, poses, red_factory, tmds=tmds)
+        self.samples = []
+        rng = np.random.default_rng(seed=0)
+
+        for i, adj in enumerate(adjs):
+            graph = red_factory(adj, rng=rng)
+            pos = self.poses[i].copy()
+            tmd = self.tmds[i] if self.tmds is not None else None
+            seq = self.get_random_reduction_sequence(graph, pos, rng, tmd=tmd)
+            self.samples.extend(seq)
+
+        print(f"Precomputed {len(self.samples)} samples from {len(adjs)} graphs")
+
+    def __iter__(self):
+        rng = np.random.default_rng(seed=42)
+        indices = np.arange(len(self.samples))
+        while True:  # infinite iteration for step-based training
+            rng.shuffle(indices)
+            for i in indices:
+                yield self.samples[int(i)]
+
+
 class InfiniteRandRedDataset(RandRedDataset):
     """
     Infinite stream: cache one sampled sequence per graph, pop elements randomly;
