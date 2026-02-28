@@ -36,13 +36,11 @@ class Expansion(Method):
     def __init__(
         self,
         diffusion: Module | None = None,
-        deterministic_expansion: bool = False,      # just sets seeding for reproducibility
         red_threshold: int = 0,
         expansion_loss_weight: float = 1.0,
         use_size_ratio: bool = True,
     ):
         super().__init__(diffusion=diffusion)
-        self.deterministic_expansion = deterministic_expansion
         self.red_threshold = red_threshold
         self.expansion_loss_weight = float(expansion_loss_weight)
         self.use_size_ratio = use_size_ratio
@@ -103,7 +101,6 @@ class Expansion(Method):
                 leaf_mask=leaf_mask,
                 tmd=tmd,
                 step=step,
-                ensure_progress=False,
             )
             step += 1
 
@@ -139,7 +136,6 @@ class Expansion(Method):
         geo_lr_assign: th.Tensor | None = None,
         tmd: th.Tensor | None = None,
         step: int = 0,
-        ensure_progress: bool = False,
         map_threshold: float = 0.0,
     ):
         """Expand graphs by one generation step using binary leaf branching.
@@ -196,48 +192,6 @@ class Expansion(Method):
         if is_root_leaf.any():
             root_should_spawn = (target_size[leaf_batch] > 1).long()
             spawn_counts_final = th.where(is_root_leaf, root_should_spawn, spawn_counts_final)
-
-        # Deterministic capacity cut-off (DISABLED)
-        
-        # for g in range(num_graphs):
-        #     cap = int(remaining_capacity[g].item())
-        #     if cap < 2:
-        #         spawn_counts_final[leaf_batch == g] = 0
-        #         continue
-        #     mask_g = leaf_batch == g
-        #     expanders = th.nonzero((spawn_counts_final == 2) & mask_g, as_tuple=False).flatten()
-        #     needed = expanders.numel() * 2
-        #     if needed <= cap:
-        #         continue
-        #     max_leaves = cap // 2
-        #     if max_leaves <= 0:
-        #         spawn_counts_final[expanders] = 0
-        #         continue
-        #     if self.deterministic_expansion:
-        #         generator = th.Generator(device=expanders.device)
-        #         generator.manual_seed(g * 10007 + step)
-        #         perm = th.randperm(expanders.numel(), generator=generator, device=expanders.device)
-        #     else:
-        #         perm = th.randperm(expanders.numel(), device=expanders.device)
-        #     disable = expanders[perm[max_leaves:]]
-        #     spawn_counts_final[disable] = 0
-
-        if ensure_progress and (remaining_capacity >= 2).any():
-            for g in range(num_graphs):
-                if remaining_capacity[g] < 2:
-                    continue
-                mask_g = leaf_batch == g
-                if not mask_g.any():
-                    continue
-                if (spawn_counts_final[mask_g] == 2).any():
-                    continue
-                leaf_indices_g = th.nonzero(mask_g, as_tuple=False).flatten()
-                if self.deterministic_expansion:
-                    forced = leaf_indices_g[0]
-                else:
-                    rand_idx = th.randint(0, leaf_indices_g.numel(), (1,), device=leaf_indices_g.device)
-                    forced = leaf_indices_g[rand_idx]
-                spawn_counts_final[forced] = 2
 
         total_new_children = int(spawn_counts_final.sum().item())
         if total_new_children == 0:

@@ -105,7 +105,7 @@ def _make_cfg():
             m_dim=16,
             dropout=0.0,
         ),
-        method=SimpleNamespace(name="expansion", deterministic_expansion=False),
+        method=SimpleNamespace(name="expansion"),
         reduction=SimpleNamespace(mode="stochastic", cherry_p=0.8, ensure_progress=True, root=0, contract_root=False,
                                   num_red_seqs=-1, red_threshold=0),
         training=SimpleNamespace(batch_size=2, lr=1e-3, num_steps=3, log_interval=1, save_checkpoint=False, resume=False, max_num_workers=0),

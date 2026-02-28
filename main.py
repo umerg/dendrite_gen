@@ -156,7 +156,6 @@ def get_expansion_items(cfg: DictConfig, train_graphs, diffusion=None):
         use_size_ratio = getattr(cfg.method, "use_size_ratio", True)
         method = gg.method.Expansion(
             diffusion=diffusion,
-            deterministic_expansion=cfg.method.deterministic_expansion,
             red_threshold=cfg.reduction.red_threshold,
             expansion_loss_weight=expansion_loss_weight,
             use_size_ratio=use_size_ratio,

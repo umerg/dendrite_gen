@@ -32,9 +32,9 @@ class MockModel(nn.Module):
         return {'rel_pred': rel_pred, 'expansion_pred': logits}
 
 
-def run_generation(target_sizes, deterministic=False):
+def run_generation(target_sizes):
     diffusion = DenoisingDiffusionModel(num_steps=1)
-    method = Expansion(diffusion=diffusion, deterministic_expansion=deterministic)
+    method = Expansion(diffusion=diffusion)
     device = target_sizes.device
     model = MockModel().to(device)
     graphs = method.sample_graphs(target_sizes, model)
@@ -99,7 +99,7 @@ def plot_generation_history(histories, target_sizes, fname):
 def test_expansion_generation_basic():
     # Small batch of 4 graphs with varied target sizes
     target_sizes = th.tensor([4, 8, 10, 16])
-    graphs = run_generation(target_sizes, deterministic=True)
+    graphs = run_generation(target_sizes)
 
     # Assertions: correct number of graphs, each non-empty
     assert len(graphs) == 4, "Should return 4 graphs"
@@ -112,7 +112,7 @@ def test_expansion_generation_history_and_plot():
     target_sizes = th.tensor([5, 6, 7, 8])
     device = target_sizes.device
     diffusion = DenoisingDiffusionModel(num_steps=1)
-    method = Expansion(diffusion=diffusion, deterministic_expansion=True)
+    method = Expansion(diffusion=diffusion)
     model = MockModel().to(device)
 
     # Manual step-by-step to capture histories
@@ -145,7 +145,6 @@ def test_expansion_generation_history_and_plot():
             geo_lr_assign=geo_lr_assign,
             leaf_mask=leaf_mask,
             step=step,
-            ensure_progress=True,
             map_threshold=0.5,
         )
         step += 1
