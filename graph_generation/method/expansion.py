@@ -384,13 +384,13 @@ class Expansion(Method):
                 )
 
         _t_geo_lr_mask = _t(device) - _t_geo_0
-        logger.info(
-            "[expand step=%d N=%d L=%d] leaf_loop=%.4fs cat_growth=%.4fs "
-            "sparse_rebuild=%.4fs diffusion_sample=%.4fs geo_lr_mask=%.4fs total=%.4fs",
-            step, pos_new.size(0), int(leaf_idx_next.numel()),
-            _t_leaf_loop, _t_cat_growth, _t_sparse_rebuild,
-            _t_diffusion_sample, _t_geo_lr_mask, _t(device) - _t_start,
-        )
+        # logger.info(
+        #     "[expand step=%d N=%d L=%d] leaf_loop=%.4fs cat_growth=%.4fs "
+        #     "sparse_rebuild=%.4fs diffusion_sample=%.4fs geo_lr_mask=%.4fs total=%.4fs",
+        #     step, pos_new.size(0), int(leaf_idx_next.numel()),
+        #     _t_leaf_loop, _t_cat_growth, _t_sparse_rebuild,
+        #     _t_diffusion_sample, _t_geo_lr_mask, _t(device) - _t_start,
+        # )
 
         if exp_pred.dim() == 1:
             exp_pred = exp_pred.unsqueeze(-1)
@@ -621,11 +621,11 @@ class Expansion(Method):
             pre_geom_p0=pre_geom_p0,
         )
         _t_diff_loss = _t(pos_gt.device) - _t_diff_loss_0
-        logger.info(
-            "[get_loss N=%d L=%d] geo_lr_mask=%.4fs diffusion_forward=%.4fs",
-            int(pos_gt.size(0)), int(leaf_idx_train.numel()),
-            _t_geo_lr_loss, _t_diff_loss,
-        )
+        # logger.info(
+        #     "[get_loss N=%d L=%d] geo_lr_mask=%.4fs diffusion_forward=%.4fs",
+        #     int(pos_gt.size(0)), int(leaf_idx_train.numel()),
+        #     _t_geo_lr_loss, _t_diff_loss,
+        # )
 
         loss = position_loss + self.expansion_loss_weight * expansion_loss
         metrics = {

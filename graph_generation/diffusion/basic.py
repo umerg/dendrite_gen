@@ -104,10 +104,10 @@ class DenoisingDiffusionModel(Module):
         )
         if device.type == 'cuda':
             th.cuda.synchronize(device)
-        logger.info(
-            "[diffusion.forward N=%d L=%d] model_call=%.4fs",
-            P_0.size(0), num_leaves, time.perf_counter() - _t0_model,
-        )
+        # logger.info(
+        #     "[diffusion.forward N=%d L=%d] model_call=%.4fs",
+        #     P_0.size(0), num_leaves, time.perf_counter() - _t0_model,
+        # )
         if not isinstance(out, dict):
             raise ValueError("Model must return dict with 'rel_pred' and 'expansion_pred'.")
         rel_pred_all = out["rel_pred"]
@@ -232,9 +232,9 @@ class DenoisingDiffusionModel(Module):
             C = C0_pred + sigma_next * eps_C
             e = e0_pred + sigma_next * eps_e
 
-        logger.info(
-            "[diffusion.sample num_steps=%d N=%d L=%d] "
-            "clone_total=%.4fs alloc+cat_total=%.4fs model_total=%.4fs",
-            self.num_steps, N, L, _acc_clone, _acc_alloc, _acc_model,
-        )
+        # logger.info(
+        #     "[diffusion.sample num_steps=%d N=%d L=%d] "
+        #     "clone_total=%.4fs alloc+cat_total=%.4fs model_total=%.4fs",
+        #     self.num_steps, N, L, _acc_clone, _acc_alloc, _acc_model,
+        # )
         return C0_pred, e0_pred
