@@ -1,8 +1,8 @@
 """Training loop smoke test.
 
 Constructs synthetic binary trees, builds InfiniteRandRedDataset, instantiates
-SO2_EGNN_Sparse_Network + Expansion_OneShot + Trainer, and runs a very short
-training loop (few steps) with validation disabled.
+SO2_EGNN_Network + Expansion + DenoisingDiffusionModel + Trainer, and runs a
+very short training loop (few steps) with validation disabled.
 
 Goals:
   * Exercise Trainer.run_step path (forward, loss, backward, optimizer, EMA update).
@@ -98,21 +98,16 @@ def _make_cfg():
     return SimpleNamespace(
         name="training_smoke",
         debugging=False,
-        # Added global linear attention config parameters required by updated SO2_EGNN_Sparse_Network
         model=SimpleNamespace(
             name="egnn",
             num_layers=2,
             feats_dim=4,
             m_dim=16,
             dropout=0.0,
-            global_linear_attn_every=1,        # enable global attention every layer
-            global_linear_attn_heads=4,
-            global_linear_attn_dim_head=32,
-            num_global_tokens=2,
         ),
-        method=SimpleNamespace(name="expansion", deterministic_expansion=False, leaf_noise_sigma=0.05, leaf_noise_clip=None),
+        method=SimpleNamespace(name="expansion", deterministic_expansion=False),
         reduction=SimpleNamespace(mode="stochastic", cherry_p=0.8, ensure_progress=True, root=0, contract_root=False,
-                                  num_red_seqs=-1, min_red_frac=0.0, max_red_frac=0.5, red_threshold=0),
+                                  num_red_seqs=-1, red_threshold=0),
         training=SimpleNamespace(batch_size=2, lr=1e-3, num_steps=3, log_interval=1, save_checkpoint=False, resume=False, max_num_workers=0),
         validation=SimpleNamespace(interval=0, first_step=0, batch_size=None, per_graph_size=False),
         ema=SimpleNamespace(betas=[1], gamma=1.0, power=1.0),
@@ -133,28 +128,20 @@ def test_training_smoke():
 
     loader = _build_dataloader(graphs_train, cfg)
 
-    model = gg.model.SO2_EGNN_Sparse_Network(
+    model = gg.model.SO2_EGNN_Network(
         n_layers=cfg.model.num_layers,
         feats_dim=cfg.model.feats_dim,
         pos_dim=3,
         m_dim=cfg.model.m_dim,
         dropout=cfg.model.dropout,
-        global_linear_attn_every=cfg.model.global_linear_attn_every,
-        global_linear_attn_heads=cfg.model.global_linear_attn_heads,
-        global_linear_attn_dim_head=cfg.model.global_linear_attn_dim_head,
-        num_global_tokens=cfg.model.num_global_tokens,
+        edge_attr_dim=1,  # Expansion builds directed edge types of dim 1
     )
-    method = gg.method.Expansion_OneShot(
-        deterministic_expansion=cfg.method.deterministic_expansion,
-        min_red_frac=cfg.reduction.min_red_frac,
-        max_red_frac=cfg.reduction.max_red_frac,
+    from graph_generation.diffusion.basic import DenoisingDiffusionModel
+    diffusion = DenoisingDiffusionModel(num_steps=1)
+    method = gg.method.Expansion(
+        diffusion=diffusion,
         red_threshold=cfg.reduction.red_threshold,
-        leaf_noise_sigma=cfg.method.leaf_noise_sigma,
-        leaf_noise_clip=cfg.method.leaf_noise_clip,
     )
-
-    # Sanity: ensure global attention is enabled
-    assert hasattr(model, "global_linear_attn_every") and model.global_linear_attn_every > 0, "Global attention config not applied"
 
     # Quick loss path smoke before trainer: ensures expansion state loss present
     sample_batch = next(iter(loader))

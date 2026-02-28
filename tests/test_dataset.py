@@ -417,7 +417,7 @@ def collect_full_sequence(adj: sp.csr_matrix, pos: np.ndarray, red_factory: Redu
     # Keep reducing until no contraction
     pos_curr = pos.copy()
     while True:
-        nxt = cr.get_reduced_graph(rng)
+        nxt = cr.get_reduced_graph()
         if not nxt.did_contract:
             break
         pos_curr = pos_curr[nxt.survivor_mask]

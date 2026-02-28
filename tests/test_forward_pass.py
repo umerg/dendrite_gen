@@ -1,10 +1,10 @@
-"""Forward pass smoke test for SO2_EGNN_Sparse_Network using
+"""Forward pass smoke test for SO2_EGNN_Network using
 the random reduction dataset pipeline.
 
 This test builds a small synthetic set of tree graphs (acting as dendrite
 branch graphs), converts them to adjacency + positions, wraps them in the
 InfiniteRandRedDataset, draws one batch, and runs a single forward + loss
-computation through Expansion_OneShot.
+computation through Expansion + DenoisingDiffusionModel.
 
 Rationale:
   * Avoid external S3 + skeleton_plot dependencies for a lightweight test.
@@ -109,20 +109,19 @@ def _build_dataset(graphs, cfg):
 def _init_model_and_method(cfg):
     if cfg.model.name != "egnn":
         raise ValueError("Test currently only set up for cfg.model.name == 'egnn'.")
-    model = gg.model.SO2_EGNN_Sparse_Network(
+    model = gg.model.SO2_EGNN_Network(
         n_layers=cfg.model.num_layers,
         feats_dim=cfg.model.feats_dim,
         pos_dim=3,
         m_dim=cfg.model.m_dim,
         dropout=cfg.model.dropout,
+        edge_attr_dim=1,  # Expansion builds directed edge types of dim 1
     )
-    method = gg.method.Expansion_OneShot(
-        deterministic_expansion=cfg.method.deterministic_expansion,
-        min_red_frac=cfg.reduction.min_red_frac,
-        max_red_frac=cfg.reduction.max_red_frac,
+    from graph_generation.diffusion.basic import DenoisingDiffusionModel
+    diffusion = DenoisingDiffusionModel(num_steps=1)
+    method = gg.method.Expansion(
+        diffusion=diffusion,
         red_threshold=cfg.reduction.red_threshold,
-        leaf_noise_sigma=cfg.method.leaf_noise_sigma,
-        leaf_noise_clip=cfg.method.leaf_noise_clip,
     )
     return model, method
 
@@ -137,16 +136,12 @@ def _make_minimal_cfg():
             ensure_progress=True,
             root=0,  # force root to be node 0
             num_red_seqs=-1,  # infinite
-            min_red_frac=0.0,
-            max_red_frac=0.5,
             red_threshold=0,
             contract_root=False,
         ),
         training=SimpleNamespace(batch_size=2, max_num_workers=0),
         method=SimpleNamespace(
             deterministic_expansion=False,
-            leaf_noise_sigma=0.05,
-            leaf_noise_clip=None,
         ),
     )
 
@@ -188,12 +183,18 @@ def test_forward_pass():
     # Run loss (invokes model forward internally)
     loss, metrics = method.get_loss(batch=batch, model=model)
 
-    # Model produces per-node offsets in metrics via Expansion_OneShot expectations
+    # Model produces per-node offsets in metrics via Expansion expectations
     # Re-run just the forward part explicitly to inspect shapes
     parent_idx = batch.parent_idx_1b - 1
-    from torch_geometric.utils import to_edge_index
-    edge_index, _ = to_edge_index(batch.adj)
     pos_gt = batch.pos
+
+    from graph_generation.method.helpers import build_directed_edge_index
+    edge_index, edge_types = build_directed_edge_index(
+        parent_idx,
+        edge_parent_to_child=0,
+        edge_child_to_parent=1,
+    )
+    edge_attr = edge_types.unsqueeze(-1).to(pos_gt.dtype) if edge_types.numel() else pos_gt.new_zeros((0, 1))
 
     # Minimal feature construction (matches method.get_loss logic)
     is_leaf = pos_gt.new_zeros((pos_gt.size(0), 1))
@@ -201,7 +202,7 @@ def test_forward_pass():
     extra = pos_gt.new_zeros((pos_gt.size(0), cfg.model.feats_dim - 1)) if cfg.model.feats_dim > 1 else None
     node_feats = th.cat([is_leaf, extra], dim=-1) if extra is not None else is_leaf
     x_in = th.cat([pos_gt, node_feats], dim=-1)
-    out = model(x=x_in, edge_index=edge_index, batch=batch.batch, edge_attr=None, parent_idx=parent_idx)
+    out = model(x=x_in, edge_index=edge_index, batch=batch.batch, edge_attr=edge_attr, parent_idx=parent_idx)
     assert isinstance(out, dict) and "rel_pred" in out, "Model forward must return dict with 'rel_pred'."
     rel_pred = out["rel_pred"]
     assert rel_pred.shape[0] == batch.num_nodes and rel_pred.shape[1] == 3, "rel_pred must be [N,3]."

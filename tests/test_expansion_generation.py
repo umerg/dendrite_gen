@@ -4,7 +4,8 @@ import torch as th
 import matplotlib.pyplot as plt
 from torch import nn
 from torch_sparse import SparseTensor
-from graph_generation.method.expansion_oneshot import Expansion_OneShot
+from graph_generation.method.expansion import Expansion
+from graph_generation.diffusion.basic import DenoisingDiffusionModel
 
 PLOTS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'expansion_test_plots')
 os.makedirs(PLOTS_DIR, exist_ok=True)
@@ -19,28 +20,25 @@ class MockModel(nn.Module):
         self.feats_dim = feats_dim
         self.pos_dim = pos_dim
         self.rel_sigma = rel_sigma
+        u = th.tensor([0., 0., 1.], dtype=th.float32)
+        self.register_buffer('uhat', u / u.norm())
 
-    def forward(self, x, edge_index, batch, edge_attr=None, parent_idx=None):  # parent_idx 0-based expected
+    def forward(self, x, edge_index, batch, edge_attr=None,
+                parent_idx=None, tmd=None, pre_geom=None):
         N = x.size(0)
         device = x.device
         rel_pred = th.randn((N, 3), device=device) * self.rel_sigma
-        # Expansion logits: encourage growth early, taper later by using depth proxy if parent_idx available
-        if parent_idx is not None:
-            depth_proxy = (parent_idx + 1).float()  # roots 0 -> 1
-            norm_depth = depth_proxy / (depth_proxy.max().clamp_min(1.0))
-            # Higher depth => slightly less branching probability
-            logits = th.randn((N, 1), device=device) + (0.5 - norm_depth.unsqueeze(-1))
-        else:
-            logits = th.randn((N, 1), device=device)
+        logits = th.randn((N, 1), device=device)
         return {'rel_pred': rel_pred, 'expansion_pred': logits}
 
 
 def run_generation(target_sizes, deterministic=False):
-    method = Expansion_OneShot(deterministic_expansion=deterministic, leaf_noise_sigma=0.05)
+    diffusion = DenoisingDiffusionModel(num_steps=1)
+    method = Expansion(diffusion=diffusion, deterministic_expansion=deterministic)
     device = target_sizes.device
     model = MockModel().to(device)
-    graphs, pos, batch = method.sample_graphs(target_sizes, model)
-    return graphs, pos, batch
+    graphs = method.sample_graphs(target_sizes, model)
+    return graphs
 
 
 def plot_generation_history(histories, target_sizes, fname):
@@ -101,21 +99,20 @@ def plot_generation_history(histories, target_sizes, fname):
 def test_expansion_generation_basic():
     # Small batch of 4 graphs with varied target sizes
     target_sizes = th.tensor([4, 8, 10, 16])
-    graphs, pos, batch = run_generation(target_sizes, deterministic=True)
+    graphs = run_generation(target_sizes, deterministic=True)
 
-    # Assertions: number of graphs & node counts not exceeding target
+    # Assertions: correct number of graphs, each non-empty
     assert len(graphs) == 4, "Should return 4 graphs"
     for g, ts in zip(graphs, target_sizes.tolist()):
-        assert g.number_of_nodes() <= ts, f"Graph exceeds target size {ts}"    
-        # Basic structure sanity: if ts >=3 expect branching beyond root
-        if ts >= 3:
-            assert g.number_of_nodes() >= 1, "Graph should at least have root"
+        assert g.number_of_nodes() >= 1, "Graph should at least have root"
+        # Note: Expansion does not enforce hard capacity limits, so graphs may exceed target_size
 
 
 def test_expansion_generation_history_and_plot():
     target_sizes = th.tensor([5, 6, 7, 8])
     device = target_sizes.device
-    method = Expansion_OneShot(deterministic_expansion=True, leaf_noise_sigma=0.05)
+    diffusion = DenoisingDiffusionModel(num_steps=1)
+    method = Expansion(diffusion=diffusion, deterministic_expansion=True)
     model = MockModel().to(device)
 
     # Manual step-by-step to capture histories
@@ -130,6 +127,8 @@ def test_expansion_generation_history_and_plot():
     parent_idx_1b = th.zeros(num_graphs, device=device, dtype=th.long)
     leaf_idx = th.arange(num_graphs, device=device, dtype=th.long)
     leaf_expansion = th.where(target_sizes >= 3, th.full_like(leaf_idx, 2), th.full_like(leaf_idx, 1))
+    geo_lr_assign = th.full((num_graphs,), -1, device=device, dtype=th.long)
+    leaf_mask = th.ones((num_graphs,), device=device, dtype=th.bool)
 
     histories = []
     max_steps = int(target_sizes.max().item() * 2)
@@ -137,12 +136,14 @@ def test_expansion_generation_history_and_plot():
     step = 0
     while not terminated and step < max_steps:
         histories.append({'pos': pos.clone(), 'batch': batch.clone(), 'leaf_idx': leaf_idx.clone(), 'adj': adj})
-        adj, pos, leaf_idx, leaf_expansion, parent_idx_1b, batch, terminated = method.expand(
+        adj, pos, leaf_idx, leaf_expansion, parent_idx_1b, batch, geo_lr_assign, leaf_mask, terminated = method.expand(
             adj, batch, target_sizes, model,
             pos=pos,
             leaf_idx=leaf_idx,
             leaf_expansion=leaf_expansion,
             parent_idx_1b=parent_idx_1b,
+            geo_lr_assign=geo_lr_assign,
+            leaf_mask=leaf_mask,
             step=step,
             ensure_progress=True,
             map_threshold=0.5,
@@ -156,11 +157,10 @@ def test_expansion_generation_history_and_plot():
     plot_path = plot_generation_history(histories, target_sizes, 'panel_basic.png')
     assert os.path.exists(plot_path), "Plot file was not created"
 
-    # Sanity: final counts per graph <= target and >=1
+    # Sanity: each graph has at least 1 node
     counts = th.zeros(target_sizes.size(0), dtype=th.long)
     for g in range(target_sizes.size(0)):
         counts[g] = (batch == g).sum()
-    assert (counts <= target_sizes).all(), "A graph exceeded its target size"
     assert (counts >= 1).all(), "A graph has zero nodes (should have at least root)"
 
     # Check at least one expansion happened for graphs with capacity >=3

@@ -5,7 +5,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch
 import pytest
 
-from graph_generation.model.egnn_so2_pyg import GlobalLinearAttention_Sparse, SO2_EGNN_Sparse_Network
+from graph_generation.model.egnn_so2 import GlobalLinearAttention_Sparse, SO2_EGNN_Network
 
 
 def _rand_batch(n1, n2, d, m):
@@ -23,7 +23,7 @@ def test_make_global_tokens():
     tokens_param = torch.randn(3, 32)  # 3 tokens, 32 dimensions
     batch = torch.tensor([0, 0, 1, 1, 1])  # 2 nodes in graph 0, 3 nodes in graph 1
     
-    tokens, tokens_batch = SO2_EGNN_Sparse_Network._make_global_tokens(tokens_param, batch)
+    tokens, tokens_batch = SO2_EGNN_Network._make_global_tokens(tokens_param, batch)
     
     # Should have 3 tokens * 2 graphs = 6 total tokens
     assert tokens.shape == (6, 32)
@@ -35,7 +35,7 @@ def test_make_global_tokens():
     
     # Test with empty batch
     empty_batch = torch.tensor([])
-    tokens_empty, batch_empty = SO2_EGNN_Sparse_Network._make_global_tokens(tokens_param, empty_batch)
+    tokens_empty, batch_empty = SO2_EGNN_Network._make_global_tokens(tokens_param, empty_batch)
     assert tokens_empty.shape == (0, 32)
     assert batch_empty.shape == (0,)
 
@@ -45,7 +45,7 @@ def test_isab_sparse_dense_equivalence():
     d, h, dh, m = 32, 4, 8, 3
     isab = GlobalLinearAttention_Sparse(dim=d, heads=h, dim_head=dh)
     x, b, tokens_param = _rand_batch(5, 7, d, m)
-    tokens, tb = SO2_EGNN_Sparse_Network._make_global_tokens(tokens_param, b)
+    tokens, tb = SO2_EGNN_Network._make_global_tokens(tokens_param, b)
 
     # multi-graph (sparse)
     x_out, _ = isab(x, tokens, x_batch=b, q_batch=tb)
@@ -67,7 +67,7 @@ def test_isab_sparse_dense_equivalence():
 def test_global_attention_integration():
     """Test that global attention layers can be created and run without errors"""
     # Create a small network with global attention
-    network = SO2_EGNN_Sparse_Network(
+    network = SO2_EGNN_Network(
         n_layers=4,
         feats_dim=16,
         pos_dim=3,
