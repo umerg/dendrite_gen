@@ -418,7 +418,7 @@ class Expansion(Method):
 
         _t_geo_0 = _t(device)
         if leaf_idx_next.numel() > 0:
-            geo_lr_mask = compute_geo_lr_mask(pos_new, parent_idx_new_0b, debug=getattr(self, "debug", False))
+            geo_lr_mask = compute_geo_lr_mask(pos_new, parent_idx_new_0b, uhat=model.uhat, debug=getattr(self, "debug", False))
             parent_new = parent_idx_new_0b[leaf_idx_next]
             counts = scatter(
                 th.ones_like(parent_new),
