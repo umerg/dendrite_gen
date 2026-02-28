@@ -504,10 +504,11 @@ class Expansion(Method):
         # --- compute full geometry on P_0 (geo_lr + SO(2) angles + edge decomposition)
         _t_glr_0 = _t(pos_gt.device)
         uhat = model.uhat
-        pre_geom_p0 = precompute_full_geometry(
-            pos_gt, parent_idx, edge_index, uhat,
-            debug=getattr(self, "debug", False),
-        )
+        with th.no_grad():
+            pre_geom_p0 = precompute_full_geometry(
+                pos_gt, parent_idx, edge_index, uhat,
+                debug=getattr(self, "debug", False),
+            )
         geo_lr_mask = pre_geom_p0['geo_lr_mask']
         _t_geo_lr_loss = _t(pos_gt.device) - _t_glr_0
 

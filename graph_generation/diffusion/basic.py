@@ -77,10 +77,11 @@ class DenoisingDiffusionModel(Module):
         # Patch precomputed P_0 geometry for noised leaf positions
         pre_geom = None
         if pre_geom_p0 is not None:
-            pre_geom = patch_geometry_for_noised_leaves(
-                pre_geom_p0, P_t, leaf_idx_train, parent_idx,
-                edge_index, model.uhat,
-            )
+            with th.no_grad():
+                pre_geom = patch_geometry_for_noised_leaves(
+                    pre_geom_p0, P_t, leaf_idx_train, parent_idx,
+                    edge_index, model.uhat,
+                )
 
         N = P_0.size(0)
         e_feat = P_0.new_zeros((N, 1))
