@@ -385,6 +385,135 @@ def compute_geo_lr_mask(
     return lr_mask
 
 
+def compute_geo_lr_for_new_leaves(
+    pos: th.Tensor,            # [N, D] all node positions
+    parent_idx: th.Tensor,     # [N] parent indices (0-based, root=-1)
+    new_leaf_idx: th.Tensor,   # [K] indices of new leaf nodes
+    *,
+    uhat: th.Tensor | None = None,
+    debug: bool = False,
+    eps: float = 1e-8,
+    tol: float = 1e-6,
+) -> Tuple[th.Tensor, th.Tensor]:
+    """Compute geo L/R mask for only the specified new leaves (O(K) not O(N)).
+
+    Returns (lr_mask[K], valid[K]) where:
+      - lr_mask[i] = True means new_leaf_idx[i] is the LEFT child
+      - valid[i] = True means new_leaf_idx[i] has a binary parent
+        (only lr_mask[valid] entries are meaningful)
+    """
+    K = new_leaf_idx.numel()
+    device = pos.device
+    dtype = pos.dtype
+
+    lr_mask = th.zeros(K, dtype=th.bool, device=device)
+    valid = th.zeros(K, dtype=th.bool, device=device)
+
+    if K == 0:
+        return lr_mask, valid
+
+    # --- 1. Group by parent, identify binary pairs ---
+    parent_of_leaf = parent_idx[new_leaf_idx]                       # [K]
+    unique_parents, inv = th.unique(parent_of_leaf, return_inverse=True)  # [M], [K]
+    M = unique_parents.numel()
+    counts = scatter(th.ones(K, device=device), inv, dim=0,
+                     dim_size=M, reduce='sum')                      # [M]
+    sibling_count = counts[inv]                                     # [K]
+    valid = sibling_count == 2                                      # [K]
+
+    if not valid.any():
+        return lr_mask, valid
+
+    # --- 2. Gather only valid leaves ---
+    valid_leaf_global = new_leaf_idx[valid]                          # [V]
+    valid_parent = parent_idx[valid_leaf_global]                     # [V]
+    V = valid_leaf_global.numel()
+
+    # --- 3. Grandparent lookup ---
+    gp = parent_idx[valid_parent]                                   # [V]
+
+    # --- 4. uhat and basis ---
+    D = pos.size(1)
+    if uhat is None:
+        uhat = pos.new_zeros((D,), dtype=dtype)
+        uhat[-1] = 1.0
+    global_e1, _ = global_inplane_basis(uhat, eps=eps)
+    uhat_vec = uhat.view(1, -1)                                    # [1, D]
+
+    # --- 5. Direction vectors (size [V, D]) ---
+    has_gp = gp >= 0                                                # [V]
+    v_in = global_e1.view(1, -1).expand(V, -1).clone()             # [V, D] init to fallback
+    if has_gp.any():
+        v_in[has_gp] = pos[valid_parent[has_gp]] - pos[gp[has_gp]]
+
+    v_out = pos[valid_leaf_global] - pos[valid_parent]              # [V, D]
+
+    # --- 6. Project onto plane ⊥ uhat, normalize, cross product ---
+    du_in = (v_in * uhat_vec).sum(dim=-1, keepdim=True)
+    du_out = (v_out * uhat_vec).sum(dim=-1, keepdim=True)
+    v_in_perp = v_in - du_in * uhat_vec
+    v_out_perp = v_out - du_out * uhat_vec
+
+    nin = v_in_perp.norm(dim=-1, keepdim=True)
+    nout = v_out_perp.norm(dim=-1, keepdim=True)
+    v_in_unit = v_in_perp / (nin + eps)
+    degenerate = nin <= eps
+    if degenerate.any():
+        v_in_unit = v_in_unit.clone()
+        v_in_unit[degenerate.squeeze(-1)] = global_e1
+    v_out_unit = v_out_perp / (nout + eps)
+
+    cospsi = (v_in_unit * v_out_unit).sum(dim=-1)                   # [V]
+    cross = th.cross(v_in_unit, v_out_unit, dim=-1)
+    sinpsi = (cross * uhat_vec).sum(dim=-1)                         # [V]
+
+    # --- 7. L/R decision per parent (compact space) ---
+    # Map valid parents to compact indices [0..M_valid)
+    valid_parent_unique, valid_inv = th.unique(valid_parent, return_inverse=True)  # [M_v], [V]
+    M_v = valid_parent_unique.numel()
+
+    # Product s0*s1 per parent: (sum_s)^2 - sum_s2) / 2
+    sum_s = scatter(sinpsi, valid_inv, dim=0, dim_size=M_v, reduce='sum')
+    sum_s2 = scatter(sinpsi ** 2, valid_inv, dim=0, dim_size=M_v, reduce='sum')
+    product = (sum_s ** 2 - sum_s2) * 0.5                          # [M_v]
+
+    lr_valid = th.zeros(V, dtype=th.bool, device=device)
+
+    # Case 1: opposite-sign sines
+    case1_parent = product < -tol                                   # [M_v]
+    case1_nodes = case1_parent[valid_inv]                           # [V]
+    if case1_nodes.any():
+        lr_valid[case1_nodes] = sinpsi[case1_nodes] > 0
+
+    # Case 2: same-sign or near-zero
+    case2_nodes = ~case1_nodes                                      # [V]
+    if case2_nodes.any():
+        theta = th.atan2(sinpsi, cospsi)                            # [V]
+        max_theta = scatter(
+            theta[case2_nodes], valid_inv[case2_nodes],
+            dim=0, dim_size=M_v, reduce='max',
+        )
+        lr_valid[case2_nodes] = (
+            theta[case2_nodes] >= max_theta[valid_inv[case2_nodes]] - 1e-7
+        )
+
+    # --- 8. Write back into K-sized output ---
+    lr_mask[valid] = lr_valid
+
+    if debug:
+        for j in range(M_v):
+            sib_mask = valid_inv == j
+            left_count = int(lr_valid[sib_mask].sum().item())
+            if left_count != 1:
+                parent_id = valid_parent_unique[j].item()
+                logger.warning(
+                    f"[GeoLR-new] Parent {parent_id} has {left_count} left "
+                    f"assignments (expected 1)."
+                )
+
+    return lr_mask, valid
+
+
 def compute_geo_lr_mask_f2(
     pos: th.Tensor,
     parent_idx: th.Tensor,

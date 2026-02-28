@@ -17,7 +17,7 @@ def _t(device: th.device) -> float:
 
 from .helpers import (
     build_directed_edge_index,
-    compute_geo_lr_mask,
+    compute_geo_lr_for_new_leaves,
     decode_parent_indices,
     leaf_rel_targets,
     plot_diffusion_debug_trees,
@@ -418,17 +418,12 @@ class Expansion(Method):
 
         _t_geo_0 = _t(device)
         if leaf_idx_next.numel() > 0:
-            geo_lr_mask = compute_geo_lr_mask(pos_new, parent_idx_new_0b, uhat=model.uhat, debug=getattr(self, "debug", False))
-            parent_new = parent_idx_new_0b[leaf_idx_next]
-            counts = scatter(
-                th.ones_like(parent_new),
-                parent_new,
-                dim=0,
-                dim_size=pos_new.size(0),
+            geo_lr_mask, valid = compute_geo_lr_for_new_leaves(
+                pos_new, parent_idx_new_0b, leaf_idx_next,
+                uhat=model.uhat, debug=getattr(self, "debug", False),
             )
-            valid = counts[parent_new] == 2
             if valid.any():
-                geo_left = geo_lr_mask[leaf_idx_next][valid]
+                geo_left = geo_lr_mask[valid]
                 geo_lr_assign_next = geo_lr_assign_next.clone()
                 geo_lr_assign_next[leaf_idx_next[valid]] = (~geo_left).to(
                     dtype=geo_lr_assign_next.dtype
