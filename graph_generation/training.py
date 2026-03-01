@@ -495,8 +495,7 @@ class Trainer:
                 fig.savefig(fig_path, dpi=150)
                 results["examples_path"] = str(fig_path)
 
-                # NEW: side-by-side comparison plots (reference vs predicted) for same permutation order
-                eval_graphs_perm = [eval_graphs[i] for i in pred_perm]
+                # Side-by-side comparison plots (reference vs predicted), both in original graph order
                 comp_rows = max_examples
                 comp_cols = 2  # reference | predicted
                 comp_fig, comp_axs = plt.subplots(comp_rows, comp_cols, figsize=(comp_cols * 5, comp_rows * 3.5))
@@ -504,7 +503,7 @@ class Trainer:
                     comp_axs = np.array([[comp_axs]])
                 comp_axs = np.atleast_2d(comp_axs)
                 for i in range(max_examples):
-                    refG = eval_graphs_perm[i]
+                    refG = eval_graphs[i]
                     predG = results["pred_graphs"][i]
                     for col_idx, (Gcur, title_prefix) in enumerate([(refG, 'Eval'), (predG, 'Pred')]):
                         axc = comp_axs[i][col_idx]
