@@ -23,7 +23,7 @@ training:
   max_num_workers: 0
   log_interval: 100
   save_checkpoint: True
-  resume: False # if True, resume from last checkpoint, if number, resume from that step
+  resume: False # False, True (latest checkpoint), step number, or path to .pt file
   lr_scheduler: "cosine_annealing"              # Enable cosine annealing
   scheduler_T_max: ${training.num_steps}  # Optional: full cosine cycle length
   scheduler_eta_min: 1.0e-5          # Optional: minimum learning rate

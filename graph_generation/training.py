@@ -173,17 +173,21 @@ class Trainer:
         th.save(checkpoint, checkpoint_dir / f"step_{self.step}.pt")
 
     def resume_from_checkpoint(self, resume):
-        checkpoint_dir = self.output_dir / "checkpoints"
-        assert checkpoint_dir.exists(), "No checkpoints found."
-        if isinstance(resume, bool):
-            # resume from latest checkpoint
-            checkpoint_path = max(
-                checkpoint_dir.glob("step_*.pt"),
-                key=lambda f: int(f.stem.split("_")[1]),
-            )
+        if isinstance(resume, str) and (resume.endswith(".pt") or Path(resume).is_file()):
+            # resume from explicit file path
+            checkpoint_path = Path(resume)
         else:
-            # resume from specific checkpoint
-            checkpoint_path = checkpoint_dir / f"step_{resume}.pt"
+            checkpoint_dir = self.output_dir / "checkpoints"
+            assert checkpoint_dir.exists(), "No checkpoints found."
+            if isinstance(resume, bool):
+                # resume from latest checkpoint
+                checkpoint_path = max(
+                    checkpoint_dir.glob("step_*.pt"),
+                    key=lambda f: int(f.stem.split("_")[1]),
+                )
+            else:
+                # resume from specific step number
+                checkpoint_path = checkpoint_dir / f"step_{resume}.pt"
 
         checkpoint = th.load(checkpoint_path)
         for name, model in self.all_models.items():
@@ -495,8 +499,7 @@ class Trainer:
                 fig.savefig(fig_path, dpi=150)
                 results["examples_path"] = str(fig_path)
 
-                # NEW: side-by-side comparison plots (reference vs predicted) for same permutation order
-                eval_graphs_perm = [eval_graphs[i] for i in pred_perm]
+                # Side-by-side comparison plots (reference vs predicted), both in original graph order
                 comp_rows = max_examples
                 comp_cols = 2  # reference | predicted
                 comp_fig, comp_axs = plt.subplots(comp_rows, comp_cols, figsize=(comp_cols * 5, comp_rows * 3.5))
@@ -504,7 +507,7 @@ class Trainer:
                     comp_axs = np.array([[comp_axs]])
                 comp_axs = np.atleast_2d(comp_axs)
                 for i in range(max_examples):
-                    refG = eval_graphs_perm[i]
+                    refG = eval_graphs[i]
                     predG = results["pred_graphs"][i]
                     for col_idx, (Gcur, title_prefix) in enumerate([(refG, 'Eval'), (predG, 'Pred')]):
                         axc = comp_axs[i][col_idx]
