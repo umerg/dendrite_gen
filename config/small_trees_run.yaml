@@ -19,9 +19,9 @@ reduction:
 training:
   batch_size: 128
   lr: 5e-4
-  num_steps: 40000 # ~200 epochs; considering 1 step = 1 batch
+  num_steps: 30000 # ~200 epochs; considering 1 step = 1 batch
   max_num_workers: 0
-  log_interval: 200
+  log_interval: 500
   save_checkpoint: True
   resume: False # if True, resume from last checkpoint, if number, resume from that step
   lr_scheduler: "cosine_annealing"              # Enable cosine annealing
@@ -30,7 +30,7 @@ training:
 
 validation:
   batch_size: 1
-  interval: 200
+  interval: 500
   first_step: 0
   per_graph_size: False
   enable_metrics: False
@@ -59,10 +59,10 @@ ema:
   gamma: 1.0
   power: 1.0
 
-name: medium_trees_test_basic_mixed_descriptor_2
+name: medium3_basic_mixeddescriptor_nondetexpansion_wsize_norootbinary
 debugging: False
 debugging_max_batches: 50
 debugging_dir: "small_trees_debug"
 
 wandb:
-  logging: True
+  logging: False
