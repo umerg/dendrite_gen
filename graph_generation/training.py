@@ -173,17 +173,21 @@ class Trainer:
         th.save(checkpoint, checkpoint_dir / f"step_{self.step}.pt")
 
     def resume_from_checkpoint(self, resume):
-        checkpoint_dir = self.output_dir / "checkpoints"
-        assert checkpoint_dir.exists(), "No checkpoints found."
-        if isinstance(resume, bool):
-            # resume from latest checkpoint
-            checkpoint_path = max(
-                checkpoint_dir.glob("step_*.pt"),
-                key=lambda f: int(f.stem.split("_")[1]),
-            )
+        if isinstance(resume, str) and (resume.endswith(".pt") or Path(resume).is_file()):
+            # resume from explicit file path
+            checkpoint_path = Path(resume)
         else:
-            # resume from specific checkpoint
-            checkpoint_path = checkpoint_dir / f"step_{resume}.pt"
+            checkpoint_dir = self.output_dir / "checkpoints"
+            assert checkpoint_dir.exists(), "No checkpoints found."
+            if isinstance(resume, bool):
+                # resume from latest checkpoint
+                checkpoint_path = max(
+                    checkpoint_dir.glob("step_*.pt"),
+                    key=lambda f: int(f.stem.split("_")[1]),
+                )
+            else:
+                # resume from specific step number
+                checkpoint_path = checkpoint_dir / f"step_{resume}.pt"
 
         checkpoint = th.load(checkpoint_path)
         for name, model in self.all_models.items():
