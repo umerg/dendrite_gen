@@ -108,6 +108,238 @@ def global_inplane_basis(uhat: th.Tensor, eps: float = 1e-8) -> Tuple[th.Tensor,
     return e1, e2
 
 
+def global_to_local(
+    offset_global: th.Tensor,
+    forward: th.Tensor,
+    sideways: th.Tensor,
+    uhat: th.Tensor,
+) -> th.Tensor:
+    """Project 3D global-frame offsets into a per-node local basis.
+
+    Args:
+        offset_global: [L, 3] offsets in global frame
+        forward:       [L, 3] per-node forward basis vector
+        sideways:      [L, 3] per-node sideways basis vector
+        uhat:          [3] SO(2) axis (broadcast)
+
+    Returns:
+        [L, 3] offsets in local frame (forward, sideways, axial)
+    """
+    uhat_b = uhat.unsqueeze(0).expand_as(offset_global)
+    comp_fwd = (offset_global * forward).sum(-1, keepdim=True)
+    comp_side = (offset_global * sideways).sum(-1, keepdim=True)
+    comp_axial = (offset_global * uhat_b).sum(-1, keepdim=True)
+    return th.cat([comp_fwd, comp_side, comp_axial], dim=-1)
+
+
+def local_to_global(
+    offset_local: th.Tensor,
+    forward: th.Tensor,
+    sideways: th.Tensor,
+    uhat: th.Tensor,
+) -> th.Tensor:
+    """Reconstruct 3D global-frame offsets from a per-node local basis.
+
+    Args:
+        offset_local: [L, 3] offsets in local frame (forward, sideways, axial)
+        forward:      [L, 3] per-node forward basis vector
+        sideways:     [L, 3] per-node sideways basis vector
+        uhat:         [3] SO(2) axis (broadcast)
+
+    Returns:
+        [L, 3] offsets in global frame
+    """
+    uhat_b = uhat.unsqueeze(0).expand_as(forward)
+    return (
+        offset_local[:, 0:1] * forward
+        + offset_local[:, 1:2] * sideways
+        + offset_local[:, 2:3] * uhat_b
+    )
+
+
+def compute_local_bases(
+    pos: th.Tensor,
+    parent_idx: th.Tensor,
+    uhat: th.Tensor,
+    geo_lr_mask: th.Tensor,
+    eps: float = 1e-8,
+) -> dict:
+    """Compute per-node local coordinate frames in the plane perpendicular to uhat.
+
+    For each node i with parent p:
+      - forward_p = normalize(v_in_perp) where v_in = pos[p] - pos[grandparent(p)]
+        projected onto the plane perpendicular to uhat.
+      - sideways_p = uhat × forward_p
+
+    For root nodes: v_in = pos[left_child] - pos[root], where left_child is
+    identified via geo_lr_mask.  If no child exists or v_in is degenerate,
+    fall back to global_inplane_basis(uhat).
+
+    Args:
+        pos:         [N, 3] node positions
+        parent_idx:  [N] 0-based parent indices (-1 for roots)
+        uhat:        [3] SO(2) axis
+        geo_lr_mask: [N] bool, True = geometrically-defined LEFT child
+        eps:         numerical tolerance
+
+    Returns:
+        dict with 'local_forward': [N, 3], 'local_sideways': [N, 3]
+    """
+    N = pos.size(0)
+    device = pos.device
+    dtype = pos.dtype
+    parent = parent_idx.clone()
+    has_parent = parent >= 0
+
+    # Grandparent lookup
+    gp = parent.new_full((N,), -1)
+    if has_parent.any():
+        gp[has_parent] = parent[parent[has_parent].clamp(min=0)].clamp(min=-1)
+        # Fix: nodes whose parent is root have gp = parent[root] which is -1 already
+        # but clamp might have turned it to 0 — re-mask
+        gp[has_parent] = torch.where(
+            parent[parent[has_parent].clamp(min=0)] >= 0,
+            parent[parent[has_parent].clamp(min=0)],
+            parent.new_full((has_parent.sum(),), -1),
+        )
+
+    has_gp = gp >= 0
+
+    # --- v_in for non-root nodes with grandparent: pos[parent] - pos[grandparent]
+    v_in = torch.zeros_like(pos)
+    if has_gp.any():
+        sel = has_gp.nonzero(as_tuple=False).flatten()
+        v_in[sel] = pos[parent[sel]] - pos[gp[sel]]
+
+    # --- Root nodes: use direction to LEFT child as v_in
+    is_root = parent == -1
+    if is_root.any():
+        parent_clamped = parent.clamp(min=0)
+        for r in is_root.nonzero(as_tuple=False).flatten().tolist():
+            children = (parent == r).nonzero(as_tuple=False).flatten()
+            if children.numel() == 0:
+                continue
+            # Find the LEFT child (geo_lr_mask == True)
+            left_children = children[geo_lr_mask[children]]
+            if left_children.numel() > 0:
+                left_child = left_children[0]
+            else:
+                # fallback: first child
+                left_child = children[0]
+            v_in[r] = pos[left_child] - pos[r]
+
+    # --- Nodes with parent but no grandparent (children of root): use parent's v_in
+    fallback_mask = has_parent & ~has_gp
+    if fallback_mask.any():
+        sel = fallback_mask.nonzero(as_tuple=False).flatten()
+        # These nodes' parents are roots — use the root's v_in (which we just computed)
+        v_in[sel] = v_in[parent[sel]]
+
+    # --- Project onto plane perpendicular to uhat and normalize
+    uhat_vec = uhat.view(1, -1)
+    du_in = (v_in * uhat_vec).sum(dim=-1, keepdim=True)
+    v_in_perp = v_in - du_in * uhat_vec
+    nin = v_in_perp.norm(dim=-1, keepdim=True)
+
+    forward = v_in_perp / (nin + eps)
+
+    # Degenerate cases: v_in parallel to uhat or zero
+    degenerate = nin.squeeze(-1) <= eps
+    if degenerate.any():
+        e1, _ = global_inplane_basis(uhat, eps=eps)
+        forward = forward.clone()
+        forward[degenerate] = e1.unsqueeze(0)
+
+    sideways = torch.cross(uhat_vec.expand_as(forward), forward, dim=-1)
+    sideways = sideways / (sideways.norm(dim=-1, keepdim=True) + eps)
+
+    return {
+        'local_forward': forward,
+        'local_sideways': sideways,
+    }
+
+
+def compute_local_bases_for_parents(
+    pos: th.Tensor,
+    parent_idx: th.Tensor,
+    leaf_parent_idx: th.Tensor,
+    uhat: th.Tensor,
+    eps: float = 1e-8,
+) -> tuple[th.Tensor, th.Tensor]:
+    """Compute local bases for a set of parent nodes during inference.
+
+    Used during expand() when full precompute_full_geometry is not available.
+
+    Args:
+        pos:              [N, 3] node positions
+        parent_idx:       [N] 0-based parent indices (-1 for roots)
+        leaf_parent_idx:  [L] indices of parent nodes for new leaves
+        uhat:             [3] SO(2) axis
+        eps:              numerical tolerance
+
+    Returns:
+        (parent_fwd [L, 3], parent_side [L, 3])
+    """
+    L = leaf_parent_idx.numel()
+    device = pos.device
+
+    if L == 0:
+        return pos.new_zeros((0, 3)), pos.new_zeros((0, 3))
+
+    # Grandparent of each parent
+    gp = parent_idx[leaf_parent_idx]  # [L], grandparent indices
+
+    has_gp = gp >= 0
+    v_in = torch.zeros((L, 3), device=device, dtype=pos.dtype)
+
+    if has_gp.any():
+        sel = has_gp.nonzero(as_tuple=False).flatten()
+        v_in[sel] = pos[leaf_parent_idx[sel]] - pos[gp[sel]]
+
+    # For root parents (no grandparent): use direction to existing child if available
+    no_gp = ~has_gp
+    if no_gp.any():
+        sel = no_gp.nonzero(as_tuple=False).flatten()
+        for s in sel.tolist():
+            p = leaf_parent_idx[s].item()
+            children = (parent_idx == p).nonzero(as_tuple=False).flatten()
+            # Exclude placeholder children (those with the same position as parent)
+            real_children = []
+            for c in children.tolist():
+                if (pos[c] - pos[p]).norm() > eps:
+                    real_children.append(c)
+            if real_children:
+                v_in[s] = pos[real_children[0]] - pos[p]
+            # else: v_in stays zero, will hit degenerate fallback
+
+    # Project onto plane perpendicular to uhat
+    uhat_vec = uhat.view(1, -1)
+    du_in = (v_in * uhat_vec).sum(dim=-1, keepdim=True)
+    v_in_perp = v_in - du_in * uhat_vec
+    nin = v_in_perp.norm(dim=-1, keepdim=True)
+
+    forward = v_in_perp / (nin + eps)
+
+    # Degenerate fallback
+    degenerate = nin.squeeze(-1) <= eps
+    if degenerate.any():
+        e1, _ = global_inplane_basis(uhat, eps=eps)
+        forward = forward.clone()
+        # For root parents at first step: random angle in perp plane
+        degen_sel = degenerate.nonzero(as_tuple=False).flatten()
+        theta = torch.rand(degen_sel.numel(), device=device, dtype=pos.dtype) * (2 * torch.pi)
+        e1_v, e2_v = global_inplane_basis(uhat, eps=eps)
+        forward[degen_sel] = (
+            theta.cos().unsqueeze(-1) * e1_v.unsqueeze(0)
+            + theta.sin().unsqueeze(-1) * e2_v.unsqueeze(0)
+        )
+
+    sideways = torch.cross(uhat_vec.expand_as(forward), forward, dim=-1)
+    sideways = sideways / (sideways.norm(dim=-1, keepdim=True) + eps)
+
+    return forward, sideways
+
+
 def compute_branch_angles_parent_centric(
     coors: torch.Tensor,
     parent_idx: torch.Tensor,
@@ -682,6 +914,9 @@ def precompute_full_geometry(
         edge_index, parent_idx, cos_theta_node,
     )
 
+    # 5. Local coordinate bases for SO(2)-equivariant loss
+    local_bases = compute_local_bases(pos, parent_idx, uhat, geo_lr_mask, eps=eps)
+
     return {
         # edge-level (used by SO2_EGNN layers)
         'rel_coors': rel_coors,
@@ -701,6 +936,9 @@ def precompute_full_geometry(
         'v_in': intermediates['v_in'],
         'v_out': intermediates['v_out'],
         'has_gp': intermediates['has_gp'],
+        # local bases for SO(2)-equivariant loss
+        'local_forward': local_bases['local_forward'],
+        'local_sideways': local_bases['local_sideways'],
     }
 
 

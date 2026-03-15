@@ -6,7 +6,10 @@ import torch as th
 import torch.nn.functional as F
 from torch.nn import Module
 
-from graph_generation.method.helpers import patch_geometry_for_noised_leaves
+from graph_generation.method.helpers import (
+    local_to_global,
+    patch_geometry_for_noised_leaves,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +43,9 @@ class DenoisingDiffusionModel(Module):
         model: Module,
         tmd: th.Tensor | None = None,
         pre_geom_p0: dict | None = None,
+        local_forward: th.Tensor | None = None,
+        local_sideways: th.Tensor | None = None,
+        uhat: th.Tensor | None = None,
     ) -> tuple[th.Tensor, th.Tensor]:
         """Compute σ-conditioned denoising losses for positional + expansion targets."""
         device = P_0.device
@@ -68,11 +74,16 @@ class DenoisingDiffusionModel(Module):
 
         eps_pos = th.randn_like(C_0)
         eps_exp = th.randn_like(e_0)
-        C_t = C_0 + sigma_leaf * eps_pos
+        C_t = C_0 + sigma_leaf * eps_pos  # noising in local frame (isotropic)
         e_t = e_0 + sigma_leaf * eps_exp
 
         P_t = P_0.clone()
-        P_t[leaf_idx_train] = P_0[leaf_parent_idx] + C_t
+        if local_forward is not None and local_sideways is not None and uhat is not None:
+            # Convert local-frame C_t to global for position placement
+            C_t_global = local_to_global(C_t, local_forward, local_sideways, uhat)
+            P_t[leaf_idx_train] = P_0[leaf_parent_idx] + C_t_global
+        else:
+            P_t[leaf_idx_train] = P_0[leaf_parent_idx] + C_t
 
         # Patch precomputed P_0 geometry for noised leaf positions
         pre_geom = None
@@ -146,6 +157,9 @@ class DenoisingDiffusionModel(Module):
         model: Module,
         model_kwargs: dict | None = None,
         tmd: th.Tensor | None = None,
+        local_forward: th.Tensor | None = None,
+        local_sideways: th.Tensor | None = None,
+        uhat: th.Tensor | None = None,
     ) -> tuple[th.Tensor, th.Tensor]:
         """Deterministically denoise leaves via σ-schedule (ancestral-free)."""
         device = P_0.device
@@ -194,7 +208,11 @@ class DenoisingDiffusionModel(Module):
             P_cur = P_0.clone()
             _acc_clone += _st() - _t0
 
-            P_cur[leaf_idx] = parent_pos + C
+            if local_forward is not None and local_sideways is not None and uhat is not None:
+                C_global = local_to_global(C, local_forward, local_sideways, uhat)
+                P_cur[leaf_idx] = parent_pos + C_global
+            else:
+                P_cur[leaf_idx] = parent_pos + C
 
             _t0 = _st()
             e_feat = P_0.new_zeros((N, 1))

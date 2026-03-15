@@ -8,6 +8,12 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+from .helpers import (
+    compute_local_bases,
+    compute_local_bases_for_parents,
+    global_to_local,
+    local_to_global,
+)
 from .method import Method
 
 class Expansion_OneShot(Method):
@@ -871,14 +877,21 @@ class Expansion_OneShot(Method):
         expansion_pred_all = out['expansion_pred']
 
         # getting leaf predictions
-        rel_pred_leaves = rel_pred_all[leaf_idx_next]
+        rel_pred_leaves = rel_pred_all[leaf_idx_next]  # local frame
         expansion_pred_leaves = expansion_pred_all[leaf_idx_next]
         if expansion_pred_leaves.dim() == 1:
             expansion_pred_leaves = expansion_pred_leaves.unsqueeze(-1)
-        parent_pos_for_children = pos_new[parent_idx_new_0b[leaf_idx_next]]
+
+        # Compute local bases for parents and convert predictions to global
+        leaf_parent_idx_next = parent_idx_new_0b[leaf_idx_next]
+        parent_fwd, parent_side = compute_local_bases_for_parents(
+            pos_new, parent_idx_new_0b, leaf_parent_idx_next, model.uhat,
+        )
+        rel_pred_global = local_to_global(rel_pred_leaves, parent_fwd, parent_side, model.uhat)
+        parent_pos_for_children = pos_new[leaf_parent_idx_next]
 
         # updating new leaf positions
-        pos_new[leaf_idx_next] = parent_pos_for_children + rel_pred_leaves
+        pos_new[leaf_idx_next] = parent_pos_for_children + rel_pred_global
 
         # Update sibling order based on predicted geometry for newly created siblings.
         if leaf_idx_next.numel() > 0:
@@ -1107,8 +1120,9 @@ class Expansion_OneShot(Method):
             clip=self.leaf_noise_clip,
         )                                              # [N,3]
 
+        # --- compute geo_lr_mask (needed for local bases even if not used as feature)
+        geo_lr_mask = self._compute_geo_lr_mask(pos_gt, parent_idx)
         if self.use_geo_lr_mask:
-            geo_lr_mask = self._compute_geo_lr_mask(pos_gt, parent_idx)
             self._maybe_debug_root_children(
                 batch=batch,
                 parent_idx=parent_idx,
@@ -1117,7 +1131,14 @@ class Expansion_OneShot(Method):
                 pos_gt=pos_gt,
                 pos_masked=pos_in,
             )
-         
+
+        # --- compute local bases for SO(2)-equivariant loss
+        uhat = model.uhat
+        with th.no_grad():
+            local_bases = compute_local_bases(pos_gt, parent_idx, uhat, geo_lr_mask)
+        local_fwd = local_bases['local_forward']
+        local_side = local_bases['local_sideways']
+
         # --- prepare EGNN input (positions + minimal node features)
         feats_dim = getattr(model, 'feats_dim', 0)
         tmd_hidden_dim = getattr(model, 'tmd_hidden_dim', 0)
@@ -1206,11 +1227,19 @@ class Expansion_OneShot(Method):
         else:
             raise ValueError("Network must return a dict with 'rel_pred' and 'expansion_pred'.")
 
-        pred_rel = pred_rel_all[leaf_idx_train]                           # [L,3]
+        pred_rel = pred_rel_all[leaf_idx_train]                           # [L,3] (local frame)
         pred_expansion = pred_expansion_all[leaf_idx_train]               # [L,1] or [L]
 
-        # -- target relative offsets from parents for leaves
-        tgt_rel  = self._leaf_rel_targets(pos_gt, leaf_idx_train, leaf_parent_idx)  # [L,3]
+        # -- target relative offsets from parents for leaves, converted to local frame
+        tgt_rel_global = self._leaf_rel_targets(pos_gt, leaf_idx_train, leaf_parent_idx)  # [L,3]
+        if leaf_parent_idx.numel() > 0:
+            parent_fwd = local_fwd[leaf_parent_idx]   # [L, 3]
+            parent_side = local_side[leaf_parent_idx]  # [L, 3]
+            tgt_rel = global_to_local(tgt_rel_global, parent_fwd, parent_side, uhat)
+        else:
+            parent_fwd = tgt_rel_global.new_zeros((0, 3))
+            parent_side = tgt_rel_global.new_zeros((0, 3))
+            tgt_rel = tgt_rel_global
 
         # --- loss
         if pred_rel.numel() == 0:
@@ -1249,7 +1278,9 @@ class Expansion_OneShot(Method):
         if self.sibling_loss_weight > 0.0 and leaf_idx_train.numel() > 1:
             abs_gt_all = pos_gt[leaf_idx_train]
             parent_pos_in_all = pos_in[leaf_parent_idx]
-            abs_pred_all = parent_pos_in_all + pred_rel
+            # Convert pred_rel from local to global for absolute position computation
+            pred_rel_global = local_to_global(pred_rel, parent_fwd, parent_side, uhat)
+            abs_pred_all = parent_pos_in_all + pred_rel_global
             unique_parents, inverse, counts = leaf_parent_idx.unique(
                 return_inverse=True, return_counts=True
             )
