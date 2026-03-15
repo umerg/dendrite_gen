@@ -99,7 +99,7 @@ class Attention_Sparse(Attention):
         # assume the same set of graph ids exists in both batches
         assert torch.equal(uq, uk), "q_batch and kv_batch must index the same set of graphs in order."
 
-        outs = []
+        out = q.new_zeros(q.shape)
         for gid in uq.tolist():
             q_sel = (q_batch == gid)
             k_sel = (kv_batch == gid)
@@ -108,8 +108,8 @@ class Attention_Sparse(Attention):
             q_g = rearrange(q_g, 'n d -> () n d')
             kv_g = rearrange(kv_g, 'm d -> () m d')
             out_g = super().forward(q_g, kv_g, mask=None).squeeze(0)
-            outs.append(out_g)
-        return torch.cat(outs, dim=0)
+            out[q_sel] = out_g
+        return out
 
 
 class GlobalLinearAttention_Sparse(nn.Module):
