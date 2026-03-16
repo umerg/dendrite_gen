@@ -211,29 +211,19 @@ def compute_local_bases(
         sel = has_gp.nonzero(as_tuple=False).flatten()
         v_in[sel] = pos[parent[sel]] - pos[gp[sel]]
 
-    # --- Root nodes: use direction to LEFT child as v_in
-    is_root = parent == -1
-    if is_root.any():
-        parent_clamped = parent.clamp(min=0)
+    # --- Children of root: use root→left_child direction as v_in
+    fallback_mask = has_parent & ~has_gp
+    if fallback_mask.any():
+        is_root = parent == -1
         for r in is_root.nonzero(as_tuple=False).flatten().tolist():
             children = (parent == r).nonzero(as_tuple=False).flatten()
             if children.numel() == 0:
                 continue
-            # Find the LEFT child (geo_lr_mask == True)
             left_children = children[geo_lr_mask[children]]
-            if left_children.numel() > 0:
-                left_child = left_children[0]
-            else:
-                # fallback: first child
-                left_child = children[0]
-            v_in[r] = pos[left_child] - pos[r]
-
-    # --- Nodes with parent but no grandparent (children of root): use parent's v_in
-    fallback_mask = has_parent & ~has_gp
-    if fallback_mask.any():
-        sel = fallback_mask.nonzero(as_tuple=False).flatten()
-        # These nodes' parents are roots — use the root's v_in (which we just computed)
-        v_in[sel] = v_in[parent[sel]]
+            left_child = left_children[0] if left_children.numel() > 0 else children[0]
+            ref_dir = pos[left_child] - pos[r]
+            for c in children.tolist():
+                v_in[c] = ref_dir
 
     # --- Project onto plane perpendicular to uhat and normalize
     uhat_vec = uhat.view(1, -1)
@@ -259,14 +249,14 @@ def compute_local_bases(
     }
 
 
-def compute_local_bases_for_parents(
+def compute_local_bases_for_leaves(
     pos: th.Tensor,
     parent_idx: th.Tensor,
     leaf_parent_idx: th.Tensor,
     uhat: th.Tensor,
     eps: float = 1e-8,
 ) -> tuple[th.Tensor, th.Tensor]:
-    """Compute local bases for a set of parent nodes during inference.
+    """Compute local bases for new leaf nodes during inference.
 
     Used during expand() when full precompute_full_geometry is not available.
 
@@ -278,7 +268,7 @@ def compute_local_bases_for_parents(
         eps:              numerical tolerance
 
     Returns:
-        (parent_fwd [L, 3], parent_side [L, 3])
+        (leaf_fwd [L, 3], leaf_side [L, 3])
     """
     L = leaf_parent_idx.numel()
     device = pos.device

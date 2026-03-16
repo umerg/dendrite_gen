@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 from .helpers import (
     compute_local_bases,
-    compute_local_bases_for_parents,
+    compute_local_bases_for_leaves,
     global_to_local,
     local_to_global,
 )
@@ -884,7 +884,7 @@ class Expansion_OneShot(Method):
 
         # Compute local bases for parents and convert predictions to global
         leaf_parent_idx_next = parent_idx_new_0b[leaf_idx_next]
-        parent_fwd, parent_side = compute_local_bases_for_parents(
+        parent_fwd, parent_side = compute_local_bases_for_leaves(
             pos_new, parent_idx_new_0b, leaf_parent_idx_next, model.uhat,
         )
         rel_pred_global = local_to_global(rel_pred_leaves, parent_fwd, parent_side, model.uhat)

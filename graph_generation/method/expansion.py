@@ -18,7 +18,7 @@ def _t(device: th.device) -> float:
 from .helpers import (
     build_directed_edge_index,
     compute_geo_lr_for_new_leaves,
-    compute_local_bases_for_parents,
+    compute_local_bases_for_leaves,
     decode_parent_indices,
     global_to_local,
     leaf_rel_targets,
@@ -355,8 +355,8 @@ class Expansion(Method):
 
         leaf_parent_idx_next = parent_idx_new_0b[leaf_idx_next]
 
-        # Compute local bases for parent nodes of new leaves
-        parent_fwd, parent_side = compute_local_bases_for_parents(
+        # Compute local bases for new leaf nodes
+        leaf_fwd, leaf_side = compute_local_bases_for_leaves(
             pos_new, parent_idx_new_0b, leaf_parent_idx_next, model.uhat,
         )
 
@@ -373,14 +373,14 @@ class Expansion(Method):
             leaf_parent_idx=leaf_parent_idx_next,
             model=model,
             model_kwargs=model_kwargs,
-            local_forward=parent_fwd,
-            local_sideways=parent_side,
+            local_forward=leaf_fwd,
+            local_sideways=leaf_side,
             uhat=model.uhat,
         )
 
         _t_diffusion_sample = _t(device) - _t_diff_0
         # Convert local-frame predictions to global for position reconstruction
-        rel_pred_global = local_to_global(rel_pred, parent_fwd, parent_side, model.uhat)
+        rel_pred_global = local_to_global(rel_pred, leaf_fwd, leaf_side, model.uhat)
         parent_pos_for_children = pos_new[leaf_parent_idx_next]
         pos_new[leaf_idx_next] = parent_pos_for_children + rel_pred_global
 
@@ -461,7 +461,7 @@ class Expansion(Method):
             raise ValueError("Expected batch.leaf_idx (leaf node indices). Please update dataloader.")
         leaf_idx_all = batch.leaf_idx
 
-        leaf_graphs_all = batch.batch[leaf_idx_all]
+        # leaf_graphs_all = batch.batch[leaf_idx_all]
         # logger.info(
         # "[LeafAllDebug] leaf_idx_all.max()=%s, unique_leaf_graphs_all=%s, leaf_idx_all[:20]=%s",
         # int(leaf_idx_all.max().item()),
@@ -528,13 +528,13 @@ class Expansion(Method):
         # --- Convert targets to local frame for SO(2)-equivariant loss
         local_fwd = pre_geom_p0['local_forward']
         local_side = pre_geom_p0['local_sideways']
-        if leaf_parent_idx.numel() > 0:
-            parent_fwd = local_fwd[leaf_parent_idx]   # [L, 3]
-            parent_side = local_side[leaf_parent_idx]  # [L, 3]
-            leaf_rel_pos = global_to_local(leaf_rel_pos_global, parent_fwd, parent_side, uhat)
+        if leaf_idx_train.numel() > 0:
+            leaf_fwd = local_fwd[leaf_idx_train]     # [L, 3]
+            leaf_side = local_side[leaf_idx_train]    # [L, 3]
+            leaf_rel_pos = global_to_local(leaf_rel_pos_global, leaf_fwd, leaf_side, uhat)
         else:
-            parent_fwd = leaf_rel_pos_global.new_zeros((0, 3))
-            parent_side = leaf_rel_pos_global.new_zeros((0, 3))
+            leaf_fwd = leaf_rel_pos_global.new_zeros((0, 3))
+            leaf_side = leaf_rel_pos_global.new_zeros((0, 3))
             leaf_rel_pos = leaf_rel_pos_global
         _t_geo_lr_loss = _t(pos_gt.device) - _t_glr_0
 
@@ -645,8 +645,8 @@ class Expansion(Method):
             model=model,
             tmd=tmd,
             pre_geom_p0=pre_geom_p0,
-            local_forward=parent_fwd,
-            local_sideways=parent_side,
+            local_forward=leaf_fwd,
+            local_sideways=leaf_side,
             uhat=uhat,
         )
         _t_diff_loss = _t(pos_gt.device) - _t_diff_loss_0
