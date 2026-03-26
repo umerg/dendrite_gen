@@ -112,7 +112,7 @@ class Trainer:
         # Resume from checkpoint
         if cfg.training.resume:
             self.resume_from_checkpoint(cfg.training.resume)
-            print(f"Resuming training from step {self.step}")
+            print(f"Resumed from step {self.step}, LR={self.optimizer.param_groups[0]['lr']}")
         else:
             self.step = 0
             self.best_validation_scores = {beta: -1 for beta in cfg.ema.betas} # what are EMA betas? TODO

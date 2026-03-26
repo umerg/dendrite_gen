@@ -317,6 +317,24 @@ def _global_hist_edges(
     return np.linspace(lo, hi, bins + 1, dtype=np.float64)
 
 
+def _compute_graph_stats(g: nx.Graph) -> dict:
+    """Compute structural/geometric stats for a single graph."""
+    len_vals = branch_length_values(g)
+    ang_vals = (bifurcation_angle_values(g) if g.number_of_nodes()
+                else np.zeros((0,), dtype=np.float64))
+    nodes = (np.stack([_pos_to_xyz(g.nodes[n].get("pos", np.zeros(3)))
+                       for n in g.nodes()], axis=0)
+             if g.number_of_nodes()
+             else np.zeros((0, 3), dtype=np.float64))
+    return {
+        "len_vals": len_vals,
+        "ang_vals": ang_vals,
+        "height": float(height_z_range(nodes)),
+        "span": float(span_xy_diameter(nodes)),
+        "bbox_diag": float(bbox_diag_length(nodes)),
+    }
+
+
 def run_metrics(
     gt_dir: Path,
     pred_pkl: Path,
@@ -333,6 +351,7 @@ def run_metrics(
     plot_max: int = 12,
     plot_pairs: bool = False,
     hist_bins: int = 32,
+    stats_only: bool = False,
 ) -> dict[str, Any]:
     gt_dir = Path(gt_dir)
     pred_pkl = Path(pred_pkl)
@@ -394,6 +413,94 @@ def run_metrics(
               f"{min(pred_sizes)}/{int(np.median(pred_sizes))}/{max(pred_sizes)}")
     else:
         print("Loaded pred graphs: 0")
+
+    # --- Stats-only mode: skip per-tree pairing, just compute cumulative stats ---
+    if stats_only:
+        gt_lengths: list[np.ndarray] = []
+        gt_angles: list[np.ndarray] = []
+        gt_heights: list[float] = []
+        gt_spans: list[float] = []
+        gt_bboxes: list[float] = []
+        for g in gt_graphs:
+            s = _compute_graph_stats(g)
+            gt_lengths.append(s["len_vals"])
+            gt_angles.append(s["ang_vals"])
+            gt_heights.append(s["height"])
+            gt_spans.append(s["span"])
+            gt_bboxes.append(s["bbox_diag"])
+
+        pred_lengths: list[np.ndarray] = []
+        pred_angles: list[np.ndarray] = []
+        pred_heights: list[float] = []
+        pred_spans: list[float] = []
+        pred_bboxes: list[float] = []
+        for g in pred_graphs:
+            s = _compute_graph_stats(g)
+            pred_lengths.append(s["len_vals"])
+            pred_angles.append(s["ang_vals"])
+            pred_heights.append(s["height"])
+            pred_spans.append(s["span"])
+            pred_bboxes.append(s["bbox_diag"])
+
+        _cat = lambda arrs: np.concatenate(arrs).tolist() if arrs and any(a.size for a in arrs) else []
+        dataset_summary: dict[str, Any] = {
+            "height_gt": _summarize(gt_heights),
+            "height_pred": _summarize(pred_heights),
+            "span_xy_gt": _summarize(gt_spans),
+            "span_xy_pred": _summarize(pred_spans),
+            "bbox_diag_gt": _summarize(gt_bboxes),
+            "bbox_diag_pred": _summarize(pred_bboxes),
+            "branch_length_gt": _summarize(_cat(gt_lengths)),
+            "branch_length_pred": _summarize(_cat(pred_lengths)),
+            "bifurcation_angle_gt": _summarize(_cat(gt_angles)),
+            "bifurcation_angle_pred": _summarize(_cat(pred_angles)),
+        }
+
+        if plot_dir is not None:
+            plot_dir = Path(plot_dir)
+            plot_dir.mkdir(parents=True, exist_ok=True)
+            all_len = [*gt_lengths, *pred_lengths]
+            all_ang = [*gt_angles, *pred_angles]
+            if any(a.size for a in all_len):
+                len_vals_combined = np.concatenate([a for a in all_len if a.size])
+            else:
+                len_vals_combined = np.zeros((0,), dtype=np.float64)
+            if any(a.size for a in all_ang):
+                ang_vals_combined = np.concatenate([a for a in all_ang if a.size])
+            else:
+                ang_vals_combined = np.zeros((0,), dtype=np.float64)
+            so_length_edges = _global_hist_edges(len_vals_combined, bins=hist_bins, default_range=(0.0, 1.0))
+            so_angle_edges = _global_hist_edges(ang_vals_combined, bins=hist_bins, default_range=(0.0, 180.0))
+
+            gt_len_all = np.concatenate(gt_lengths) if gt_lengths and any(a.size for a in gt_lengths) else np.zeros((0,), dtype=np.float64)
+            pred_len_all = np.concatenate(pred_lengths) if pred_lengths and any(a.size for a in pred_lengths) else np.zeros((0,), dtype=np.float64)
+            gt_ang_all = np.concatenate(gt_angles) if gt_angles and any(a.size for a in gt_angles) else np.zeros((0,), dtype=np.float64)
+            pred_ang_all = np.concatenate(pred_angles) if pred_angles and any(a.size for a in pred_angles) else np.zeros((0,), dtype=np.float64)
+
+            plot_tornado_histogram(
+                gt_len_all, pred_len_all, bin_edges=so_length_edges,
+                out_dir=plot_dir, stem="dataset", file_tag="branch_length_hist",
+                title="Dataset Branch Path Length",
+                color_gt=GT_COLOR, color_pred=PRED_COLOR,
+                value_label="Length (metres)", xlim=(-3.0, 3.0),
+            )
+            plot_tornado_histogram(
+                gt_ang_all, pred_ang_all, bin_edges=so_angle_edges,
+                out_dir=plot_dir, stem="dataset", file_tag="bifurcation_angle_hist",
+                title="Dataset Bifurcation Angles",
+                color_gt=GT_COLOR, color_pred=PRED_COLOR,
+                value_label="Angle (deg)", xlim=(-0.025, 0.025),
+            )
+
+        return {
+            "config": {
+                "gt_dir": str(gt_dir),
+                "pred_pkl": str(pred_pkl),
+                "stats_only": True,
+                "hist_bins": int(hist_bins),
+            },
+            "dataset_summary": dataset_summary,
+        }
 
     pairs, unmatched = _match_by_index(gt_graphs, pred_graphs)
 
@@ -825,6 +932,7 @@ def run_chamfer(
     plot_max: int = 12,
     plot_pairs: bool = False,
     hist_bins: int = 32,
+    stats_only: bool = False,
 ) -> dict[str, Any]:
     return run_metrics(
         gt_dir=gt_dir,
@@ -842,6 +950,7 @@ def run_chamfer(
         plot_max=plot_max,
         plot_pairs=plot_pairs,
         hist_bins=hist_bins,
+        stats_only=stats_only,
     )
 
 
@@ -882,6 +991,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--plot-pairs", action="store_true", help="Also save side-by-side GT/pred plots.")
     parser.add_argument("--hist-bins", type=int, default=32, help="Histogram bin count for branch metrics.")
     parser.add_argument("--output-json", type=Path, default=None, help="Optional path to save JSON output.")
+    parser.add_argument("--stats-only", action="store_true",
+                        help="Only compute dataset-level summary stats and tornado histograms (no per-tree pairing).")
     return parser
 
 
@@ -903,6 +1014,7 @@ def main() -> None:
         plot_max=args.plot_max,
         plot_pairs=args.plot_pairs,
         hist_bins=args.hist_bins,
+        stats_only=args.stats_only,
     )
 
     if args.output_json is not None:
@@ -910,10 +1022,11 @@ def main() -> None:
         with args.output_json.open("w") as f:
             json.dump(results, f, indent=2)
 
-    summary = results["summary"]
-    print("Chamfer summary:")
-    print(f"  count={summary['count']} mean={summary['mean']:.6f} std={summary['std']:.6f} "
-          f"min={summary['min']:.6f} max={summary['max']:.6f} median={summary['median']:.6f}")
+    if not args.stats_only:
+        summary = results["summary"]
+        print("Chamfer summary:")
+        print(f"  count={summary['count']} mean={summary['mean']:.6f} std={summary['std']:.6f} "
+              f"min={summary['min']:.6f} max={summary['max']:.6f} median={summary['median']:.6f}")
 
     ds = results.get("dataset_summary", {})
     if ds:
@@ -927,7 +1040,7 @@ def main() -> None:
                 continue
             print(f"  {key}: count={s['count']} mean={s['mean']:.4f} std={s['std']:.4f} "
                   f"min={s['min']:.4f} max={s['max']:.4f} median={s['median']:.4f}")
-    if "ged" in results.get("config", {}):
+    if not args.stats_only and "ged" in results.get("config", {}):
         ged_summary = results.get("ged_summary")
         ged_norm_summary = results.get("ged_norm_summary")
         if ged_summary is not None:
@@ -942,7 +1055,7 @@ def main() -> None:
                   f"median={ged_norm_summary['median']:.6f}")
         if results.get("ged_timeouts", 0):
             print(f"TED timeouts: {results.get('ged_timeouts', 0)}")
-    if results["per_tree"]:
+    if not args.stats_only and results.get("per_tree"):
         print("Per-graph stats:")
         include_ged = "ged" in results.get("config", {})
         for item in results["per_tree"]:
@@ -982,7 +1095,7 @@ def main() -> None:
                 f"bbox_diag(gt/pred)={item.get('bbox_diag_gt', float('nan')):.3f}/"
                 f"{item.get('bbox_diag_pred', float('nan')):.3f}"
             )
-    if results["unmatched"]:
+    if results.get("unmatched"):
         print("Unmatched sizes:")
         for item in results["unmatched"]:
             print(f"  size={item['size']} gt={item['gt_count']} pred={item['pred_count']} matched={item['matched']}")
