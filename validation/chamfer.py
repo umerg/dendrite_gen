@@ -248,89 +248,34 @@ def _extract_pred_graphs(payload: Any, ema_key: str | None) -> list[nx.Graph]:
     raise ValueError("Unrecognized pickle format: could not find 'pred_graphs'.")
 
 
-def _group_by_size(graphs: Iterable[nx.Graph]) -> dict[int, list[int]]:
-    groups: dict[int, list[int]] = defaultdict(list)
-    for idx, G in enumerate(graphs):
-        groups[G.number_of_nodes()].append(idx)
-    return groups
-
-
-def _match_by_size(
+def _match_by_index(
     gt_graphs: list[nx.Graph],
     pred_graphs: list[nx.Graph],
 ) -> tuple[list[dict[str, int]], list[dict[str, int]]]:
-    """Match indices by node count; fall back to closest-size matching."""
-    gt_groups = _group_by_size(gt_graphs)
-    pred_groups = _group_by_size(pred_graphs)
-    unmatched: list[dict[str, int]] = []
+    """Match GT and pred graphs 1:1 by index (they share the same ordering)."""
+    n = min(len(gt_graphs), len(pred_graphs))
     pairs: list[dict[str, int]] = []
-
-    matched_gt: set[int] = set()
-    matched_pred: set[int] = set()
-    unmatched_gt: list[int] = []
-    unmatched_pred: list[int] = []
-
-    for size in sorted(set(gt_groups) | set(pred_groups)):
-        g_list = gt_groups.get(size, [])
-        p_list = pred_groups.get(size, [])
-        n = min(len(g_list), len(p_list))
-        for i in range(n):
-            gt_idx = g_list[i]
-            pred_idx = p_list[i]
-            pairs.append(
-                {
-                    "gt_idx": gt_idx,
-                    "pred_idx": pred_idx,
-                    "match_type": "exact",
-                    "size_diff": 0,
-                }
-            )
-            matched_gt.add(gt_idx)
-            matched_pred.add(pred_idx)
-        if len(g_list) != len(p_list):
-            unmatched.append(
-                {
-                    "size": size,
-                    "gt_count": len(g_list),
-                    "pred_count": len(p_list),
-                    "matched": n,
-                }
-            )
-        if len(g_list) > n:
-            unmatched_gt.extend(g_list[n:])
-        if len(p_list) > n:
-            unmatched_pred.extend(p_list[n:])
-
-    if not pred_graphs:
-        return pairs, unmatched
-
-    # Match remaining GT graphs to closest-size preds (prefer unused preds first).
-    unused_pred = set(unmatched_pred)
-    for gt_idx in unmatched_gt:
-        gt_size = gt_graphs[gt_idx].number_of_nodes()
-        candidate_pool = unused_pred if unused_pred else set(range(len(pred_graphs)))
-        best_pred = None
-        best_diff = None
-        for pred_idx in candidate_pool:
-            pred_size = pred_graphs[pred_idx].number_of_nodes()
-            diff = abs(gt_size - pred_size)
-            if best_diff is None or diff < best_diff:
-                best_diff = diff
-                best_pred = pred_idx
-        if best_pred is None:
-            continue
+    for i in range(n):
+        gt_size = gt_graphs[i].number_of_nodes()
+        pred_size = pred_graphs[i].number_of_nodes()
         pairs.append(
             {
-                "gt_idx": gt_idx,
-                "pred_idx": best_pred,
-                "match_type": "closest",
-                "size_diff": int(best_diff) if best_diff is not None else 0,
+                "gt_idx": i,
+                "pred_idx": i,
+                "match_type": "index",
+                "size_diff": abs(gt_size - pred_size),
             }
         )
-        matched_gt.add(gt_idx)
-        matched_pred.add(best_pred)
-        if best_pred in unused_pred:
-            unused_pred.remove(best_pred)
+
+    unmatched: list[dict[str, int]] = []
+    if len(gt_graphs) != len(pred_graphs):
+        unmatched.append(
+            {
+                "gt_count": len(gt_graphs),
+                "pred_count": len(pred_graphs),
+                "matched": n,
+            }
+        )
 
     return pairs, unmatched
 
@@ -446,7 +391,7 @@ def run_metrics(
     else:
         print("Loaded pred graphs: 0")
 
-    pairs, unmatched = _match_by_size(gt_graphs, pred_graphs)
+    pairs, unmatched = _match_by_index(gt_graphs, pred_graphs)
 
     per_tree: list[dict[str, Any]] = []
     chamfers: list[float] = []
