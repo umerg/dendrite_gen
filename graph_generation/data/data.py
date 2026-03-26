@@ -23,6 +23,7 @@ class ReducedGraphData(Data):
       - total_tree_size:   scalar int giving the node count of the original tree
       - new_leaf_idx_from_next: LongTensor indices of nodes considered "new leaves" when expanding from next level
       - new_leaf_mask_from_next: BoolTensor mask aligned with nodes for the above
+      - num_root_children: scalar int, branching factor of the root node (k)
     """
     def __init__(self, **kwargs):
         super().__init__()

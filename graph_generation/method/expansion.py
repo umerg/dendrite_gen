@@ -17,6 +17,7 @@ def _t(device: th.device) -> float:
 
 from .helpers import (
     build_directed_edge_index,
+    compute_geo_angle_for_new_leaves,
     compute_geo_lr_for_new_leaves,
     compute_local_bases_for_leaves,
     decode_parent_indices,
@@ -48,7 +49,8 @@ class Expansion(Method):
         self.expansion_loss_weight = float(expansion_loss_weight)
         self.use_size_ratio = use_size_ratio
     
-    def sample_graphs(self, target_size: th.Tensor, model: Module, tmd: th.Tensor | None = None):
+    def sample_graphs(self, target_size: th.Tensor, model: Module, tmd: th.Tensor | None = None,
+                      num_root_children: th.Tensor | int | None = None):
         """Generate graphs via iterative diffusion-based leaf expansion."""
         if self.diffusion is None:
             raise ValueError("Diffusion module is required for sampling.")
@@ -62,6 +64,15 @@ class Expansion(Method):
         if tmd is not None:
             tmd = tmd.to(device=device)
 
+        # Normalize num_root_children to a per-graph tensor
+        if num_root_children is not None:
+            if isinstance(num_root_children, int):
+                nrc = th.full((num_graphs,), num_root_children, device=device, dtype=th.long)
+            else:
+                nrc = num_root_children.to(device=device, dtype=th.long)
+        else:
+            nrc = None
+
         pos = th.zeros((num_graphs, 3), device=device)
         adj = SparseTensor(
             row=th.tensor([], dtype=th.long, device=device),
@@ -73,7 +84,7 @@ class Expansion(Method):
         parent_idx_1b = th.zeros_like(batch)
         leaf_idx = batch.clone()
         leaf_expansion = th.ones_like(leaf_idx)  # root's spawn count is overridden in expand
-        geo_lr_assign = th.full((num_graphs,), -1, device=device, dtype=th.long)
+        geo_angle = th.full((num_graphs,), -1.0, device=device, dtype=th.float)
         leaf_mask = th.ones((num_graphs,), device=device, dtype=th.bool)
 
         max_steps = int(target_size.max().item() * 2)
@@ -88,7 +99,7 @@ class Expansion(Method):
                 leaf_expansion,
                 parent_idx_1b,
                 batch,
-                geo_lr_assign,
+                geo_angle,
                 leaf_mask,
                 terminated,
             ) = self.expand(
@@ -100,10 +111,11 @@ class Expansion(Method):
                 leaf_idx=leaf_idx,
                 leaf_expansion=leaf_expansion,
                 parent_idx_1b=parent_idx_1b,
-                geo_lr_assign=geo_lr_assign,
+                geo_angle=geo_angle,
                 leaf_mask=leaf_mask,
                 tmd=tmd,
                 step=step,
+                num_root_children=nrc,
             )
             step += 1
 
@@ -136,12 +148,16 @@ class Expansion(Method):
         leaf_expansion: th.Tensor | None = None,
         parent_idx_1b: th.Tensor | None = None,
         leaf_mask: th.Tensor | None = None,
-        geo_lr_assign: th.Tensor | None = None,
+        geo_angle: th.Tensor | None = None,
         tmd: th.Tensor | None = None,
         step: int = 0,
         map_threshold: float = 0.0,
+        num_root_children: th.Tensor | None = None,
     ):
-        """Expand graphs by one generation step using binary leaf branching.
+        """Expand graphs by one generation step.
+
+        Supports k-ary root expansion when num_root_children is provided.
+        Non-root leaves use binary branching (0 or 2 children).
         """
 
         if not all(x is not None for x in (pos, leaf_idx, leaf_expansion, parent_idx_1b)):
@@ -151,7 +167,7 @@ class Expansion(Method):
 
         device = pos.device
         _t_start = _t(device)
-        _t_leaf_loop = _t_cat_growth = _t_sparse_rebuild = _t_diffusion_sample = _t_geo_lr_mask = 0.0
+        _t_leaf_loop = _t_cat_growth = _t_sparse_rebuild = _t_diffusion_sample = _t_geo_angle = 0.0
         parent_idx = parent_idx_1b - 1
         num_graphs = int(target_size.numel())
 
@@ -170,10 +186,10 @@ class Expansion(Method):
         )
         remaining_capacity = target_size.to(device) - size_per_graph
 
-        if geo_lr_assign is None:
-            geo_lr_assign = th.full((pos.size(0),), -1, device=device, dtype=th.long)
+        if geo_angle is None:
+            geo_angle = th.full((pos.size(0),), -1.0, device=device, dtype=th.float)
 
-        if leaf_idx.numel() == 0:  # (remaining_capacity <= 0).all() or 
+        if leaf_idx.numel() == 0:
             return (
                 adj_reduced,
                 pos,
@@ -181,7 +197,7 @@ class Expansion(Method):
                 leaf_expansion.clone(),
                 parent_idx_1b,
                 batch_reduced,
-                geo_lr_assign.clone(),
+                geo_angle.clone(),
                 leaf_mask.clone(),
                 True,
             )
@@ -190,11 +206,19 @@ class Expansion(Method):
         leaf_batch = batch_reduced[leaf_idx]
         spawn_counts_final = spawn_counts.clone()
 
-        # Root nodes are non-binary: always spawn exactly 1 child
+        # Root nodes: spawn k children (from num_root_children) or 1 (legacy)
         is_root_leaf = parent_idx[leaf_idx] < 0
         if is_root_leaf.any():
-            root_should_spawn = (target_size[leaf_batch] > 1).long()
-            spawn_counts_final = th.where(is_root_leaf, root_should_spawn, spawn_counts_final)
+            if num_root_children is not None:
+                # Spawn k children for each root, if capacity allows
+                root_k = num_root_children[leaf_batch[is_root_leaf]]
+                has_capacity = (target_size[leaf_batch[is_root_leaf]] > 1).long()
+                root_spawn = root_k * has_capacity
+                spawn_counts_final[is_root_leaf] = root_spawn
+            else:
+                # Legacy: spawn exactly 1 child
+                root_should_spawn = (target_size[leaf_batch] > 1).long()
+                spawn_counts_final = th.where(is_root_leaf, root_should_spawn, spawn_counts_final)
 
         total_new_children = int(spawn_counts_final.sum().item())
         if total_new_children == 0:
@@ -205,7 +229,7 @@ class Expansion(Method):
                 leaf_expansion.clone(),
                 parent_idx_1b,
                 batch_reduced,
-                geo_lr_assign.clone(),
+                geo_angle.clone(),
                 leaf_mask.clone(),
                 True,
             )
@@ -219,7 +243,9 @@ class Expansion(Method):
         new_parents = []
         new_batches = []
         parent_child_edges = []
-        lr_assign_new = []
+        # Ordinal tracking for geo_angle computation
+        ordinal_new = []
+        sibling_count_new = []
         running_child_index = 0
 
         _t_loop_0 = _t(device)
@@ -234,7 +260,8 @@ class Expansion(Method):
                 parent_child_edges.append((leaf_global, global_child))
                 new_parents.append(leaf_global)
                 new_batches.append(int(batch_reduced[leaf_global].item()))
-                lr_assign_new.append(0 if local_child == 0 else 1)
+                ordinal_new.append(local_child)
+                sibling_count_new.append(sc)
                 running_child_index += 1
 
         if running_child_index != total_new_children:
@@ -251,9 +278,21 @@ class Expansion(Method):
         batch_new = th.cat(
             [batch_reduced, th.tensor(new_batches, device=device, dtype=batch_reduced.dtype)]
         )
-        geo_lr_assign_next = th.cat(
-            [geo_lr_assign, th.tensor(lr_assign_new, device=device, dtype=th.long)], dim=0
-        )
+
+        # Compute initial geo_angle for new children: i / max(k-1, 1)
+        ordinal_t = th.tensor(ordinal_new, device=device, dtype=th.float)
+        sib_count_t = th.tensor(sibling_count_new, device=device, dtype=th.float)
+        geo_angle_new = ordinal_t / sib_count_t.clamp(min=2.0).sub(1.0)  # i / (k-1), k=1 → 0.0
+        # For k=1, sib_count_t - 1 = 0 → clamp avoids div by zero; result is 0.0
+        single_child_mask = sib_count_t == 1
+        if single_child_mask.any():
+            geo_angle_new[single_child_mask] = 0.0
+
+        geo_angle_next = th.cat([geo_angle, geo_angle_new], dim=0)
+
+        # Also track ordinals and sibling counts for frame computation
+        child_ordinal_t = th.tensor(ordinal_new, device=device, dtype=th.long)
+        sib_count_long = th.tensor(sibling_count_new, device=device, dtype=th.long)
 
         _t_cat_growth = _t(device) - _t_cat_0
         _t_sparse_0 = _t(device)
@@ -290,7 +329,7 @@ class Expansion(Method):
                 leaf_idx_next.new_empty((0,), dtype=leaf_expansion.dtype),
                 parent_idx_1b_new,
                 batch_new,
-                geo_lr_assign_next,
+                geo_angle_next,
                 leaf_mask_next,
                 True,
             )
@@ -316,10 +355,7 @@ class Expansion(Method):
             feats_used += 1
 
             if feats_used < avail_feats_dim:
-                geo_feat = pos_new.new_zeros((pos_new.size(0), 1))
-                mask = geo_lr_assign_next >= 0
-                if mask.any():
-                    geo_feat[mask] = (geo_lr_assign_next[mask] == 0).to(pos_new.dtype).unsqueeze(-1)
+                geo_feat = geo_angle_next.clamp(min=0.0).unsqueeze(-1)
                 features.append(geo_feat)
                 feats_used += 1
 
@@ -355,9 +391,11 @@ class Expansion(Method):
 
         leaf_parent_idx_next = parent_idx_new_0b[leaf_idx_next]
 
-        # Compute local bases for new leaf nodes
+        # Compute local bases for new leaf nodes (with ordinal info for structured root frames)
         leaf_fwd, leaf_side = compute_local_bases_for_leaves(
             pos_new, parent_idx_new_0b, leaf_parent_idx_next, model.uhat,
+            child_ordinal=child_ordinal_t,
+            sibling_count=sib_count_long,
         )
 
         model_kwargs = {"tmd": tmd} if tmd is not None else None
@@ -386,25 +424,15 @@ class Expansion(Method):
 
         _t_geo_0 = _t(device)
         if leaf_idx_next.numel() > 0:
-            geo_lr_mask, valid = compute_geo_lr_for_new_leaves(
+            geo_angle_refined, valid = compute_geo_angle_for_new_leaves(
                 pos_new, parent_idx_new_0b, leaf_idx_next,
-                uhat=model.uhat, debug=getattr(self, "debug", False),
+                uhat=model.uhat,
             )
             if valid.any():
-                geo_left = geo_lr_mask[valid]
-                geo_lr_assign_next = geo_lr_assign_next.clone()
-                geo_lr_assign_next[leaf_idx_next[valid]] = (~geo_left).to(
-                    dtype=geo_lr_assign_next.dtype
-                )
+                geo_angle_next = geo_angle_next.clone()
+                geo_angle_next[leaf_idx_next[valid]] = geo_angle_refined[valid]
 
-        _t_geo_lr_mask = _t(device) - _t_geo_0
-        # logger.info(
-        #     "[expand step=%d N=%d L=%d] leaf_loop=%.4fs cat_growth=%.4fs "
-        #     "sparse_rebuild=%.4fs diffusion_sample=%.4fs geo_lr_mask=%.4fs total=%.4fs",
-        #     step, pos_new.size(0), int(leaf_idx_next.numel()),
-        #     _t_leaf_loop, _t_cat_growth, _t_sparse_rebuild,
-        #     _t_diffusion_sample, _t_geo_lr_mask, _t(device) - _t_start,
-        # )
+        _t_geo_angle = _t(device) - _t_geo_0
 
         if exp_pred.dim() == 1:
             exp_pred = exp_pred.unsqueeze(-1)
@@ -412,7 +440,7 @@ class Expansion(Method):
         leaf_expansion_next = (expansion_score > map_threshold).long() + 1
 
         remaining_capacity_new = target_size.to(device) - node_counts_per_graph
-        terminated = leaf_idx_next.numel() == 0 # (remaining_capacity_new < 2).all() or
+        terminated = leaf_idx_next.numel() == 0
 
         return (
             adj_new,
@@ -421,7 +449,7 @@ class Expansion(Method):
             leaf_expansion_next,
             parent_idx_1b_new,
             batch_new,
-            geo_lr_assign_next,
+            geo_angle_next,
             leaf_mask_next,
             terminated,
         )
@@ -569,10 +597,11 @@ class Expansion(Method):
             features = [is_leaf]
             feats_used = 1
 
-            # Geometry-derived left/right bit for siblings
+            # Geometry-derived ordinal feature for siblings (replaces binary L/R)
             if feats_used < avail_feats_dim:
-                geo_left = geo_lr_mask.to(device=pos_gt.device, dtype=pos_gt.dtype).unsqueeze(-1)
-                features.append(geo_left)
+                geo_ordinal = pre_geom_p0['geo_ordinal'].to(device=pos_gt.device, dtype=pos_gt.dtype)
+                geo_feat = geo_ordinal.clamp(min=0.0).unsqueeze(-1)  # sentinel -1.0 → 0.0
+                features.append(geo_feat)
                 feats_used += 1
 
             # Add indicator for nodes flagged as newly expanded leaves (when provided)

@@ -60,6 +60,10 @@ class RandRedDataset(IterableDataset, ABC):
             if tmd.ndim == 1:
                 tmd = tmd[None, :]
 
+        # Compute number of root children
+        root_idx = graph._state.root
+        num_root_children = int(np.sum(parent_idx == root_idx)) if root_idx is not None else 0
+
         return ReducedGraphData(
             target_size=graph.n,
             reduction_level=graph.level,
@@ -73,6 +77,7 @@ class RandRedDataset(IterableDataset, ABC):
             total_tree_size=graph.total_nodes,
             new_leaf_idx_from_next=new_leaf_idx,
             new_leaf_mask_from_next=new_leaf_mask,
+            num_root_children=num_root_children,
             tmd=tmd,
         )
 

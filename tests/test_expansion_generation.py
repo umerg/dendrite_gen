@@ -127,7 +127,7 @@ def test_expansion_generation_history_and_plot():
     parent_idx_1b = th.zeros(num_graphs, device=device, dtype=th.long)
     leaf_idx = th.arange(num_graphs, device=device, dtype=th.long)
     leaf_expansion = th.where(target_sizes >= 3, th.full_like(leaf_idx, 2), th.full_like(leaf_idx, 1))
-    geo_lr_assign = th.full((num_graphs,), -1, device=device, dtype=th.long)
+    geo_angle = th.full((num_graphs,), -1.0, device=device, dtype=th.float)
     leaf_mask = th.ones((num_graphs,), device=device, dtype=th.bool)
 
     histories = []
@@ -136,13 +136,13 @@ def test_expansion_generation_history_and_plot():
     step = 0
     while not terminated and step < max_steps:
         histories.append({'pos': pos.clone(), 'batch': batch.clone(), 'leaf_idx': leaf_idx.clone(), 'adj': adj})
-        adj, pos, leaf_idx, leaf_expansion, parent_idx_1b, batch, geo_lr_assign, leaf_mask, terminated = method.expand(
+        adj, pos, leaf_idx, leaf_expansion, parent_idx_1b, batch, geo_angle, leaf_mask, terminated = method.expand(
             adj, batch, target_sizes, model,
             pos=pos,
             leaf_idx=leaf_idx,
             leaf_expansion=leaf_expansion,
             parent_idx_1b=parent_idx_1b,
-            geo_lr_assign=geo_lr_assign,
+            geo_angle=geo_angle,
             leaf_mask=leaf_mask,
             step=step,
             map_threshold=0.5,
