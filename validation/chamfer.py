@@ -356,21 +356,25 @@ def run_metrics(
     length_bin_edges: np.ndarray | None = None
     angle_bin_edges: np.ndarray | None = None
     if plot_dir is not None:
-        all_lengths: list[np.ndarray] = []
-        all_angles: list[np.ndarray] = []
+        _gt_lengths_pre: list[np.ndarray] = []
+        _gt_angles_pre: list[np.ndarray] = []
+        _pred_lengths_pre: list[np.ndarray] = []
+        _pred_angles_pre: list[np.ndarray] = []
         for g in gt_graphs:
-            all_lengths.append(branch_length_values(g))
-            all_angles.append(bifurcation_angle_values(g) if g.number_of_nodes() else np.zeros((0,), dtype=np.float64))
+            _gt_lengths_pre.append(branch_length_values(g))
+            _gt_angles_pre.append(bifurcation_angle_values(g) if g.number_of_nodes() else np.zeros((0,), dtype=np.float64))
         for g in pred_graphs:
-            all_lengths.append(branch_length_values(g))
-            all_angles.append(bifurcation_angle_values(g) if g.number_of_nodes() else np.zeros((0,), dtype=np.float64))
+            _pred_lengths_pre.append(branch_length_values(g))
+            _pred_angles_pre.append(bifurcation_angle_values(g) if g.number_of_nodes() else np.zeros((0,), dtype=np.float64))
 
-        if any(arr.size for arr in all_lengths):
-            length_vals = np.concatenate([arr for arr in all_lengths if arr.size], axis=0)
+        all_lengths_combined = _gt_lengths_pre + _pred_lengths_pre
+        all_angles_combined = _gt_angles_pre + _pred_angles_pre
+        if any(arr.size for arr in all_lengths_combined):
+            length_vals = np.concatenate([arr for arr in all_lengths_combined if arr.size], axis=0)
         else:
             length_vals = np.zeros((0,), dtype=np.float64)
-        if any(arr.size for arr in all_angles):
-            angle_vals = np.concatenate([arr for arr in all_angles if arr.size], axis=0)
+        if any(arr.size for arr in all_angles_combined):
+            angle_vals = np.concatenate([arr for arr in all_angles_combined if arr.size], axis=0)
         else:
             angle_vals = np.zeros((0,), dtype=np.float64)
 
@@ -397,6 +401,19 @@ def run_metrics(
     chamfers: list[float] = []
     by_size: dict[int, list[float]] = defaultdict(list)
 
+    # Dataset-level accumulators
+    all_gt_lengths: list[np.ndarray] = []
+    all_pred_lengths: list[np.ndarray] = []
+    all_gt_angles: list[np.ndarray] = []
+    all_pred_angles: list[np.ndarray] = []
+    all_height_gt: list[float] = []
+    all_height_pred: list[float] = []
+    all_span_gt: list[float] = []
+    all_span_pred: list[float] = []
+    all_bbox_gt: list[float] = []
+    all_bbox_pred: list[float] = []
+    all_tmd_bottleneck: list[float] = []
+
     ged_raw_vals: list[float] = []
     ged_norm_vals: list[float] = []
     ged_timeouts = 0
@@ -410,10 +427,14 @@ def run_metrics(
         pred_pts = _sample_points_on_graph(pred, spacing)
         chamfer_ab, chamfer_ba = _chamfer_components(gt_pts, pred_pts, squared=squared)
         dist = float(chamfer_ab + chamfer_ba)
-        mean_len_gt = mean_branch_length(gt)
-        mean_len_pred = mean_branch_length(pred)
-        mean_amp_gt = mean_branch_amplitude(gt)
-        mean_amp_pred = mean_branch_amplitude(pred)
+        gt_len_vals = branch_length_values(gt)
+        pred_len_vals = branch_length_values(pred)
+        gt_ang_vals = bifurcation_angle_values(gt) if gt.number_of_nodes() else np.zeros((0,), dtype=np.float64)
+        pred_ang_vals = bifurcation_angle_values(pred) if pred.number_of_nodes() else np.zeros((0,), dtype=np.float64)
+        mean_len_gt = float(np.mean(gt_len_vals)) if gt_len_vals.size else float("nan")
+        mean_len_pred = float(np.mean(pred_len_vals)) if pred_len_vals.size else float("nan")
+        mean_amp_gt = float(np.mean(gt_ang_vals)) if gt_ang_vals.size else float("nan")
+        mean_amp_pred = float(np.mean(pred_ang_vals)) if pred_ang_vals.size else float("nan")
         f1_sampled = precision_recall_f1_radius(gt_pts, pred_pts, radius=f1_radius)
         gt_nodes = np.stack([_pos_to_xyz(gt.nodes[n].get("pos", np.zeros(3))) for n in gt.nodes()], axis=0) if gt.number_of_nodes() else np.zeros((0, 3), dtype=np.float64)
         pred_nodes = np.stack([_pos_to_xyz(pred.nodes[n].get("pos", np.zeros(3))) for n in pred.nodes()], axis=0) if pred.number_of_nodes() else np.zeros((0, 3), dtype=np.float64)
@@ -430,6 +451,18 @@ def run_metrics(
         chamfers.append(dist)
         by_size[size].append(dist)
 
+        # Accumulate dataset-level stats
+        all_gt_lengths.append(gt_len_vals)
+        all_pred_lengths.append(pred_len_vals)
+        all_gt_angles.append(gt_ang_vals)
+        all_pred_angles.append(pred_ang_vals)
+        all_height_gt.append(float(height_gt))
+        all_height_pred.append(float(height_pred))
+        all_span_gt.append(float(span_gt))
+        all_span_pred.append(float(span_pred))
+        all_bbox_gt.append(float(bbox_diag_gt))
+        all_bbox_pred.append(float(bbox_diag_pred))
+
         gt_barcode, gt_diag = compute_tmd_barcode_diagram(
             gt,
             filtration="path",
@@ -445,6 +478,7 @@ def run_metrics(
             simplify_to_critical_tree=True,
         )
         tmd_bn = bottleneck_distance(gt_diag, pred_diag, canonicalize=False)
+        all_tmd_bottleneck.append(float(tmd_bn))
 
         ged_raw = None
         ged_norm = None
@@ -650,8 +684,6 @@ def run_metrics(
             )
             hist_paths: list[Path] = []
             if length_bin_edges is not None:
-                gt_len_vals = branch_length_values(gt)
-                pred_len_vals = branch_length_values(pred)
                 hist_paths.append(
                     plot_tornado_histogram(
                         gt_len_vals,
@@ -668,8 +700,6 @@ def run_metrics(
                     )
                 )
             if angle_bin_edges is not None:
-                gt_ang_vals = bifurcation_angle_values(gt) if gt.number_of_nodes() else np.zeros((0,), dtype=np.float64)
-                pred_ang_vals = bifurcation_angle_values(pred) if pred.number_of_nodes() else np.zeros((0,), dtype=np.float64)
                 hist_paths.append(
                     plot_tornado_histogram(
                         gt_ang_vals,
@@ -704,6 +734,47 @@ def run_metrics(
     summary = _summarize(chamfers)
     per_size_summary = {str(k): _summarize(v) for k, v in sorted(by_size.items())}
 
+    # Dataset-level summary stats
+    _cat = lambda arrs: np.concatenate(arrs).tolist() if arrs and any(a.size for a in arrs) else []
+    dataset_summary: dict[str, Any] = {
+        "height_gt": _summarize(all_height_gt),
+        "height_pred": _summarize(all_height_pred),
+        "span_xy_gt": _summarize(all_span_gt),
+        "span_xy_pred": _summarize(all_span_pred),
+        "bbox_diag_gt": _summarize(all_bbox_gt),
+        "bbox_diag_pred": _summarize(all_bbox_pred),
+        "tmd_bottleneck": _summarize(all_tmd_bottleneck),
+        "branch_length_gt": _summarize(_cat(all_gt_lengths)),
+        "branch_length_pred": _summarize(_cat(all_pred_lengths)),
+        "bifurcation_angle_gt": _summarize(_cat(all_gt_angles)),
+        "bifurcation_angle_pred": _summarize(_cat(all_pred_angles)),
+    }
+
+    # Dataset-level tornado histograms
+    if plot_dir is not None:
+        plot_dir = Path(plot_dir)
+        gt_len_all = np.concatenate(all_gt_lengths) if all_gt_lengths and any(a.size for a in all_gt_lengths) else np.zeros((0,), dtype=np.float64)
+        pred_len_all = np.concatenate(all_pred_lengths) if all_pred_lengths and any(a.size for a in all_pred_lengths) else np.zeros((0,), dtype=np.float64)
+        gt_ang_all = np.concatenate(all_gt_angles) if all_gt_angles and any(a.size for a in all_gt_angles) else np.zeros((0,), dtype=np.float64)
+        pred_ang_all = np.concatenate(all_pred_angles) if all_pred_angles and any(a.size for a in all_pred_angles) else np.zeros((0,), dtype=np.float64)
+
+        if length_bin_edges is not None:
+            plot_tornado_histogram(
+                gt_len_all, pred_len_all, bin_edges=length_bin_edges,
+                out_dir=plot_dir, stem="dataset", file_tag="branch_length_hist",
+                title="Dataset Branch Path Length",
+                color_gt=GT_COLOR, color_pred=PRED_COLOR,
+                value_label="Length (metres)", xlim=(-3.0, 3.0),
+            )
+        if angle_bin_edges is not None:
+            plot_tornado_histogram(
+                gt_ang_all, pred_ang_all, bin_edges=angle_bin_edges,
+                out_dir=plot_dir, stem="dataset", file_tag="bifurcation_angle_hist",
+                title="Dataset Bifurcation Angles",
+                color_gt=GT_COLOR, color_pred=PRED_COLOR,
+                value_label="Angle (deg)", xlim=(-0.025, 0.025),
+            )
+
     result: dict[str, Any] = {
         "config": {
             "gt_dir": str(gt_dir),
@@ -721,6 +792,7 @@ def run_metrics(
             "hist_bins": int(hist_bins),
         },
         "summary": summary,
+        "dataset_summary": dataset_summary,
         "per_size_summary": per_size_summary,
         "per_tree": per_tree,
         "unmatched": unmatched,
@@ -842,6 +914,19 @@ def main() -> None:
     print("Chamfer summary:")
     print(f"  count={summary['count']} mean={summary['mean']:.6f} std={summary['std']:.6f} "
           f"min={summary['min']:.6f} max={summary['max']:.6f} median={summary['median']:.6f}")
+
+    ds = results.get("dataset_summary", {})
+    if ds:
+        print("\nDataset-level summary:")
+        for key in ("height_gt", "height_pred", "span_xy_gt", "span_xy_pred",
+                     "bbox_diag_gt", "bbox_diag_pred", "tmd_bottleneck",
+                     "branch_length_gt", "branch_length_pred",
+                     "bifurcation_angle_gt", "bifurcation_angle_pred"):
+            s = ds.get(key)
+            if s is None:
+                continue
+            print(f"  {key}: count={s['count']} mean={s['mean']:.4f} std={s['std']:.4f} "
+                  f"min={s['min']:.4f} max={s['max']:.4f} median={s['median']:.4f}")
     if "ged" in results.get("config", {}):
         ged_summary = results.get("ged_summary")
         ged_norm_summary = results.get("ged_norm_summary")
