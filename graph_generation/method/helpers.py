@@ -108,6 +108,79 @@ def global_inplane_basis(uhat: th.Tensor, eps: float = 1e-8) -> Tuple[th.Tensor,
     return e1, e2
 
 
+def _order_root_children_by_uhat(
+    offsets: th.Tensor,
+    uhat: th.Tensor,
+    eps: float = 1e-8,
+) -> Tuple[th.Tensor, th.Tensor, th.Tensor]:
+    """SO(2)-invariant ordering of root children.
+
+    child_0 = lowest uhat component (tiebreak: largest perp-plane distance).
+    Remaining children ordered clockwise relative to child_0's perp direction.
+
+    Args:
+        offsets: [k, 3] offsets from root to each child
+        uhat:    [3] SO(2) axis
+        eps:     numerical tolerance
+
+    Returns:
+        sorted_idx:   [k] indices sorted by ordinal (child_0 first)
+        fwd0_unit:    [3] forward direction (root→child_0 in perp plane), zero if degenerate
+        delta_angles: [k] angle of each child relative to child_0 (child_0 gets 0.0)
+    """
+    k = offsets.size(0)
+    device = offsets.device
+    dtype = offsets.dtype
+    uhat_vec = uhat.view(1, -1)
+
+    # Project onto uhat and perp plane
+    uhat_components = (offsets * uhat_vec).sum(dim=-1)          # [k]
+    offsets_perp = offsets - uhat_components.unsqueeze(-1) * uhat_vec  # [k, 3]
+    perp_dist = offsets_perp.norm(dim=-1)                       # [k]
+
+    # Select child_0: lowest uhat component, tiebreak largest perp distance
+    min_uhat = uhat_components.min()
+    is_min = uhat_components <= min_uhat + eps
+    tied_perp = th.where(is_min, perp_dist, perp_dist.new_tensor(-1.0))
+    child0_local = int(tied_perp.argmax().item())
+
+    fwd0 = offsets_perp[child0_local]
+    fwd0_norm = fwd0.norm()
+
+    delta_angles = th.zeros(k, device=device, dtype=dtype)
+
+    if fwd0_norm <= eps:
+        # Degenerate: all children on uhat axis — sort by uhat ascending
+        _, sorted_idx = uhat_components.sort()
+        return sorted_idx, th.zeros(3, device=device, dtype=dtype), delta_angles
+
+    fwd0_unit = fwd0 / fwd0_norm
+    side0 = th.cross(uhat, fwd0_unit)
+    side0 = side0 / (side0.norm() + eps)
+
+    # Compute angle of each child relative to fwd0
+    proj_fwd = (offsets_perp * fwd0_unit.unsqueeze(0)).sum(dim=-1)   # [k]
+    proj_side = (offsets_perp * side0.unsqueeze(0)).sum(dim=-1)      # [k]
+    angles_from_fwd = th.atan2(proj_side, proj_fwd)                  # [k]
+
+    # Sort clockwise (descending angle); child_0 has angle ~0 and should be first
+    _, sorted_idx = (-angles_from_fwd).sort()
+
+    # Ensure child_0 is first (it should be, but handle float precision)
+    c0_rank = (sorted_idx == child0_local).nonzero(as_tuple=False).flatten()
+    if c0_rank.numel() > 0 and c0_rank[0].item() != 0:
+        # Swap child_0 to position 0
+        r = c0_rank[0].item()
+        sorted_idx = sorted_idx.clone()
+        sorted_idx[0], sorted_idx[r] = sorted_idx[r].clone(), sorted_idx[0].clone()
+
+    # delta_angles = angle of each child relative to fwd0 (child_0 gets 0.0)
+    delta_angles = angles_from_fwd.clone()
+    delta_angles[child0_local] = 0.0
+
+    return sorted_idx, fwd0_unit, delta_angles
+
+
 def global_to_local(
     offset_global: th.Tensor,
     forward: th.Tensor,
@@ -557,13 +630,16 @@ def compute_geo_lr_mask(
         sel = has_gp_mask.nonzero(as_tuple=False).flatten()
         v_in[sel] = pos[parent[sel]] - pos[gp[sel]]
     fallback_mask = has_parent & ~has_gp_mask
-    if fallback_mask.any():
-        v_in[fallback_mask] = global_e1.view(1, -1)
 
     v_out = th.zeros((N, pos.size(1)), device=device, dtype=dtype)
     if has_parent.any():
         sel = has_parent.nonzero(as_tuple=False).flatten()
         v_out[sel] = pos[sel] - pos[parent[sel]]
+
+    if fallback_mask.any():
+        # Root children: use v_out as v_in (geometric, no global axis).
+        # Unused for their L/R decision (Z-comparison path); yields sinψ=0 for sinψ codepath.
+        v_in[fallback_mask] = v_out[fallback_mask]
 
     du_in = (v_in * uhat_vec).sum(dim=-1, keepdim=True)
     du_out = (v_out * uhat_vec).sum(dim=-1, keepdim=True)
@@ -679,10 +755,12 @@ def compute_root_child_angles(
     """Compute per-node ordinal feature and relative angles for root children.
 
     For root children (k ≥ 1):
-      1. Project child offsets onto plane ⊥ uhat.
-      2. Sort clockwise from x-axis → child 0 is "leftmost".
+      1. Select child_0 by lowest uhat component (tiebreak: largest perp distance).
+      2. Order remaining children clockwise relative to child_0's perp direction.
       3. Compute Δθ_i = angle of child i relative to child 0's direction.
       4. Ordinal feature = i / max(k-1, 1).
+
+    This ordering is SO(2)-invariant (no global axes used).
 
     For binary interior children: left (geo_lr_mask=True) → 0.0, right → 1.0.
     For root/parentless nodes: sentinel -1.0.
@@ -726,13 +804,9 @@ def compute_root_child_angles(
         geo_ordinal[binary_interior] = (~geo_lr_mask[binary_interior]).to(dtype)
         # left (True) → 0.0, right (False) → 1.0
 
-    # --- Root children: angular ordering ---
+    # --- Root children: SO(2)-invariant ordering by uhat component ---
     if not is_root.any():
         return geo_ordinal, geo_delta_theta
-
-    # Get canonical basis for perp plane (used only for clockwise-from-x ordering)
-    e1, e2 = global_inplane_basis(uhat, eps=eps)
-    uhat_vec = uhat.view(1, -1)
 
     root_children_mask = parent_is_root  # [N] bool
     if not root_children_mask.any():
@@ -751,47 +825,15 @@ def compute_root_child_angles(
             geo_delta_theta[children[0]] = 0.0
             continue
 
-        # Project child offsets onto perp plane
         offsets = pos[children] - pos[r].unsqueeze(0)  # [k, 3]
-        du = (offsets * uhat_vec).sum(dim=-1, keepdim=True)
-        offsets_perp = offsets - du * uhat_vec  # [k, 3]
+        sorted_idx, _fwd0, delta_angles = _order_root_children_by_uhat(
+            offsets, uhat, eps=eps,
+        )
 
-        # Compute angle of each child in global perp plane (for ordering only)
-        proj_e1 = (offsets_perp * e1.unsqueeze(0)).sum(dim=-1)  # [k]
-        proj_e2 = (offsets_perp * e2.unsqueeze(0)).sum(dim=-1)  # [k]
-        # atan2 gives angle from e1 axis; negate for clockwise
-        angles_global = th.atan2(proj_e2, proj_e1)  # [k], range [-π, π]
-        # Sort clockwise from x-axis: negate angle so clockwise = ascending
-        _, sorted_idx = (-angles_global).sort()
-
-        # Child 0 (leftmost clockwise) defines the reference direction
-        child0 = children[sorted_idx[0]]
-        fwd0 = offsets_perp[sorted_idx[0]]  # direction from root to child 0 in perp plane
-        fwd0_norm = fwd0.norm()
-
-        if fwd0_norm <= eps:
-            # Degenerate: child 0 is on the uhat axis, use fallback
-            geo_ordinal[children] = th.arange(k, device=device, dtype=dtype) / max(k - 1, 1)
-            continue
-
-        fwd0_unit = fwd0 / fwd0_norm
-        # sideways = uhat × forward (already in perp plane)
-        side0 = th.cross(uhat, fwd0_unit)
-        side0 = side0 / (side0.norm() + eps)
-
-        # Compute relative angles from child 0's direction
         for rank, si in enumerate(sorted_idx.tolist()):
             c = children[si]
             geo_ordinal[c] = rank / max(k - 1, 1)
-
-            if rank == 0:
-                geo_delta_theta[c] = 0.0
-            else:
-                # Angle of child relative to fwd0
-                off_perp = offsets_perp[si]
-                c_fwd = (off_perp * fwd0_unit).sum()
-                c_side = (off_perp * side0).sum()
-                geo_delta_theta[c] = th.atan2(c_side, c_fwd)
+            geo_delta_theta[c] = delta_angles[si]
 
     return geo_ordinal, geo_delta_theta
 
@@ -969,7 +1011,6 @@ def compute_geo_angle_for_new_leaves(
     # All leaves with at least 1 sibling are valid
     valid = sibling_count >= 1
 
-    e1, e2 = global_inplane_basis(uhat, eps=eps)
     uhat_vec = uhat.view(1, -1)
 
     for j in range(M):
@@ -986,33 +1027,36 @@ def compute_geo_angle_for_new_leaves(
         # Get offsets from parent, project onto perp plane
         leaf_globals = new_leaf_idx[group_indices]
         offsets = pos[leaf_globals] - pos[parent_node].unsqueeze(0)
-        du = (offsets * uhat_vec).sum(dim=-1, keepdim=True)
-        offsets_perp = offsets - du * uhat_vec
 
         # Check if parent is root
         is_root_parent = parent_idx[parent_node] < 0
 
         if is_root_parent:
-            # Angular ordering clockwise from x-axis
-            proj_e1 = (offsets_perp * e1.unsqueeze(0)).sum(dim=-1)
-            proj_e2 = (offsets_perp * e2.unsqueeze(0)).sum(dim=-1)
-            angles = th.atan2(proj_e2, proj_e1)
-            _, sorted_idx = (-angles).sort()  # clockwise = negate
-
+            # SO(2)-invariant ordering by uhat component
+            sorted_idx, _fwd0, _delta = _order_root_children_by_uhat(
+                offsets, uhat, eps=eps,
+            )
             for rank, si in enumerate(sorted_idx.tolist()):
                 geo_angle[group_indices[si]] = rank / max(k - 1, 1)
         elif k == 2:
             # Binary: use the existing parity approach (simplified)
             # Compute v_in for the parent
+            du = (offsets * uhat_vec).sum(dim=-1, keepdim=True)
+            offsets_perp = offsets - du * uhat_vec
+
             gp = parent_idx[parent_node]
             if gp >= 0:
                 v_in = pos[parent_node] - pos[gp]
             else:
-                v_in = e1  # fallback
+                # Non-root degenerate fallback: global axis is acceptable here
+                e1, _ = global_inplane_basis(uhat, eps=eps)
+                v_in = e1
             du_in = (v_in * uhat.view(-1)).sum()
             v_in_perp = v_in - du_in * uhat
             nin = v_in_perp.norm()
             if nin <= eps:
+                # Degenerate: global axis fallback (non-root, rare)
+                e1, _ = global_inplane_basis(uhat, eps=eps)
                 v_in_unit = e1
             else:
                 v_in_unit = v_in_perp / nin
@@ -1075,13 +1119,16 @@ def compute_geo_lr_mask_f2(
         sel = has_gp_mask.nonzero(as_tuple=False).flatten()
         v_in[sel] = pos[parent[sel]] - pos[gp[sel]]
     fallback_mask = has_parent & ~has_gp_mask
-    if fallback_mask.any():
-        v_in[fallback_mask] = global_e1.view(1, -1)
 
     v_out = th.zeros((N, pos.size(1)), device=device, dtype=dtype)
     if has_parent.any():
         sel = has_parent.nonzero(as_tuple=False).flatten()
         v_out[sel] = pos[sel] - pos[parent[sel]]
+
+    if fallback_mask.any():
+        # Root children: use v_out as v_in (geometric, no global axis).
+        # Unused for their L/R decision (Z-comparison path); yields sinψ=0 for sinψ codepath.
+        v_in[fallback_mask] = v_out[fallback_mask]
 
     du_in = (v_in * uhat_vec).sum(dim=-1, keepdim=True)
     du_out = (v_out * uhat_vec).sum(dim=-1, keepdim=True)

@@ -1,6 +1,6 @@
 # K-Root Children Flow Trace: Training & Sampling
 
-A comprehensive, line-by-line trace of how root nodes with k>2 children are handled across the entire pipeline — from data construction through geometry computation, diffusion noising/denoising, and loss/position recovery. Covers the design invariants (SO(2) equivariance, locked frames, ordinal features), the two-layer global-ordering/relative-frame approach, and all edge cases for k=1, k=2, and k>2.
+A comprehensive, line-by-line trace of how root nodes with k>2 children are handled across the entire pipeline — from data construction through geometry computation, diffusion noising/denoising, and loss/position recovery. Covers the design invariants (SO(2) equivariance, locked frames, ordinal features), the SO(2)-invariant ordering and relative-frame approach, and all edge cases for k=1, k=2, and k>2.
 
 ---
 
@@ -11,7 +11,7 @@ A comprehensive, line-by-line trace of how root nodes with k>2 children are hand
 3. [High-Level Overview: Sampling Path](#3-sampling-overview)
 4. [Phase 1: Data Pipeline — `num_root_children` and Reduction](#4-phase-1-data-pipeline)
 5. [Phase 2: Geometric Ordering — `compute_root_child_angles`](#5-phase-2-geometric-ordering)
-   - [2a: Global-Frame Ordering (Labeling Only)](#2a-global-frame-ordering)
+   - [2a: SO(2)-Invariant Child Ordering via `_order_root_children_by_uhat`](#2a-so2-invariant-ordering)
    - [2b: Relative-Frame Angles (SO(2)-Equivariant)](#2b-relative-frame-angles)
    - [2c: Ordinal Feature Assignment](#2c-ordinal-feature)
    - [2d: Binary Interior Children (Unchanged)](#2d-binary-interior)
@@ -56,15 +56,16 @@ A comprehensive, line-by-line trace of how root nodes with k>2 children are hand
 
 The entire pipeline preserves SO(2) equivariance around `uhat` (default: z-axis `[0,0,1]`). This means:
 
-- **Local frames must NOT use global axes** (`global_inplane_basis`) as their `forward` direction. Global axes are used **only** for labeling (ordering children clockwise) — never for defining the frame in which positions are predicted.
-- **The `forward` direction comes from geometry itself**: the direction from root to the leftmost child, projected onto the plane perpendicular to `uhat`.
-- Rotating the entire tree around `uhat` must produce identical predictions (up to the same rotation).
+- **Neither ordering nor frames use global axes** (`global_inplane_basis`) for root children. Global axes are used **only** as a degenerate fallback (e.g., `v_in` parallel to `uhat` for non-root nodes) and for sampling frame generation (random angle needs a basis).
+- **Child ordering is SO(2)-invariant**: child_0 is selected by lowest `uhat` component (tiebreak: largest perp-plane distance). Both criteria are unchanged by rotation around `uhat`.
+- **The `forward` direction comes from geometry itself**: the direction from root to child_0, projected onto the plane perpendicular to `uhat`.
+- Rotating the entire tree around `uhat` must produce identical ordinals, identical delta-theta values, and identical predictions (up to the same rotation).
 
-### Two-Layer Approach: Global Ordering → Relative Frame
+### SO(2)-Invariant Ordering → Relative Frame
 
 | Layer | Purpose | Uses Global Axes? | Enters Model? |
 |-------|---------|-------------------|---------------|
-| **Geometric ordering** | Label which child is "leftmost" (child 0) | Yes (`e1`, `e2` from `global_inplane_basis`) | No — only determines index assignment |
+| **Geometric ordering** | Label which child is child_0 (lowest uhat component) | **No** — uses `_order_root_children_by_uhat` (SO(2)-invariant) | No — only determines index assignment |
 | **Relative frame** | Define per-child `forward`/`sideways` basis for position prediction | No — uses root→child_0 direction | Yes — this is the local frame for diffusion |
 
 ### Key Design Decisions
@@ -73,12 +74,28 @@ The entire pipeline preserves SO(2) equivariance around `uhat` (default: z-axis 
 |----------|--------|-----------|
 | **Spawn strategy** | All k children at once in one `expand()` step | Simplest; root has no prior children to reference |
 | **k source** | From GT/metadata (`num_root_children` field) | No prediction head needed; k is a structural property |
-| **Ordering convention** | Clockwise from x-axis in plane ⊥ uhat | Deterministic, reproducible labeling |
+| **Child_0 selection** | Lowest uhat component (tiebreak: largest perp distance) | SO(2)-invariant; backward-compatible with k=2 (lower Z = left = ordinal 0.0) |
+| **Remaining children** | Ordered clockwise relative to child_0's perp direction | SO(2)-equivariant (relative to geometric reference, not global axis) |
 | **Feature encoding** | Ordinal `i/(k-1)`, NOT angular `θ/2π` | Ordinal does not leak GT angular information into features |
-| **Reference direction** | Root → leftmost child (child 0) | Preserves SO(2) equivariance |
+| **Reference direction** | Root → child_0 in perp plane | SO(2)-equivariant (co-rotates with positions) |
 | **Frame stability** | Locked to P_0 positions during diffusion noising | Per-child frames must not drift with noise |
 | **Sampling frames** | Random `forward` for child 0, then `2πi/k` rotations | SO(2)-equivariant — absolute orientation is free |
+| **Global axes policy** | NEVER for root ordering/frames; ONLY for non-root degenerate fallbacks and sampling basis | Prevents SO(2) violation at the root level |
 | **Backward compat** | Not needed | Full retrain acceptable |
+
+### `global_inplane_basis` Usage Policy
+
+After the SO(2) fix, `global_inplane_basis` is **never used for root child ordering or root child frames**. Its remaining usages are:
+
+| Location | Status | Reason |
+|----------|--------|--------|
+| `compute_root_child_angles` | **REMOVED** | Replaced by `_order_root_children_by_uhat` |
+| `compute_geo_angle_for_new_leaves` (root branch) | **REMOVED** | Replaced by `_order_root_children_by_uhat` |
+| `compute_geo_lr_mask` / `_f2` (root fallback) | **REMOVED** | Replaced with `v_in = v_out` (geometric) |
+| `compute_geo_lr_mask` / `_f2` (v_in_perp ≈ 0 fallback) | **KEPT** | True degenerate fallback for non-root nodes (geometric rarity) |
+| `compute_local_bases` (forward ≈ 0 fallback) | **KEPT** | True degenerate fallback (v_in parallel to uhat) |
+| `compute_local_bases_for_leaves` (sampling basis) | **KEPT** | Random rotation basis for sampling (equivariant in distribution since angle is random) |
+| `compute_geo_angle_for_new_leaves` (non-root binary) | **KEPT** | Degenerate fallback for non-root binary parents with no grandparent |
 
 ### Ordinal Feature Table
 
@@ -110,7 +127,8 @@ Expansion.get_loss(batch, model)
     |       +-- compute_geo_lr_mask()             -> geo_lr_mask [N] bool (binary L/R, still needed for interior)
     |       +-- compute_root_child_angles()       -> geo_ordinal [N], geo_delta_theta [N]  ★ NEW
     |       |       |
-    |       |       +-- Global-frame clockwise ordering from x-axis (labeling only)
+    |       |       +-- _order_root_children_by_uhat() (SO(2)-invariant, no global axes)
+    |       |       +-- child_0 = lowest uhat component (tiebreak: largest perp dist)
     |       |       +-- Relative angles Δθ_i from child 0's direction
     |       |       +-- Ordinal feature i/(k-1)
     |       |
@@ -232,7 +250,7 @@ The field is passed to the `ReducedGraphData` constructor as a scalar int, which
 
 **File**: `graph_generation/method/helpers.py:671-796`
 
-This function implements the **two-layer approach**: global-frame ordering for labeling, then relative-frame angles for frame construction.
+This function implements SO(2)-invariant ordering for root children, then relative-frame angles for frame construction. **No global axes are used** — ordering is based entirely on uhat-component projections and geometric relationships.
 
 **Signature**:
 ```python
@@ -250,83 +268,94 @@ def compute_root_child_angles(
 - `geo_ordinal [N]`: float tensor. `i/(k-1)` for root children, `0.0`/`1.0` for binary L/R, `-1.0` sentinel for root/parentless nodes.
 - `geo_delta_theta [N]`: float tensor. Relative angle from child 0 for root children (radians). `0.0` for all other nodes.
 
-### 2a: Global-Frame Ordering (Labeling Only) {#2a-global-frame-ordering}
+### 2a: SO(2)-Invariant Child Ordering via `_order_root_children_by_uhat` {#2a-so2-invariant-ordering}
 
-**Purpose**: Determine which child is "leftmost" (child 0) using a **deterministic, global** convention. This ordering is for **index assignment only** — no global axes enter the local frame.
+**Purpose**: Determine which child is child_0 using an **SO(2)-invariant** criterion. No global axes are involved — child selection and ordering are based on uhat-component projections and perpendicular-plane distances, both of which are unchanged by rotation around `uhat`.
+
+The shared helper `_order_root_children_by_uhat` (`helpers.py:111-181`) handles all the logic:
 
 ```python
-# helpers.py:733-734
-e1, e2 = global_inplane_basis(uhat, eps=eps)  # Global basis for perp plane
-uhat_vec = uhat.view(1, -1)
+# helpers.py:111-181
+def _order_root_children_by_uhat(
+    offsets: th.Tensor,  # [k, 3] offsets from root to each child
+    uhat: th.Tensor,     # [3]
+    eps: float = 1e-8,
+) -> Tuple[th.Tensor, th.Tensor, th.Tensor]:
+    """SO(2)-invariant ordering of root children.
+    child_0 = lowest uhat component (tiebreak: largest perp-plane distance).
+    Returns: sorted_idx [k], fwd0_unit [3], delta_angles [k]
+    """
 ```
 
-`global_inplane_basis(uhat)` returns `(e1, e2)` spanning the plane ⊥ uhat:
-- `e1` = `[1,0,0]` projected onto plane ⊥ uhat, normalized (or `[0,1,0]` if degenerate)
-- `e2` = `uhat × e1`
-
-For each root node `r` with children:
+For each root node `r` with children, `compute_root_child_angles` calls this helper:
 
 ```python
-# helpers.py:743-765
+# helpers.py:817-836
 for r in root_indices.tolist():
     children = (parent == r).nonzero(as_tuple=False).flatten()
     k = children.numel()
 
-    # Project child offsets onto perp plane
-    offsets = pos[children] - pos[r].unsqueeze(0)           # [k, 3]
-    du = (offsets * uhat_vec).sum(dim=-1, keepdim=True)
-    offsets_perp = offsets - du * uhat_vec                  # [k, 3]
+    offsets = pos[children] - pos[r].unsqueeze(0)  # [k, 3]
+    sorted_idx, _fwd0, delta_angles = _order_root_children_by_uhat(
+        offsets, uhat, eps=eps,
+    )
 
-    # Compute angle of each child in global perp plane
-    proj_e1 = (offsets_perp * e1.unsqueeze(0)).sum(dim=-1)  # [k]
-    proj_e2 = (offsets_perp * e2.unsqueeze(0)).sum(dim=-1)  # [k]
-    angles_global = th.atan2(proj_e2, proj_e1)              # [k], range [-π, π]
-
-    # Sort clockwise from x-axis: negate angle so clockwise = ascending
-    _, sorted_idx = (-angles_global).sort()
+    for rank, si in enumerate(sorted_idx.tolist()):
+        c = children[si]
+        geo_ordinal[c] = rank / max(k - 1, 1)
+        geo_delta_theta[c] = delta_angles[si]
 ```
 
-**Step-by-step**:
-1. Compute offset vector from root to each child: `offsets[i] = pos[child_i] - pos[root]`
-2. Project out the `uhat` component: `offsets_perp[i]` lies in the plane ⊥ uhat
-3. Project onto global basis: `(proj_e1, proj_e2)` gives 2D coordinates in the perp plane
-4. `atan2(proj_e2, proj_e1)` → angle from the positive `e1` axis (counterclockwise positive)
-5. Sort by **negated** angle → first element is the child encountered first going **clockwise** from `e1`
+**Inside `_order_root_children_by_uhat` — step-by-step**:
 
-**Result**: `sorted_idx[0]` is child 0 (leftmost). `sorted_idx[1]` is child 1, etc.
+1. **Project onto uhat axis**: `uhat_components = (offsets · uhat)` → [k] scalar per child
+2. **Project onto perp plane**: `offsets_perp = offsets - uhat_components * uhat` → [k, 3]
+3. **Compute perp distances**: `perp_dist = ||offsets_perp||` → [k]
+4. **Select child_0**: The child with the **lowest uhat component**. Tiebreaker: largest perpendicular-plane distance.
+   ```python
+   min_uhat = uhat_components.min()
+   is_min = uhat_components <= min_uhat + eps
+   tied_perp = th.where(is_min, perp_dist, -1.0)
+   child0_local = tied_perp.argmax()
+   ```
+5. **Build reference direction**: `fwd0 = offsets_perp[child0]` → forward direction from root to child_0 in perp plane
+6. **Build local 2D basis**: `side0 = uhat × fwd0_unit`
+7. **Compute angles**: For each child, `angle = atan2(proj_side, proj_fwd)` relative to `fwd0`
+8. **Sort clockwise**: `sorted_idx = argsort(-angles)`, ensuring child_0 is first
 
-**Critical**: This sorting is **safe** because we assign values back to original node indices (line 785: `geo_ordinal[c] = rank / max(k - 1, 1)`) — no tensor reordering occurs.
+**Why this is SO(2)-invariant**:
+- `uhat_component = (offset · uhat)` is unchanged by rotation around `uhat` ✓
+- `perp_distance = ||offset_perp||` is unchanged by rotation around `uhat` ✓
+- `fwd0 = offsets_perp[child0]` co-rotates with positions (equivariant) ✓
+- Angles measured relative to `fwd0` are invariant ✓
+
+**Degenerate case**: If `fwd0_norm ≤ eps` (all children on the uhat axis), children are sorted by ascending uhat component, `fwd0_unit` is zero, and all `delta_angles` are 0.0.
+
+**Backward compatibility with k=2**: Lowest uhat component = child_0 = ordinal 0.0. This matches the pre-existing binary convention where lower Z = left = ordinal 0.0.
 
 ### 2b: Relative-Frame Angles (SO(2)-Equivariant) {#2b-relative-frame-angles}
 
-After identifying child 0, compute the **reference direction** and relative angles:
+The `_order_root_children_by_uhat` helper returns both `sorted_idx` and `delta_angles` together. The relative angles are computed as part of the ordering:
 
 ```python
-# helpers.py:768-794
-child0 = children[sorted_idx[0]]
-fwd0 = offsets_perp[sorted_idx[0]]     # direction from root to child 0, in perp plane
-fwd0_norm = fwd0.norm()
-
+# Inside _order_root_children_by_uhat (helpers.py:161-178)
 fwd0_unit = fwd0 / fwd0_norm
-side0 = th.cross(uhat, fwd0_unit)      # sideways = uhat × forward
-side0 = side0 / (side0.norm() + eps)
+side0 = th.cross(uhat, fwd0_unit)
 
-# Compute relative angles from child 0's direction
-for rank, si in enumerate(sorted_idx.tolist()):
-    c = children[si]
-    if rank == 0:
-        geo_delta_theta[c] = 0.0
-    else:
-        off_perp = offsets_perp[si]
-        c_fwd = (off_perp * fwd0_unit).sum()   # projection onto fwd0
-        c_side = (off_perp * side0).sum()       # projection onto side0
-        geo_delta_theta[c] = th.atan2(c_side, c_fwd)
+# Angle of each child relative to fwd0
+proj_fwd = (offsets_perp * fwd0_unit).sum(dim=-1)    # [k]
+proj_side = (offsets_perp * side0).sum(dim=-1)        # [k]
+angles_from_fwd = th.atan2(proj_side, proj_fwd)       # [k]
+
+# delta_angles[child0] = 0.0 by construction
+delta_angles = angles_from_fwd.clone()
+delta_angles[child0_local] = 0.0
 ```
 
 **Step-by-step**:
 1. `fwd0` = root → child_0 direction projected onto perp plane. This is the **reference direction** — it comes from geometry, not global axes.
 2. `side0` = `uhat × fwd0_unit` — completes the local 2D basis in the perp plane.
-3. For each subsequent child i, compute `Δθ_i` = angle of child i relative to `fwd0` using `atan2(side_projection, forward_projection)`.
+3. For each child i, `Δθ_i = atan2(proj_side, proj_fwd)` gives the angle relative to `fwd0`.
 4. Child 0 always has `Δθ_0 = 0.0` by construction.
 
 **Key invariant**: `geo_delta_theta` is computed from **GT positions (P_0)** and remains fixed throughout the training forward pass. It is NOT recomputed when leaves are noised.
@@ -991,34 +1020,39 @@ if leaf_idx_next.numel() > 0:
 
 Inside `compute_geo_angle_for_new_leaves`:
 
-### Root children (k≥1): Angular ordering
+### Root children (k≥1): SO(2)-invariant ordering
 
 ```python
-# helpers.py:993-1003
+# helpers.py:1034-1040
 if is_root_parent:
-    # Angular ordering clockwise from x-axis
-    proj_e1 = (offsets_perp * e1.unsqueeze(0)).sum(dim=-1)
-    proj_e2 = (offsets_perp * e2.unsqueeze(0)).sum(dim=-1)
-    angles = th.atan2(proj_e2, proj_e1)
-    _, sorted_idx = (-angles).sort()       # clockwise from x-axis
-
+    # SO(2)-invariant ordering by uhat component
+    sorted_idx, _fwd0, _delta = _order_root_children_by_uhat(
+        offsets, uhat, eps=eps,
+    )
     for rank, si in enumerate(sorted_idx.tolist()):
         geo_angle[group_indices[si]] = rank / max(k - 1, 1)
 ```
 
-Now using **actual denoised positions** (not placeholders), children are re-ordered clockwise from x-axis and assigned ordinal features.
+Now using **actual denoised positions** (not placeholders), children are re-ordered using the same SO(2)-invariant `_order_root_children_by_uhat` helper as training — lowest uhat component = child_0. No global axes involved.
 
 ### Binary children (k=2, non-root): Parity logic
 
 ```python
-# helpers.py:1004-1036
+# helpers.py:1041-1059
 elif k == 2:
     # Use existing sin-based parity
     gp = parent_idx[parent_node]
-    v_in = pos[parent_node] - pos[gp] if gp >= 0 else e1
+    if gp >= 0:
+        v_in = pos[parent_node] - pos[gp]
+    else:
+        # Non-root degenerate fallback: global axis acceptable here
+        e1, _ = global_inplane_basis(uhat, eps=eps)
+        v_in = e1
     # ... cross product, sin decision ...
     geo_angle[gi] = 0.0 if sin_val > 0 else 1.0
 ```
+
+Note: The non-root binary path uses `global_inplane_basis` **only** as a degenerate fallback (parent has no grandparent AND is not root). This is geometrically rare and acceptable — the rule is that **root children never use global axes**, while non-root degenerate cases may.
 
 ### Single child (k=1):
 ```python
@@ -1038,9 +1072,9 @@ if k == 1:
 | Aspect | Training | Sampling |
 |--------|----------|----------|
 | **Frame source** | `compute_local_bases` with `geo_delta_theta` from GT P_0 | `compute_local_bases_for_leaves` with random θ_0 + structured rotations |
-| **Child 0 forward** | Root → leftmost child direction (from GT) | Random direction in perp plane |
+| **Child 0 forward** | Root → child_0 direction (child_0 = lowest uhat component from GT) | Random direction in perp plane |
 | **Child i forward** | fwd_0 rotated by Δθ_i (GT angle) | fwd_0 rotated by 2πi/k (uniform) |
-| **Feature** | `geo_ordinal` = `i/(k-1)` (from clockwise GT ordering) | `geo_angle` = `i/(k-1)` (from ordinal index, then refined) |
+| **Feature** | `geo_ordinal` = `i/(k-1)` (from SO(2)-invariant GT ordering) | `geo_angle` = `i/(k-1)` (from ordinal index, then refined via `_order_root_children_by_uhat`) |
 | **Noising** | C_0 + σ * ε in local frame | Start from pure noise σ_max * ε in local frame |
 | **Frame stability** | Locked to P_0 (via `patch_geometry_for_noised_leaves`) | Fixed throughout diffusion steps |
 | **Geometry computation** | Precomputed once, patched for noised leaves | Computed internally by model at each step |
@@ -1071,7 +1105,7 @@ if k == 1:
 
 | Phase | Behavior |
 |-------|----------|
-| **Ordering** | Sort clockwise. Child 0 = leftmost. `geo_ordinal = [0.0, 1.0]`. Replaces Z-coordinate convention |
+| **Ordering** | Lowest uhat component = child_0. `geo_ordinal = [0.0, 1.0]`. Backward-compatible with legacy L/R convention (lower Z = left = 0.0) |
 | **Training frame** | Child 0: `fwd = root→child_0`. Child 1: `fwd = fwd_0 rotated by Δθ_1` |
 | **Sampling frame** | Child 0: random fwd. Child 1: fwd rotated by π (= 2π × 1/2) |
 | **Feature** | [0.0, 1.0] — matches legacy L=0.0, R=1.0 |
@@ -1081,7 +1115,7 @@ if k == 1:
 
 | Phase | Behavior |
 |-------|----------|
-| **Ordering** | Sort clockwise from x-axis. `geo_ordinal = [0, 1/(k-1), 2/(k-1), ..., 1.0]` |
+| **Ordering** | Lowest uhat component = child_0, remaining clockwise relative to child_0's perp direction. `geo_ordinal = [0, 1/(k-1), 2/(k-1), ..., 1.0]` |
 | **Training frame** | Each child i: `fwd = fwd_0 rotated by Δθ_i` (actual GT angle) |
 | **Sampling frame** | Each child i: `fwd = fwd_0 rotated by 2πi/k` (uniform spacing) |
 | **Feature** | `i/(k-1)` spread evenly in [0, 1] |
@@ -1091,7 +1125,7 @@ if k == 1:
 
 | Scenario | Handling |
 |----------|----------|
-| **Child on uhat axis** (offset ⊥ perp plane is zero) | `fwd0_norm ≤ eps` → ordinals assigned without angles (line 774) |
+| **Child on uhat axis** (offset ⊥ perp plane is zero) | `fwd0_norm ≤ eps` → sort by uhat ascending, `delta_angles = 0` |
 | **All children at root** (sampling, pre-diffusion) | Degenerate path → structured rotation with random θ_0 |
 | **`v_in` parallel to uhat** | `global_inplane_basis` fallback for `forward` (line 267-269) |
 | **`num_root_children` = None** | Legacy spawn: exactly 1 child per root |
@@ -1146,9 +1180,11 @@ Expansion.get_loss()
   ├── precompute_full_geometry()                       ★
   │     ├── compute_geo_lr_mask()                      (binary L/R, interior children)
   │     ├── compute_root_child_angles()                ★ NEW
-  │     │     ├── global_inplane_basis()               (ordering only, not frame)
-  │     │     ├── atan2 → clockwise sort               (global ordering)
-  │     │     └── atan2 relative to child 0            (relative angles)
+  │     │     ├── _order_root_children_by_uhat()       (SO(2)-invariant, no global axes)
+  │     │     │     ├── child_0 = lowest uhat component (tiebreak: largest perp dist)
+  │     │     │     ├── clockwise sort relative to child_0's perp direction
+  │     │     │     └── delta_angles relative to child_0
+  │     │     └── ordinal = rank / max(k-1, 1)
   │     ├── compute_branch_angles_parent_centric()
   │     ├── assign_branch_angles_to_edges()
   │     ├── assign_parent_scalar_to_edges()
@@ -1192,12 +1228,14 @@ Expansion.sample_graphs(num_root_children=nrc)         ★ MODIFIED
 
 | Function | File | What Changed |
 |----------|------|-------------|
-| `compute_root_child_angles` | helpers.py:671 | **NEW** — global ordering + relative angles + ordinal feature |
+| `compute_root_child_angles` | helpers.py:747 | **NEW** — SO(2)-invariant ordering via `_order_root_children_by_uhat` + relative angles + ordinal feature |
 | `compute_local_bases` | helpers.py:160 | Added `geo_delta_theta` param; per-child root frames |
 | `compute_local_bases_for_leaves` | helpers.py:280 | Added `child_ordinal`/`sibling_count`; structured rotation |
 | `precompute_full_geometry` | helpers.py:1169 | Calls `compute_root_child_angles`; passes `geo_delta_theta` to `compute_local_bases`; returns `geo_ordinal`/`geo_delta_theta` |
+| `compute_geo_lr_mask` / `_f2` | helpers.py:597/1086 | Replaced `v_in[fallback_mask] = global_e1` with `v_in[fallback_mask] = v_out` (geometric, no global axis for root children) |
 | `patch_geometry_for_noised_leaves` | helpers.py:1248 | Removed `v_in = v_out` override for root children; frames locked to P_0 |
-| `compute_geo_angle_for_new_leaves` | helpers.py:928 | **NEW** — post-diffusion ordinal refinement for any k |
+| `_order_root_children_by_uhat` | helpers.py:111 | **NEW** — shared SO(2)-invariant root child ordering helper (no global axes) |
+| `compute_geo_angle_for_new_leaves` | helpers.py:970 | **NEW** — post-diffusion ordinal refinement using `_order_root_children_by_uhat` for root children |
 | `Expansion.sample_graphs` | expansion.py:52 | Added `num_root_children` param; uses `geo_angle` (float) instead of `geo_lr_assign` (int) |
 | `Expansion.expand` | expansion.py:138 | k-child spawn; ordinal tracking; `geo_angle` feature; passes ordinal to frame computation |
 | `Expansion.get_loss` | expansion.py:460 | Uses `geo_ordinal.clamp(min=0.0)` instead of `geo_lr_mask.float()` |
