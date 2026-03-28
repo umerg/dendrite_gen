@@ -5,8 +5,7 @@ import pytest
 
 from graph_generation.method.helpers import (
     _order_root_children_by_uhat,
-    compute_root_child_angles,
-    compute_geo_lr_mask,
+    compute_geo_order,
     compute_geo_angle_for_new_leaves,
 )
 
@@ -137,21 +136,19 @@ class TestOrderRootChildrenByUhat:
         assert fwd0.norm().item() < 1e-6, "fwd0 should be zero for degenerate case"
 
 
-class TestComputeRootChildAngles:
-    """Test compute_root_child_angles with full tree structure."""
+class TestComputeGeoOrder:
+    """Test compute_geo_order with full tree structure."""
 
     def test_rotation_invariance_k2(self):
         """k=2 root children: geo_ordinal unchanged under rotation around uhat."""
         uhat = th.tensor([0.0, 0.0, 1.0])
         pos, parent_idx = _make_root_tree(2, uhat)
-        lr_mask = compute_geo_lr_mask(pos, parent_idx, uhat=uhat)
-        ordinal_ref, dt_ref = compute_root_child_angles(pos, parent_idx, uhat, lr_mask)
+        ordinal_ref, dt_ref = compute_geo_order(pos, parent_idx, uhat)
 
         for angle in [0.7, math.pi / 3, math.pi, 4.1]:
             R = _rotation_matrix_around_axis(uhat, angle)
             pos_rot = (R @ pos.T).T
-            lr_rot = compute_geo_lr_mask(pos_rot, parent_idx, uhat=uhat)
-            ordinal_rot, dt_rot = compute_root_child_angles(pos_rot, parent_idx, uhat, lr_rot)
+            ordinal_rot, dt_rot = compute_geo_order(pos_rot, parent_idx, uhat)
             th.testing.assert_close(ordinal_ref, ordinal_rot, atol=1e-5, rtol=1e-5)
             _angles_close_mod2pi(dt_ref, dt_rot)
 
@@ -159,14 +156,12 @@ class TestComputeRootChildAngles:
         """k=3 root children: geo_ordinal unchanged under rotation around uhat."""
         uhat = th.tensor([0.0, 0.0, 1.0])
         pos, parent_idx = _make_root_tree(3, uhat)
-        lr_mask = compute_geo_lr_mask(pos, parent_idx, uhat=uhat)
-        ordinal_ref, dt_ref = compute_root_child_angles(pos, parent_idx, uhat, lr_mask)
+        ordinal_ref, dt_ref = compute_geo_order(pos, parent_idx, uhat)
 
         for angle in [0.7, math.pi / 3, math.pi, 4.1]:
             R = _rotation_matrix_around_axis(uhat, angle)
             pos_rot = (R @ pos.T).T
-            lr_rot = compute_geo_lr_mask(pos_rot, parent_idx, uhat=uhat)
-            ordinal_rot, dt_rot = compute_root_child_angles(pos_rot, parent_idx, uhat, lr_rot)
+            ordinal_rot, dt_rot = compute_geo_order(pos_rot, parent_idx, uhat)
             th.testing.assert_close(ordinal_ref, ordinal_rot, atol=1e-5, rtol=1e-5)
             _angles_close_mod2pi(dt_ref, dt_rot)
 
@@ -174,28 +169,25 @@ class TestComputeRootChildAngles:
         """k=5 root children: geo_ordinal unchanged under rotation around uhat."""
         uhat = th.tensor([0.0, 0.0, 1.0])
         pos, parent_idx = _make_root_tree(5, uhat)
-        lr_mask = compute_geo_lr_mask(pos, parent_idx, uhat=uhat)
-        ordinal_ref, dt_ref = compute_root_child_angles(pos, parent_idx, uhat, lr_mask)
+        ordinal_ref, dt_ref = compute_geo_order(pos, parent_idx, uhat)
 
         for angle in [0.3, 1.5, math.pi, 5.0]:
             R = _rotation_matrix_around_axis(uhat, angle)
             pos_rot = (R @ pos.T).T
-            lr_rot = compute_geo_lr_mask(pos_rot, parent_idx, uhat=uhat)
-            ordinal_rot, dt_rot = compute_root_child_angles(pos_rot, parent_idx, uhat, lr_rot)
+            ordinal_rot, dt_rot = compute_geo_order(pos_rot, parent_idx, uhat)
             th.testing.assert_close(ordinal_ref, ordinal_rot, atol=1e-5, rtol=1e-5)
             _angles_close_mod2pi(dt_ref, dt_rot)
 
     def test_k2_matches_lr_convention(self):
-        """For k=2, ordinal should match geo_lr_mask: left(True)→0.0, right(False)→1.0."""
+        """For k=2, lowest uhat = child_0 = ordinal 0.0, highest = ordinal 1.0."""
         uhat = th.tensor([0.0, 0.0, 1.0])
         pos = th.tensor([
             [0.0, 0.0, 0.0],   # root
-            [1.0, 0.0, -1.0],  # child with lower z → left → ordinal 0.0
-            [0.5, 0.5, 2.0],   # child with higher z → right → ordinal 1.0
+            [1.0, 0.0, -1.0],  # child with lower z → child_0 → ordinal 0.0
+            [0.5, 0.5, 2.0],   # child with higher z → child_1 → ordinal 1.0
         ])
         parent_idx = th.tensor([-1, 0, 0])
-        lr_mask = compute_geo_lr_mask(pos, parent_idx, uhat=uhat)
-        ordinal, _ = compute_root_child_angles(pos, parent_idx, uhat, lr_mask)
+        ordinal, _ = compute_geo_order(pos, parent_idx, uhat)
 
         # Node 1 has lower z → should be child_0 → ordinal 0.0
         assert ordinal[1].item() == pytest.approx(0.0, abs=1e-6)

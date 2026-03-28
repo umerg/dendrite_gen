@@ -160,6 +160,7 @@ class DenoisingDiffusionModel(Module):
         local_forward: th.Tensor | None = None,
         local_sideways: th.Tensor | None = None,
         uhat: th.Tensor | None = None,
+        pre_geom_p0: dict | None = None,
     ) -> tuple[th.Tensor, th.Tensor]:
         """Deterministically denoise leaves via σ-schedule (ancestral-free)."""
         device = P_0.device
@@ -222,6 +223,14 @@ class DenoisingDiffusionModel(Module):
             x_in = th.cat([P_cur, node_feats_t], dim=-1)
             _acc_alloc += _st() - _t0
 
+            # Patch precomputed P_0 geometry for noised leaf positions
+            pre_geom_t = None
+            if pre_geom_p0 is not None:
+                pre_geom_t = patch_geometry_for_noised_leaves(
+                    pre_geom_p0, P_cur, leaf_idx, parent_idx,
+                    edge_index, uhat,
+                )
+
             _t0 = _st()
             out = model(
                 x=x_in,
@@ -229,6 +238,7 @@ class DenoisingDiffusionModel(Module):
                 batch=batch,
                 edge_attr=edge_attr,
                 parent_idx=parent_idx,
+                pre_geom=pre_geom_t,
                 **model_kwargs,
             )
             _acc_model += _st() - _t0

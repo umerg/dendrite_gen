@@ -17,8 +17,6 @@ def _t(device: th.device) -> float:
 
 from .helpers import (
     build_directed_edge_index,
-    compute_geo_angle_for_new_leaves,
-    compute_geo_lr_for_new_leaves,
     compute_local_bases_for_leaves,
     decode_parent_indices,
     global_to_local,
@@ -84,7 +82,6 @@ class Expansion(Method):
         parent_idx_1b = th.zeros_like(batch)
         leaf_idx = batch.clone()
         leaf_expansion = th.ones_like(leaf_idx)  # root's spawn count is overridden in expand
-        geo_angle = th.full((num_graphs,), -1.0, device=device, dtype=th.float)
         leaf_mask = th.ones((num_graphs,), device=device, dtype=th.bool)
 
         max_steps = int(target_size.max().item() * 2)
@@ -99,7 +96,6 @@ class Expansion(Method):
                 leaf_expansion,
                 parent_idx_1b,
                 batch,
-                geo_angle,
                 leaf_mask,
                 terminated,
             ) = self.expand(
@@ -111,7 +107,6 @@ class Expansion(Method):
                 leaf_idx=leaf_idx,
                 leaf_expansion=leaf_expansion,
                 parent_idx_1b=parent_idx_1b,
-                geo_angle=geo_angle,
                 leaf_mask=leaf_mask,
                 tmd=tmd,
                 step=step,
@@ -148,7 +143,6 @@ class Expansion(Method):
         leaf_expansion: th.Tensor | None = None,
         parent_idx_1b: th.Tensor | None = None,
         leaf_mask: th.Tensor | None = None,
-        geo_angle: th.Tensor | None = None,
         tmd: th.Tensor | None = None,
         step: int = 0,
         map_threshold: float = 0.0,
@@ -167,7 +161,7 @@ class Expansion(Method):
 
         device = pos.device
         _t_start = _t(device)
-        _t_leaf_loop = _t_cat_growth = _t_sparse_rebuild = _t_diffusion_sample = _t_geo_angle = 0.0
+        _t_leaf_loop = _t_cat_growth = _t_sparse_rebuild = _t_diffusion_sample = 0.0
         parent_idx = parent_idx_1b - 1
         num_graphs = int(target_size.numel())
 
@@ -186,9 +180,6 @@ class Expansion(Method):
         )
         remaining_capacity = target_size.to(device) - size_per_graph
 
-        if geo_angle is None:
-            geo_angle = th.full((pos.size(0),), -1.0, device=device, dtype=th.float)
-
         if leaf_idx.numel() == 0:
             return (
                 adj_reduced,
@@ -197,7 +188,6 @@ class Expansion(Method):
                 leaf_expansion.clone(),
                 parent_idx_1b,
                 batch_reduced,
-                geo_angle.clone(),
                 leaf_mask.clone(),
                 True,
             )
@@ -229,7 +219,6 @@ class Expansion(Method):
                 leaf_expansion.clone(),
                 parent_idx_1b,
                 batch_reduced,
-                geo_angle.clone(),
                 leaf_mask.clone(),
                 True,
             )
@@ -243,7 +232,7 @@ class Expansion(Method):
         new_parents = []
         new_batches = []
         parent_child_edges = []
-        # Ordinal tracking for geo_angle computation
+        # Ordinal tracking for spawn-order feature
         ordinal_new = []
         sibling_count_new = []
         running_child_index = 0
@@ -288,8 +277,6 @@ class Expansion(Method):
         if single_child_mask.any():
             geo_angle_new[single_child_mask] = 0.0
 
-        geo_angle_next = th.cat([geo_angle, geo_angle_new], dim=0)
-
         # Also track ordinals and sibling counts for frame computation
         child_ordinal_t = th.tensor(ordinal_new, device=device, dtype=th.long)
         sib_count_long = th.tensor(sibling_count_new, device=device, dtype=th.long)
@@ -329,7 +316,6 @@ class Expansion(Method):
                 leaf_idx_next.new_empty((0,), dtype=leaf_expansion.dtype),
                 parent_idx_1b_new,
                 batch_new,
-                geo_angle_next,
                 leaf_mask_next,
                 True,
             )
@@ -341,6 +327,49 @@ class Expansion(Method):
             dim_size=num_graphs,
         )
 
+        # --- Build edge index, local bases, and precompute geometry BEFORE feature assembly ---
+        edge_index, edge_types = build_directed_edge_index(
+            parent_idx_new_0b,
+            edge_parent_to_child=self.EDGE_PARENT_TO_CHILD,
+            edge_child_to_parent=self.EDGE_CHILD_TO_PARENT,
+        )
+        if edge_types.numel():
+            edge_attr = edge_types.unsqueeze(-1).to(pos_new.dtype)
+        else:
+            edge_attr = pos_new.new_zeros((0, 1))
+
+        leaf_parent_idx_next = parent_idx_new_0b[leaf_idx_next]
+
+        # Compute local bases for new leaf nodes (with ordinal info for shared root frames)
+        leaf_fwd, leaf_side = compute_local_bases_for_leaves(
+            pos_new, parent_idx_new_0b, leaf_parent_idx_next, model.uhat,
+            child_ordinal=child_ordinal_t,
+            sibling_count=sib_count_long,
+        )
+
+        # Precompute full geometry on P_0 — patched cheaply per diffusion step
+        with th.no_grad():
+            pre_geom_p0 = precompute_full_geometry(
+                pos_new, parent_idx_new_0b, edge_index, model.uhat,
+            )
+
+        # Override leaf local bases in pre_geom_p0 with the frames from
+        # compute_local_bases_for_leaves — these handle the degenerate root
+        # case (step 0, placeholder positions) with random shared frames,
+        # whereas precompute_full_geometry uses a deterministic fallback.
+        # This ensures patch_geometry_for_noised_leaves uses the same
+        # reference frame as the local↔global conversion in diffusion.sample().
+        pre_geom_p0['local_forward'] = pre_geom_p0['local_forward'].clone()
+        pre_geom_p0['local_sideways'] = pre_geom_p0['local_sideways'].clone()
+        pre_geom_p0['local_forward'][leaf_idx_next] = leaf_fwd
+        pre_geom_p0['local_sideways'][leaf_idx_next] = leaf_side
+
+        # Build geo_feat: use precomputed geo_ordinal for internal nodes,
+        # spawn-order ordinals for new leaves (whose positions are placeholders)
+        geo_feat_all = pre_geom_p0['geo_ordinal'].clamp(min=0.0).clone()
+        geo_feat_all[leaf_idx_next] = geo_angle_new  # spawn-order i/(k-1)
+
+        # --- Assemble node features ---
         feats_total = getattr(model, "feats_dim", 0)
         tmd_hidden_dim = getattr(model, "tmd_hidden_dim", 0)
         cond_dim = getattr(self.diffusion, "cond_dim", 0)
@@ -355,7 +384,7 @@ class Expansion(Method):
             feats_used += 1
 
             if feats_used < avail_feats_dim:
-                geo_feat = geo_angle_next.clamp(min=0.0).unsqueeze(-1)
+                geo_feat = geo_feat_all.unsqueeze(-1)
                 features.append(geo_feat)
                 feats_used += 1
 
@@ -379,25 +408,7 @@ class Expansion(Method):
         else:
             node_feats = pos_new.new_zeros((pos_new.size(0), 0))
 
-        edge_index, edge_types = build_directed_edge_index(
-            parent_idx_new_0b,
-            edge_parent_to_child=self.EDGE_PARENT_TO_CHILD,
-            edge_child_to_parent=self.EDGE_CHILD_TO_PARENT,
-        )
-        if edge_types.numel():
-            edge_attr = edge_types.unsqueeze(-1).to(pos_new.dtype)
-        else:
-            edge_attr = pos_new.new_zeros((0, 1))
-
-        leaf_parent_idx_next = parent_idx_new_0b[leaf_idx_next]
-
-        # Compute local bases for new leaf nodes (with ordinal info for structured root frames)
-        leaf_fwd, leaf_side = compute_local_bases_for_leaves(
-            pos_new, parent_idx_new_0b, leaf_parent_idx_next, model.uhat,
-            child_ordinal=child_ordinal_t,
-            sibling_count=sib_count_long,
-        )
-
+        # --- Diffusion sampling with precomputed geometry ---
         model_kwargs = {"tmd": tmd} if tmd is not None else None
         _t_diff_0 = _t(device)
         rel_pred, exp_pred = self.diffusion.sample(
@@ -414,6 +425,7 @@ class Expansion(Method):
             local_forward=leaf_fwd,
             local_sideways=leaf_side,
             uhat=model.uhat,
+            pre_geom_p0=pre_geom_p0,
         )
 
         _t_diffusion_sample = _t(device) - _t_diff_0
@@ -421,18 +433,6 @@ class Expansion(Method):
         rel_pred_global = local_to_global(rel_pred, leaf_fwd, leaf_side, model.uhat)
         parent_pos_for_children = pos_new[leaf_parent_idx_next]
         pos_new[leaf_idx_next] = parent_pos_for_children + rel_pred_global
-
-        _t_geo_0 = _t(device)
-        if leaf_idx_next.numel() > 0:
-            geo_angle_refined, valid = compute_geo_angle_for_new_leaves(
-                pos_new, parent_idx_new_0b, leaf_idx_next,
-                uhat=model.uhat,
-            )
-            if valid.any():
-                geo_angle_next = geo_angle_next.clone()
-                geo_angle_next[leaf_idx_next[valid]] = geo_angle_refined[valid]
-
-        _t_geo_angle = _t(device) - _t_geo_0
 
         if exp_pred.dim() == 1:
             exp_pred = exp_pred.unsqueeze(-1)
@@ -449,7 +449,6 @@ class Expansion(Method):
             leaf_expansion_next,
             parent_idx_1b_new,
             batch_new,
-            geo_angle_next,
             leaf_mask_next,
             terminated,
         )
@@ -551,8 +550,6 @@ class Expansion(Method):
                 pos_gt, parent_idx, edge_index, uhat,
                 debug=getattr(self, "debug", False),
             )
-        geo_lr_mask = pre_geom_p0['geo_lr_mask']
-
         # --- Convert targets to local frame for SO(2)-equivariant loss
         local_fwd = pre_geom_p0['local_forward']
         local_side = pre_geom_p0['local_sideways']

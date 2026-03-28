@@ -108,6 +108,131 @@ def global_inplane_basis(uhat: th.Tensor, eps: float = 1e-8) -> Tuple[th.Tensor,
     return e1, e2
 
 
+def _compute_tree_directions(
+    pos: th.Tensor,
+    parent_idx: th.Tensor,
+    uhat: th.Tensor,
+    eps: float = 1e-8,
+) -> dict:
+    """Compute shared tree topology, root ordering, and direction vectors (ONCE).
+
+    Runs ``_order_root_children_by_uhat`` per root first to establish *fwd0*
+    (root→child_0 direction), then sets v_in for every node:
+
+      - Nodes with grandparent: ``v_in = pos[parent] - pos[grandparent]``
+      - Root children: ``v_in = fwd0`` (shared by ALL children of a root)
+
+    Returns a dict consumed by ``compute_geo_order``,
+    ``compute_branch_angles_parent_centric``, ``compute_local_bases``, and
+    ``precompute_full_geometry``.
+    """
+    N = pos.size(0)
+    device = pos.device
+    dtype = pos.dtype
+    parent = parent_idx.to(device=device)
+    has_parent = parent >= 0
+    is_root = parent == -1
+
+    # --- Grandparent lookup ---
+    gp = parent.new_full((N,), -1)
+    if has_parent.any():
+        gp[has_parent] = parent_idx[parent[has_parent]].clamp(min=-1)
+    has_gp = gp >= 0
+    fallback_mask = has_parent & ~has_gp  # root children
+
+    # --- v_out: child → parent direction ---
+    v_out = th.zeros_like(pos)
+    if has_parent.any():
+        sel = has_parent.nonzero(as_tuple=False).flatten()
+        v_out[sel] = pos[sel] - pos[parent[sel]]
+
+    # --- v_in: incoming direction at parent ---
+    v_in = th.zeros_like(pos)
+    if has_gp.any():
+        sel = has_gp.nonzero(as_tuple=False).flatten()
+        v_in[sel] = pos[parent[sel]] - pos[gp[sel]]
+
+    # --- Root ordering + shared v_in for root children ---
+    root_ordering = {}  # root_idx -> (sorted_idx, fwd0, delta_angles, children)
+    geo_delta_theta = th.zeros(N, device=device, dtype=dtype)
+
+    if fallback_mask.any():
+        root_indices = is_root.nonzero(as_tuple=False).flatten()
+        for r in root_indices.tolist():
+            children = (parent == r).nonzero(as_tuple=False).flatten()
+            k = children.numel()
+            if k == 0:
+                continue
+
+            offsets = pos[children] - pos[r].unsqueeze(0)
+
+            if k == 1:
+                # Single child: fwd0 = child direction, no ordering needed
+                fwd0 = offsets[0]
+                du = (fwd0 * uhat).sum()
+                fwd0_perp = fwd0 - du * uhat
+                root_ordering[r] = (
+                    th.tensor([0], device=device, dtype=th.long),
+                    fwd0_perp,
+                    th.zeros(1, device=device, dtype=dtype),
+                    children,
+                )
+                geo_delta_theta[children[0]] = 0.0
+                v_in[children[0]] = fwd0_perp
+            else:
+                sorted_idx, fwd0_unit, delta_angles = _order_root_children_by_uhat(
+                    offsets, uhat, eps=eps,
+                )
+                root_ordering[r] = (sorted_idx, fwd0_unit, delta_angles, children)
+                for si in range(k):
+                    c = children[sorted_idx[si]]
+                    geo_delta_theta[c] = delta_angles[sorted_idx[si]]
+                # Shared frame: ALL children get the same fwd0 as v_in
+                for c in children.tolist():
+                    v_in[c] = fwd0_unit
+
+    # --- Perpendicular projections ---
+    uhat_vec = uhat.view(1, -1)
+    du_in = (v_in * uhat_vec).sum(dim=-1, keepdim=True)
+    du_out = (v_out * uhat_vec).sum(dim=-1, keepdim=True)
+    v_in_perp = v_in - du_in * uhat_vec
+    v_out_perp = v_out - du_out * uhat_vec
+
+    # --- Normalization ---
+    nin = v_in_perp.norm(dim=-1, keepdim=True)
+    nout = v_out_perp.norm(dim=-1, keepdim=True)
+    v_in_unit = v_in_perp / (nin + eps)
+    v_out_unit = v_out_perp / (nout + eps)
+
+    # --- Degenerate fallback for v_in_unit ---
+    degenerate = (nin.squeeze(-1) <= eps) | (~has_parent)
+    if degenerate.any():
+        e1, _ = global_inplane_basis(uhat, eps=eps)
+        v_in_unit = v_in_unit.clone()
+        v_in_unit[degenerate] = e1.unsqueeze(0)
+
+    return {
+        'parent': parent,
+        'has_parent': has_parent,
+        'gp': gp,
+        'has_gp': has_gp,
+        'fallback_mask': fallback_mask,
+        'is_root': is_root,
+        'v_in': v_in,
+        'v_out': v_out,
+        'v_in_perp': v_in_perp,
+        'v_out_perp': v_out_perp,
+        'v_in_unit': v_in_unit,
+        'v_out_unit': v_out_unit,
+        'du_in': du_in,
+        'du_out': du_out,
+        'nin': nin,
+        'nout': nout,
+        'root_ordering': root_ordering,
+        'geo_delta_theta': geo_delta_theta,
+    }
+
+
 def _order_root_children_by_uhat(
     offsets: th.Tensor,
     uhat: th.Tensor,
@@ -234,36 +359,40 @@ def compute_local_bases(
     pos: th.Tensor,
     parent_idx: th.Tensor,
     uhat: th.Tensor,
-    geo_lr_mask: th.Tensor,
     eps: float = 1e-8,
+    _directions: dict | None = None,
+    # Legacy parameters (ignored when _directions is provided)
+    geo_lr_mask: th.Tensor | None = None,
     geo_delta_theta: th.Tensor | None = None,
 ) -> dict:
     """Compute per-node local coordinate frames in the plane perpendicular to uhat.
 
     For each node i with parent p:
-      - forward_p = normalize(v_in_perp) where v_in = pos[p] - pos[grandparent(p)]
-        projected onto the plane perpendicular to uhat.
-      - sideways_p = uhat × forward_p
+      - forward = normalize(v_in_perp)
+      - sideways = uhat × forward
 
-    For root's children: each child gets its own frame.
-      - Child 0 (leftmost): forward = root→child_0 direction (perp-projected)
-      - Child i: forward = child_0's forward rotated by Δθ_i around uhat
-    If geo_delta_theta is not provided, falls back to shared left-child frame.
+    Root children share a single frame: forward = fwd0 (root→child_0 direction).
 
-    Args:
-        pos:             [N, 3] node positions
-        parent_idx:      [N] 0-based parent indices (-1 for roots)
-        uhat:            [3] SO(2) axis
-        geo_lr_mask:     [N] bool, True = geometrically-defined LEFT child
-        eps:             numerical tolerance
-        geo_delta_theta: [N] float, relative angle from child 0 for root children (from compute_root_child_angles)
+    When ``_directions`` is provided, reads ``v_in_unit`` directly (already
+    projected, normalized, degenerate-fallbacked).  Otherwise computes
+    everything internally.
 
     Returns:
         dict with 'local_forward': [N, 3], 'local_sideways': [N, 3]
     """
+    if _directions is not None:
+        forward = _directions['v_in_unit']
+        uhat_vec = uhat.view(1, -1)
+        sideways = torch.cross(uhat_vec.expand_as(forward), forward, dim=-1)
+        sideways = sideways / (sideways.norm(dim=-1, keepdim=True) + eps)
+        return {
+            'local_forward': forward,
+            'local_sideways': sideways,
+        }
+
+    # --- Standalone mode: compute everything internally ---
     N = pos.size(0)
     device = pos.device
-    dtype = pos.dtype
     parent = parent_idx.clone()
     has_parent = parent >= 0
 
@@ -271,70 +400,41 @@ def compute_local_bases(
     gp = parent.new_full((N,), -1)
     if has_parent.any():
         gp[has_parent] = parent[parent[has_parent].clamp(min=0)].clamp(min=-1)
-        # Fix: nodes whose parent is root have gp = parent[root] which is -1 already
-        # but clamp might have turned it to 0 — re-mask
         gp[has_parent] = torch.where(
             parent[parent[has_parent].clamp(min=0)] >= 0,
             parent[parent[has_parent].clamp(min=0)],
             parent.new_full((has_parent.sum(),), -1),
         )
-
     has_gp = gp >= 0
 
-    # --- v_in for non-root nodes with grandparent: pos[parent] - pos[grandparent]
     v_in = torch.zeros_like(pos)
     if has_gp.any():
         sel = has_gp.nonzero(as_tuple=False).flatten()
         v_in[sel] = pos[parent[sel]] - pos[gp[sel]]
 
-    # --- Children of root: per-child frames using geo_delta_theta
+    # Root children: shared fwd0 frame (same for all children of a root)
     fallback_mask = has_parent & ~has_gp
     if fallback_mask.any():
         is_root = parent == -1
-        uhat_vec = uhat.view(1, -1)
         for r in is_root.nonzero(as_tuple=False).flatten().tolist():
             children = (parent == r).nonzero(as_tuple=False).flatten()
             if children.numel() == 0:
                 continue
-            # Find child 0 (leftmost): the one with geo_delta_theta == 0 or geo_lr_mask == True
-            if geo_delta_theta is not None:
-                child0_local_idx = geo_delta_theta[children].abs().argmin()
+            offsets = pos[children] - pos[r].unsqueeze(0)
+            if children.numel() == 1:
+                fwd0 = offsets[0]
             else:
-                left_children = children[geo_lr_mask[children]]
-                child0_local_idx = 0 if left_children.numel() == 0 else (children == left_children[0]).nonzero(as_tuple=False).flatten()[0]
-            child0 = children[child0_local_idx]
-            ref_dir = pos[child0] - pos[r]
+                _, fwd0, _ = _order_root_children_by_uhat(offsets, uhat, eps=eps)
+            for c in children.tolist():
+                v_in[c] = fwd0
 
-            if geo_delta_theta is not None and children.numel() > 1:
-                # Per-child frame: rotate ref_dir by each child's delta_theta
-                du = (ref_dir * uhat.view(-1)).sum()
-                ref_perp = ref_dir - du * uhat
-                ref_norm = ref_perp.norm()
-                if ref_norm > eps:
-                    fwd0 = ref_perp / ref_norm
-                    side0 = torch.cross(uhat, fwd0)
-                    side0 = side0 / (side0.norm() + eps)
-                    for c in children.tolist():
-                        dt = geo_delta_theta[c].item()
-                        v_in[c] = torch.cos(torch.tensor(dt)) * fwd0 + torch.sin(torch.tensor(dt)) * side0
-                else:
-                    # Degenerate: all children get same ref_dir, will hit fallback
-                    for c in children.tolist():
-                        v_in[c] = ref_dir
-            else:
-                # Legacy fallback: all children share left-child direction
-                for c in children.tolist():
-                    v_in[c] = ref_dir
-
-    # --- Project onto plane perpendicular to uhat and normalize
+    # Project onto plane perpendicular to uhat and normalize
     uhat_vec = uhat.view(1, -1)
     du_in = (v_in * uhat_vec).sum(dim=-1, keepdim=True)
     v_in_perp = v_in - du_in * uhat_vec
     nin = v_in_perp.norm(dim=-1, keepdim=True)
-
     forward = v_in_perp / (nin + eps)
 
-    # Degenerate cases: v_in parallel to uhat or zero
     degenerate = nin.squeeze(-1) <= eps
     if degenerate.any():
         e1, _ = global_inplane_basis(uhat, eps=eps)
@@ -426,9 +526,9 @@ def compute_local_bases_for_leaves(
         forward = forward.clone()
 
         if child_ordinal is not None and sibling_count is not None:
-            # Structured rotation for root children spawned at once:
-            # Group degenerate leaves by parent, pick one random forward per parent,
-            # then rotate each child by 2π*ordinal/k
+            # Shared frame for root children spawned at once:
+            # Group degenerate leaves by parent, pick one random forward per parent.
+            # ALL children of a root share the same forward (no per-child rotation).
             degen_sel = degenerate.nonzero(as_tuple=False).flatten()
             degen_parents = leaf_parent_idx[degen_sel]
             unique_parents, inv = torch.unique(degen_parents, return_inverse=True)
@@ -440,14 +540,10 @@ def compute_local_bases_for_leaves(
             for j, up in enumerate(unique_parents.tolist()):
                 group_mask = inv == j
                 group_indices = degen_sel[group_mask]
-                k = int(sibling_count[group_indices[0]].item())
                 theta0 = base_theta[j]
-                ordinals = child_ordinal[group_indices]
-                angles = theta0 + 2 * torch.pi * ordinals.to(dtype=pos.dtype) / max(k, 1)
-                forward[group_indices] = (
-                    angles.cos().unsqueeze(-1) * e1_v.unsqueeze(0)
-                    + angles.sin().unsqueeze(-1) * e2_v.unsqueeze(0)
-                )
+                # Shared frame: all children get the same forward direction
+                fwd = theta0.cos() * e1_v + theta0.sin() * e2_v
+                forward[group_indices] = fwd.unsqueeze(0)
         else:
             # Legacy fallback: random angle per degenerate leaf
             degen_sel = degenerate.nonzero(as_tuple=False).flatten()
@@ -470,6 +566,7 @@ def compute_branch_angles_parent_centric(
     uhat: torch.Tensor,
     eps: float = 1e-8,
     return_intermediates: bool = False,
+    _directions: dict | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict]:
     """
     Returns (cosψ, sinψ, cosθ) per node i (> root), describing the angle of the branch
@@ -478,7 +575,38 @@ def compute_branch_angles_parent_centric(
 
     If return_intermediates=True, additionally returns a dict with v_in, v_out, has_gp
     needed for leaf patching.
+
+    When ``_directions`` is provided, reuses pre-computed direction vectors
+    and projections from ``_compute_tree_directions``.
     """
+    if _directions is not None:
+        has_parent = _directions['has_parent']
+        v_in_unit = _directions['v_in_unit']
+        v_out_unit = _directions['v_out_unit']
+        du_out = _directions['du_out']
+        nout = _directions['nout']
+
+        cospsi = (v_in_unit * v_out_unit).sum(dim=-1, keepdim=True)
+        cross = torch.cross(v_in_unit, v_out_unit, dim=-1)
+        sinpsi = (cross * uhat.view(1, -1)).sum(dim=-1, keepdim=True)
+
+        v_out_norm = (nout.pow(2) + du_out.pow(2)).sqrt()
+        cos_theta = du_out / (v_out_norm + eps)
+
+        cospsi = torch.where(has_parent.view(-1, 1), cospsi, torch.ones_like(cospsi))
+        sinpsi = torch.where(has_parent.view(-1, 1), sinpsi, torch.zeros_like(sinpsi))
+        cos_theta = torch.where(has_parent.view(-1, 1), cos_theta, torch.ones_like(cos_theta))
+
+        if return_intermediates:
+            intermediates = {
+                'v_in': _directions['v_in'],
+                'v_out': _directions['v_out'],
+                'has_gp': _directions['has_gp'],
+            }
+            return cospsi, sinpsi, cos_theta, intermediates
+        return cospsi, sinpsi, cos_theta
+
+    # --- Standalone mode: compute everything internally ---
     N = coors.size(0)
 
     parent = parent_idx.clone()
@@ -591,249 +719,115 @@ def assign_parent_scalar_to_edges(
     return scalar_edge
 
 
-def compute_geo_lr_mask(
-    pos: th.Tensor,
-    parent_idx: th.Tensor,
-    *,
-    uhat: th.Tensor | None = None,
-    debug: bool = False,
-    eps: float = 1e-8,
-    tol: float = 1e-6,
-) -> th.Tensor:
-    """Return boolean mask marking the geometrically-defined left child per parent."""
-    if pos.numel() == 0:
-        return pos.new_zeros((0,), dtype=th.bool)
-    device = pos.device
-    dtype = pos.dtype
-    N = pos.size(0)
-    parent = parent_idx.to(device=device)
-    has_parent = parent >= 0
-
-    gp = parent.new_full((N,), -1)
-    if has_parent.any():
-        parents = parent[has_parent]
-        gp_values = parent.new_full((parents.numel(),), -1)
-        positive_mask = parents >= 0
-        if positive_mask.any():
-            gp_values[positive_mask] = parent[parents[positive_mask]].clamp(min=-1)
-        gp[has_parent] = gp_values
-
-    if uhat is None:
-        uhat = pos.new_zeros((pos.size(1),), dtype=dtype)
-        uhat[-1] = 1.0
-    global_e1, _ = global_inplane_basis(uhat, eps=eps)
-    uhat_vec = uhat.view(1, -1)
-
-    v_in = th.zeros((N, pos.size(1)), device=device, dtype=dtype)
-    has_gp_mask = gp >= 0
-    if has_gp_mask.any():
-        sel = has_gp_mask.nonzero(as_tuple=False).flatten()
-        v_in[sel] = pos[parent[sel]] - pos[gp[sel]]
-    fallback_mask = has_parent & ~has_gp_mask
-
-    v_out = th.zeros((N, pos.size(1)), device=device, dtype=dtype)
-    if has_parent.any():
-        sel = has_parent.nonzero(as_tuple=False).flatten()
-        v_out[sel] = pos[sel] - pos[parent[sel]]
-
-    if fallback_mask.any():
-        # Root children: use v_out as v_in (geometric, no global axis).
-        # Unused for their L/R decision (Z-comparison path); yields sinψ=0 for sinψ codepath.
-        v_in[fallback_mask] = v_out[fallback_mask]
-
-    du_in = (v_in * uhat_vec).sum(dim=-1, keepdim=True)
-    du_out = (v_out * uhat_vec).sum(dim=-1, keepdim=True)
-    v_in_perp = v_in - du_in * uhat_vec
-    v_out_perp = v_out - du_out * uhat_vec
-
-    nin = v_in_perp.norm(dim=-1, keepdim=True)
-    nout = v_out_perp.norm(dim=-1, keepdim=True)
-    v_in_unit = v_in_perp / (nin + eps)
-    degenerate = (nin <= eps) | (~has_parent).view(-1, 1)
-    if degenerate.any():
-        v_in_unit = v_in_unit.clone()
-        v_in_unit[degenerate.squeeze(-1)] = global_e1
-    v_out_unit = v_out_perp / (nout + eps)
-
-    cospsi = (v_in_unit * v_out_unit).sum(dim=-1, keepdim=True)
-    cross = th.cross(v_in_unit, v_out_unit, dim=-1)
-    sinpsi = (cross * uhat_vec).sum(dim=-1, keepdim=True)
-    mask = has_parent.view(-1, 1)
-    cospsi = th.where(mask, cospsi, cospsi.new_ones(cospsi.shape))
-    sinpsi = th.where(mask, sinpsi, sinpsi.new_zeros(sinpsi.shape))
-
-    lr_mask = th.zeros((N,), dtype=th.bool, device=device)
-
-    # --- vectorized root-children handling (replaces loop over root_nodes) ---
-    is_root = (parent == -1)                                      # [N]
-    parent_clamped = parent.clamp(min=0)                          # [N], safe for indexing
-    parent_is_root_node = has_parent & is_root[parent_clamped]    # [N] children of roots
-    if not is_root.any():
-        logger.warning("[GeoLR] No root with parent==-1 found; override skipped for this graph.")
-    else:
-        counts = scatter(
-            th.ones(N, device=device, dtype=pos.dtype),
-            parent_clamped, dim=0, dim_size=N, reduce='sum',
-        )                                                          # [N] child-count per node
-        sibling_count = counts[parent_clamped]                    # [N]
-        single_root_ch = parent_is_root_node & (sibling_count == 1)
-        multi_root_ch  = parent_is_root_node & (sibling_count > 1)
-        lr_mask = lr_mask.masked_fill(single_root_ch, True)
-        if multi_root_ch.any():
-            # Compare root children with each other (not with root).
-            # Convention: lower z = left (True), higher z = right (False).
-            z_rc = pos[multi_root_ch, -1]
-            p_rc = parent_clamped[multi_root_ch]
-            max_z = scatter(z_rc, p_rc, dim=0, dim_size=N, reduce='max')
-            lr_mask[multi_root_ch] = z_rc < max_z[p_rc] - 1e-7
-    handled_parents = is_root                                      # [N] bool
-
-    # --- vectorized binary-parent handling (replaces loop over unique_parents) ---
-    if not is_root.any():
-        counts = scatter(
-            th.ones(N, device=device, dtype=pos.dtype),
-            parent_clamped, dim=0, dim_size=N, reduce='sum',
-        )
-    binary_parents = (counts == 2) & ~handled_parents             # [N]
-    in_binary = has_parent & binary_parents[parent_clamped] & ~parent_is_root_node  # [N]
-
-    if in_binary.any():
-        s = sinpsi[:, 0]                                           # [N]
-        c = cospsi[:, 0]                                           # [N]
-        s_bin = s[in_binary]
-        p_bin = parent_clamped[in_binary]
-
-        # Product s0*s1 per parent via identity: (s0+s1)^2 - s0^2 - s1^2) / 2
-        sum_s  = scatter(s_bin,      p_bin, dim=0, dim_size=N, reduce='sum')
-        sum_s2 = scatter(s_bin ** 2, p_bin, dim=0, dim_size=N, reduce='sum')
-        product = (sum_s ** 2 - sum_s2) * 0.5                     # [N]
-
-        # Case 1: opposite-sign sines → left child is the one with sin > 0
-        case1_parent = (product < -tol) & binary_parents
-        case1_nodes  = in_binary & case1_parent[parent_clamped]
-        if case1_nodes.any():
-            lr_mask[case1_nodes] = s[case1_nodes] > 0
-
-        # Case 2: same-sign or near-zero → left child is the one with larger atan2 angle
-        case2_parent = binary_parents & ~case1_parent
-        case2_nodes  = in_binary & case2_parent[parent_clamped]
-        if case2_nodes.any():
-            theta = th.atan2(s, c)                                 # [N]
-            max_theta = scatter(
-                theta[case2_nodes], parent_clamped[case2_nodes],
-                dim=0, dim_size=N, reduce='max',
-            )                                                      # [N]
-            lr_mask[case2_nodes] = (
-                theta[case2_nodes] >= max_theta[parent_clamped[case2_nodes]] - 1e-7
-            )
-
-    if debug:
-        unique_parents = parent.unique()
-        for p in unique_parents.tolist():
-            if p < 0:
-                continue
-            child_idx = (parent == p).nonzero(as_tuple=False).flatten()
-            if child_idx.numel() != 2:
-                continue
-            left_count = int(lr_mask[child_idx].sum().item())
-            if left_count != 1:
-                logger.warning(
-                    f"[GeoLR] Parent {p} has {left_count} left assignments (expected 1)."
-                )
-
-    return lr_mask
 
 
-def compute_root_child_angles(
+def compute_geo_order(
     pos: th.Tensor,
     parent_idx: th.Tensor,
     uhat: th.Tensor,
-    geo_lr_mask: th.Tensor,
     *,
     eps: float = 1e-8,
+    tol: float = 1e-6,
+    _directions: dict | None = None,
 ) -> Tuple[th.Tensor, th.Tensor]:
-    """Compute per-node ordinal feature and relative angles for root children.
+    """Compute geometric ordinal feature for all children in the tree.
 
-    For root children (k ≥ 1):
-      1. Select child_0 by lowest uhat component (tiebreak: largest perp distance).
-      2. Order remaining children clockwise relative to child_0's perp direction.
-      3. Compute Δθ_i = angle of child i relative to child 0's direction.
-      4. Ordinal feature = i / max(k-1, 1).
+    Merges root child ordering (from ``_order_root_children_by_uhat``) and
+    binary interior L/R assignment into a single unified ordinal feature.
 
-    This ordering is SO(2)-invariant (no global axes used).
-
-    For binary interior children: left (geo_lr_mask=True) → 0.0, right → 1.0.
-    For root/parentless nodes: sentinel -1.0.
-
-    Args:
-        pos:          [N, 3] node positions
-        parent_idx:   [N] 0-based parent indices (-1 for roots)
-        uhat:         [3] SO(2) axis
-        geo_lr_mask:  [N] bool, True = left child (from compute_geo_lr_mask)
+    When ``_directions`` is provided (from ``_compute_tree_directions``), reuses
+    pre-computed root ordering and direction vectors.  Otherwise computes
+    everything internally.
 
     Returns:
-        (geo_ordinal [N] float, geo_delta_theta [N] float)
-        - geo_ordinal: i/(k-1) for root children, 0.0/1.0 for binary L/R, -1.0 sentinel
-        - geo_delta_theta: relative angle from child 0 for root children (radians),
-          0.0 for others (used for frame construction in compute_local_bases)
+        geo_ordinal [N]:      i/(k-1) for root children, 0.0/1.0 for binary
+                              interior L/R, -1.0 sentinel for root/parentless.
+        geo_delta_theta [N]:  relative angle from child_0 for root children,
+                              0.0 for all others.
     """
     N = pos.size(0)
     device = pos.device
     dtype = pos.dtype
-    parent = parent_idx.to(device=device)
 
     geo_ordinal = th.full((N,), -1.0, device=device, dtype=dtype)
-    geo_delta_theta = th.zeros((N,), device=device, dtype=dtype)
+    geo_delta_theta = th.zeros(N, device=device, dtype=dtype)
 
     if N == 0:
         return geo_ordinal, geo_delta_theta
 
-    has_parent = parent >= 0
-    is_root = parent == -1
+    # --- Retrieve or compute tree topology ---
+    if _directions is not None:
+        parent = _directions['parent']
+        has_parent = _directions['has_parent']
+        is_root = _directions['is_root']
+        v_in_unit = _directions['v_in_unit']
+        v_out_unit = _directions['v_out_unit']
+        root_ordering = _directions['root_ordering']
+        geo_delta_theta = _directions['geo_delta_theta'].clone()
+    else:
+        parent = parent_idx.to(device=device)
+        has_parent = parent >= 0
+        is_root = parent == -1
+        # Compute directions internally (standalone mode)
+        dirs = _compute_tree_directions(pos, parent_idx, uhat, eps=eps)
+        v_in_unit = dirs['v_in_unit']
+        v_out_unit = dirs['v_out_unit']
+        root_ordering = dirs['root_ordering']
+        geo_delta_theta = dirs['geo_delta_theta'].clone()
+
     parent_clamped = parent.clamp(min=0)
 
-    # --- Binary interior children: left=0.0, right=1.0 ---
-    # (children whose parent is NOT root and has exactly 2 children)
+    # --- Child counts per parent ---
     counts = scatter(
         th.ones(N, device=device, dtype=dtype),
         parent_clamped, dim=0, dim_size=N, reduce='sum',
     )
+
+    # === 1. Root children: ordinal from root_ordering ===
     parent_is_root = has_parent & is_root[parent_clamped]
-    binary_interior = has_parent & ~parent_is_root & (counts[parent_clamped] == 2)
-    if binary_interior.any():
-        geo_ordinal[binary_interior] = (~geo_lr_mask[binary_interior]).to(dtype)
-        # left (True) → 0.0, right (False) → 1.0
-
-    # --- Root children: SO(2)-invariant ordering by uhat component ---
-    if not is_root.any():
-        return geo_ordinal, geo_delta_theta
-
-    root_children_mask = parent_is_root  # [N] bool
-    if not root_children_mask.any():
-        return geo_ordinal, geo_delta_theta
-
-    # For each root, process its children
-    root_indices = is_root.nonzero(as_tuple=False).flatten()
-    for r in root_indices.tolist():
-        children = (parent == r).nonzero(as_tuple=False).flatten()
+    for r, (sorted_idx, _fwd0, delta_angles, children) in root_ordering.items():
         k = children.numel()
-        if k == 0:
-            continue
-
-        if k == 1:
-            geo_ordinal[children[0]] = 0.0
-            geo_delta_theta[children[0]] = 0.0
-            continue
-
-        offsets = pos[children] - pos[r].unsqueeze(0)  # [k, 3]
-        sorted_idx, _fwd0, delta_angles = _order_root_children_by_uhat(
-            offsets, uhat, eps=eps,
-        )
-
         for rank, si in enumerate(sorted_idx.tolist()):
             c = children[si]
             geo_ordinal[c] = rank / max(k - 1, 1)
             geo_delta_theta[c] = delta_angles[si]
+
+    # === 2. Binary interior children: L/R from sinψ sign ===
+    binary_parents = (counts == 2) & ~is_root
+    in_binary = has_parent & binary_parents[parent_clamped] & ~parent_is_root
+
+    if in_binary.any():
+        # Compute cosψ, sinψ from pre-established units
+        cospsi = (v_in_unit * v_out_unit).sum(dim=-1)    # [N]
+        cross = th.cross(v_in_unit, v_out_unit, dim=-1)
+        sinpsi = (cross * uhat.view(1, -1)).sum(dim=-1)  # [N]
+
+        s_bin = sinpsi[in_binary]
+        p_bin = parent_clamped[in_binary]
+
+        # Product s0*s1 per parent: ((s0+s1)^2 - s0^2 - s1^2) / 2
+        sum_s = scatter(s_bin, p_bin, dim=0, dim_size=N, reduce='sum')
+        sum_s2 = scatter(s_bin ** 2, p_bin, dim=0, dim_size=N, reduce='sum')
+        product = (sum_s ** 2 - sum_s2) * 0.5
+
+        # Case 1: opposite-sign sines → left = sin > 0 → ordinal 0.0
+        case1_parent = (product < -tol) & binary_parents
+        case1_nodes = in_binary & case1_parent[parent_clamped]
+        if case1_nodes.any():
+            is_left = sinpsi[case1_nodes] > 0
+            geo_ordinal[case1_nodes] = (~is_left).to(dtype)  # left→0.0, right→1.0
+
+        # Case 2: same-sign or near-zero → left = larger atan2 angle → ordinal 0.0
+        case2_parent = binary_parents & ~case1_parent
+        case2_nodes = in_binary & case2_parent[parent_clamped]
+        if case2_nodes.any():
+            theta = th.atan2(sinpsi, cospsi)
+            max_theta = scatter(
+                theta[case2_nodes], parent_clamped[case2_nodes],
+                dim=0, dim_size=N, reduce='max',
+            )
+            is_left = theta[case2_nodes] >= max_theta[parent_clamped[case2_nodes]] - 1e-7
+            geo_ordinal[case2_nodes] = (~is_left).to(dtype)  # left→0.0, right→1.0
 
     return geo_ordinal, geo_delta_theta
 
@@ -1082,137 +1076,6 @@ def compute_geo_angle_for_new_leaves(
     return geo_angle, valid
 
 
-def compute_geo_lr_mask_f2(
-    pos: th.Tensor,
-    parent_idx: th.Tensor,
-    *,
-    debug: bool = False,
-    eps: float = 1e-8,
-    tol: float = 1e-6,
-) -> th.Tensor:
-    """Return boolean mask marking the geometrically-defined left child per parent."""
-    if pos.numel() == 0:
-        return pos.new_zeros((0,), dtype=th.bool)
-    device = pos.device
-    dtype = pos.dtype
-    N = pos.size(0)
-    parent = parent_idx.to(device=device)
-    has_parent = parent >= 0
-
-    gp = parent.new_full((N,), -1)
-    if has_parent.any():
-        parents = parent[has_parent]
-        gp_values = parent.new_full((parents.numel(),), -1)
-        positive_mask = parents >= 0
-        if positive_mask.any():
-            gp_values[positive_mask] = parent[parents[positive_mask]].clamp(min=-1)
-        gp[has_parent] = gp_values
-
-    uhat = pos.new_zeros((pos.size(1),), dtype=dtype)
-    uhat[-1] = 1.0
-    global_e1, _ = global_inplane_basis(uhat, eps=eps)
-    uhat_vec = uhat.view(1, -1)
-
-    v_in = th.zeros((N, pos.size(1)), device=device, dtype=dtype)
-    has_gp_mask = gp >= 0
-    if has_gp_mask.any():
-        sel = has_gp_mask.nonzero(as_tuple=False).flatten()
-        v_in[sel] = pos[parent[sel]] - pos[gp[sel]]
-    fallback_mask = has_parent & ~has_gp_mask
-
-    v_out = th.zeros((N, pos.size(1)), device=device, dtype=dtype)
-    if has_parent.any():
-        sel = has_parent.nonzero(as_tuple=False).flatten()
-        v_out[sel] = pos[sel] - pos[parent[sel]]
-
-    if fallback_mask.any():
-        # Root children: use v_out as v_in (geometric, no global axis).
-        # Unused for their L/R decision (Z-comparison path); yields sinψ=0 for sinψ codepath.
-        v_in[fallback_mask] = v_out[fallback_mask]
-
-    du_in = (v_in * uhat_vec).sum(dim=-1, keepdim=True)
-    du_out = (v_out * uhat_vec).sum(dim=-1, keepdim=True)
-    v_in_perp = v_in - du_in * uhat_vec
-    v_out_perp = v_out - du_out * uhat_vec
-
-    nin = v_in_perp.norm(dim=-1, keepdim=True)
-    nout = v_out_perp.norm(dim=-1, keepdim=True)
-    v_in_unit = v_in_perp / (nin + eps)
-    degenerate = (nin <= eps) | (~has_parent).view(-1, 1)
-    if degenerate.any():
-        v_in_unit = v_in_unit.clone()
-        v_in_unit[degenerate.squeeze(-1)] = global_e1
-    v_out_unit = v_out_perp / (nout + eps)
-
-    cospsi = (v_in_unit * v_out_unit).sum(dim=-1, keepdim=True)
-    cross = th.cross(v_in_unit, v_out_unit, dim=-1)
-    sinpsi = (cross * uhat_vec).sum(dim=-1, keepdim=True)
-    mask = has_parent.view(-1, 1)
-    cospsi = th.where(mask, cospsi, cospsi.new_ones(cospsi.shape))
-    sinpsi = th.where(mask, sinpsi, sinpsi.new_zeros(sinpsi.shape))
-
-    lr_mask = th.zeros((N,), dtype=th.bool, device=device)
-
-    handled_parents = th.zeros((N,), dtype=th.bool, device=device)
-    root_nodes = (parent == -1).nonzero(as_tuple=False).flatten()
-    if not root_nodes.numel():
-        logger.warning("[GeoLR] No root with parent==-1 found; override skipped for this graph.")
-    else:
-        for r in root_nodes.tolist():
-            child_idx = (parent == r).nonzero(as_tuple=False).flatten()
-            if child_idx.numel() == 0:
-                continue
-            if child_idx.numel() == 2:
-                child_z = pos[child_idx, -1]
-                if float(child_z[0].item()) <= float(child_z[1].item()):
-                    left_idx = int(child_idx[0].item())
-                    right_idx = int(child_idx[1].item())
-                else:
-                    left_idx = int(child_idx[1].item())
-                    right_idx = int(child_idx[0].item())
-                lr_mask[left_idx] = True
-                lr_mask[right_idx] = False
-            else:
-                parent_z = pos[r, -1]
-                child_z = pos[child_idx, -1]
-                lr_mask[child_idx] = child_z >= parent_z
-            handled_parents[r] = True
-
-    unique_parents = parent.unique()
-    for p in unique_parents.tolist():
-        if p < 0:
-            continue
-        if handled_parents[p]:
-            continue
-        child_idx = (parent == p).nonzero(as_tuple=False).flatten()
-        if child_idx.numel() != 2:
-            continue
-        s = sinpsi[child_idx, 0]
-        c = cospsi[child_idx, 0]
-        if (s[0] * s[1] < -tol):
-            lr_mask[child_idx[0]] = bool(s[0] > 0)
-            lr_mask[child_idx[1]] = bool(s[1] > 0)
-        else:
-            theta = th.atan2(s, c)
-            idx_left = child_idx[int(th.argmax(theta))]
-            lr_mask[idx_left] = True
-
-    if debug:
-        for p in unique_parents.tolist():
-            if p < 0:
-                continue
-            child_idx = (parent == p).nonzero(as_tuple=False).flatten()
-            if child_idx.numel() != 2:
-                continue
-            left_count = int(lr_mask[child_idx].sum().item())
-            if left_count != 1:
-                logger.warning(
-                    f"[GeoLR] Parent {p} has {left_count} left assignments (expected 1)."
-                )
-
-    return lr_mask
-
-
 def precompute_full_geometry(
     pos: th.Tensor,
     parent_idx: th.Tensor,
@@ -1223,25 +1086,30 @@ def precompute_full_geometry(
     tol: float = 1e-6,
     debug: bool = False,
 ) -> dict:
-    """Compute all geometry (geo_lr_mask + SO(2) edge/node features) once on P_0.
+    """Compute all geometry once on P_0 (clean positions).
+
+    Uses ``_compute_tree_directions`` as the shared base, then derives:
+    ordinals, branch angles, edge features, and local coordinate frames.
 
     Returns a dict compatible with the ``pre_geom`` format expected by
     ``SO2_EGNN.forward()`` plus extras needed for leaf-patching.
     """
-    # 1. geo_lr_mask (node feature for left/right sibling assignment)
-    geo_lr_mask = compute_geo_lr_mask(pos, parent_idx, uhat=uhat, debug=debug, eps=eps, tol=tol)
+    # 1. Shared tree directions + root ordering (ONCE)
+    dirs = _compute_tree_directions(pos, parent_idx, uhat, eps=eps)
 
-    # 1b. Root child angular ordering and per-child relative angles
-    geo_ordinal, geo_delta_theta = compute_root_child_angles(
-        pos, parent_idx, uhat, geo_lr_mask, eps=eps,
+    # 2. Unified geometric ordering (ordinals for root + binary interior)
+    geo_ordinal, geo_delta_theta = compute_geo_order(
+        pos, parent_idx, uhat, eps=eps, tol=tol,
+        _directions=dirs,
     )
 
-    # 2. Node-level branch angles with intermediates for later patching
+    # 3. Branch angles (reuses shared directions)
     cospsi_node, sinpsi_node, cos_theta_node, intermediates = compute_branch_angles_parent_centric(
         pos, parent_idx, uhat, eps=eps, return_intermediates=True,
+        _directions=dirs,
     )
 
-    # 3. Edge-level SO(2) decomposition
+    # 4. Edge-level SO(2) decomposition
     src, dst = edge_index
     rel_coors = pos[dst] - pos[src]                         # (E, 3)
     du = (rel_coors @ uhat)                                  # (E,)
@@ -1250,7 +1118,7 @@ def precompute_full_geometry(
     rho = r_perp.norm(dim=-1, keepdim=True).clamp_min(eps)   # (E, 1)
     du = du[:, None]                                         # (E, 1)
 
-    # 4. Assign node angles to edges
+    # 5. Assign node angles to edges
     cospsi_edge, sinpsi_edge = assign_branch_angles_to_edges(
         edge_index, parent_idx, cospsi_node, sinpsi_node,
     )
@@ -1258,10 +1126,10 @@ def precompute_full_geometry(
         edge_index, parent_idx, cos_theta_node,
     )
 
-    # 5. Local coordinate bases for SO(2)-equivariant loss (with per-child root frames)
+    # 6. Local bases (trivial: reads forward from shared directions)
     local_bases = compute_local_bases(
-        pos, parent_idx, uhat, geo_lr_mask, eps=eps,
-        geo_delta_theta=geo_delta_theta,
+        pos, parent_idx, uhat, eps=eps,
+        _directions=dirs,
     )
 
     return {
@@ -1277,15 +1145,9 @@ def precompute_full_geometry(
         'cospsi_node': cospsi_node,
         'sinpsi_node': sinpsi_node,
         'cos_theta_node': cos_theta_node,
-        # for geo_lr feature (kept for binary interior children)
-        'geo_lr_mask': geo_lr_mask,
         # angular ordering for root children
         'geo_ordinal': geo_ordinal,
         'geo_delta_theta': geo_delta_theta,
-        # intermediates for leaf patching
-        'v_in': intermediates['v_in'],
-        'v_out': intermediates['v_out'],
-        'has_gp': intermediates['has_gp'],
         # local bases for SO(2)-equivariant loss
         'local_forward': local_bases['local_forward'],
         'local_sideways': local_bases['local_sideways'],
@@ -1327,24 +1189,14 @@ def patch_geometry_for_noised_leaves(
     # (parent pos is unchanged in P_t since parents are internal)
     v_out_new = P_t[leaf_idx_train] - P_t[parent_clamped[leaf_idx_train]]  # (L, 3)
 
-    # v_in reused from P_0 for most leaves (parent/grandparent are internal, unchanged)
-    v_in_p0 = pre_geom_p0['v_in']                           # (N, 3)
-    has_gp_p0 = pre_geom_p0['has_gp']                       # (N,) bool
-    v_in_leaf = v_in_p0[leaf_idx_train]                      # (L, 3)
+    # v_in direction reused from P_0 via local_forward (already projected,
+    # normalized, and degenerate-fallbacked — locked to P_0 frame).
+    v_in_unit = pre_geom_p0['local_forward'][leaf_idx_train]  # (L, 3)
 
-    # Root-child leaves: v_in is locked to the P_0-based per-child frame
-    # (computed in compute_local_bases with geo_delta_theta). Do NOT update
-    # with noised v_out — the frame must remain stable through diffusion.
-
-    # Perpendicular projections
-    du_in = (v_in_leaf @ uhat).unsqueeze(-1)                 # (L, 1)
+    # v_out needs fresh computation from noised positions
     du_out = (v_out_new @ uhat).unsqueeze(-1)                # (L, 1)
-    v_in_perp = v_in_leaf - du_in * uhat                     # (L, 3)
     v_out_perp = v_out_new - du_out * uhat                   # (L, 3)
-
-    nin = v_in_perp.norm(dim=-1, keepdim=True)
     nout = v_out_perp.norm(dim=-1, keepdim=True)
-    v_in_unit = v_in_perp / (nin + eps)
     v_out_unit = v_out_perp / (nout + eps)
 
     cospsi_leaf = (v_in_unit * v_out_unit).sum(dim=-1, keepdim=True)
