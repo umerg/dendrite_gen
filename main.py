@@ -110,7 +110,7 @@ def get_expansion_items(cfg: DictConfig, train_graphs, diffusion=None):
             offset_head_hidden=cfg.model.offset_head_hidden,
             tmd_in_dim=tmd_in_dim,
             tmd_hidden_dim=tmd_hidden_dim,
-            # so2_axis=cfg.model.so2_axis,
+            so2_axis=cfg.model.so2_axis,
         )
     elif cfg.model.name == "egnn_simple":
         model = gg.model.SO2_EGNN_Sparse_Network_Simple(
