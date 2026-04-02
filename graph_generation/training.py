@@ -189,7 +189,7 @@ class Trainer:
                 # resume from specific step number
                 checkpoint_path = checkpoint_dir / f"step_{resume}.pt"
 
-        checkpoint = th.load(checkpoint_path)
+        checkpoint = th.load(checkpoint_path, map_location=self.device)
         for name, model in self.all_models.items():
             if model is not None:
                 model.load_state_dict(checkpoint[name])
