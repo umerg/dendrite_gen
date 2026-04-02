@@ -789,7 +789,7 @@ def compute_geo_order(
         k = children.numel()
         for rank, si in enumerate(sorted_idx.tolist()):
             c = children[si]
-            geo_ordinal[c] = rank / max(k - 1, 1)
+            geo_ordinal[c] = float(rank)  # integer child index (0, 1, ..., k-1)
             geo_delta_theta[c] = delta_angles[si]
 
     # === 2. Binary interior children: L/R from sinψ sign ===

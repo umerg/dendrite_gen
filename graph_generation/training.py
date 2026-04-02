@@ -189,7 +189,7 @@ class Trainer:
                 # resume from specific step number
                 checkpoint_path = checkpoint_dir / f"step_{resume}.pt"
 
-        checkpoint = th.load(checkpoint_path)
+        checkpoint = th.load(checkpoint_path, map_location=self.device)
         for name, model in self.all_models.items():
             if model is not None:
                 model.load_state_dict(checkpoint[name])
@@ -371,6 +371,13 @@ class Trainer:
 
         # Select target number of nodes and split into batches
         target_size = np.array([len(g) for g in eval_graphs])[pred_perm]
+
+        # Extract num_root_children per graph (degree of root node)
+        nrc_all = np.array([
+            g.degree[g.graph["root"]] if "root" in g.graph else 2
+            for g in eval_graphs
+        ])[pred_perm]
+
         tmd_hidden_dim = getattr(model, "tmd_hidden_dim", 0)
         tmds = None
         if tmd_hidden_dim > 0:
@@ -384,6 +391,7 @@ class Trainer:
             else self.cfg.training.batch_size
         )
         batches = [target_size[i : i + bs] for i in range(0, len(target_size), bs)]
+        nrc_batches = [nrc_all[i : i + bs] for i in range(0, len(nrc_all), bs)]
 
         results = {}
 
@@ -391,7 +399,7 @@ class Trainer:
         _t0_gen = time()
         pred_graphs = []
         cursor = 0
-        for batch in batches:
+        for batch, nrc_batch in zip(batches, nrc_batches):
             tmd_batch = None
             if tmds is not None:
                 tmd_batch = th.from_numpy(tmds[cursor : cursor + len(batch)]).to(self.device)
@@ -399,6 +407,7 @@ class Trainer:
                 target_size=th.tensor(batch, device=self.device),
                 model=model,
                 tmd=tmd_batch,
+                num_root_children=th.tensor(nrc_batch, device=self.device),
             )  # returns list[nx.Graph] with geometric node attrs
             pred_graphs += pred_graphs_batch
             cursor += len(batch)

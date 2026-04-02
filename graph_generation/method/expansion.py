@@ -268,14 +268,9 @@ class Expansion(Method):
             [batch_reduced, th.tensor(new_batches, device=device, dtype=batch_reduced.dtype)]
         )
 
-        # Compute initial geo_angle for new children: i / max(k-1, 1)
+        # Compute child ordinal index for new children (raw integer, not normalized)
         ordinal_t = th.tensor(ordinal_new, device=device, dtype=th.float)
-        sib_count_t = th.tensor(sibling_count_new, device=device, dtype=th.float)
-        geo_angle_new = ordinal_t / sib_count_t.clamp(min=2.0).sub(1.0)  # i / (k-1), k=1 → 0.0
-        # For k=1, sib_count_t - 1 = 0 → clamp avoids div by zero; result is 0.0
-        single_child_mask = sib_count_t == 1
-        if single_child_mask.any():
-            geo_angle_new[single_child_mask] = 0.0
+        geo_angle_new = ordinal_t  # integer child index: 0, 1, ..., k-1
 
         # Also track ordinals and sibling counts for frame computation
         child_ordinal_t = th.tensor(ordinal_new, device=device, dtype=th.long)
@@ -367,29 +362,41 @@ class Expansion(Method):
         # Build geo_feat: use precomputed geo_ordinal for internal nodes,
         # spawn-order ordinals for new leaves (whose positions are placeholders)
         geo_feat_all = pre_geom_p0['geo_ordinal'].clamp(min=0.0).clone()
-        geo_feat_all[leaf_idx_next] = geo_angle_new  # spawn-order i/(k-1)
+        geo_feat_all[leaf_idx_next] = geo_angle_new  # raw child index (0, 1, ..., k-1)
 
         # --- Assemble node features ---
+        MAX_CHILDREN = 10  # one-hot ordinal dimension
         feats_total = getattr(model, "feats_dim", 0)
         tmd_hidden_dim = getattr(model, "tmd_hidden_dim", 0)
         cond_dim = getattr(self.diffusion, "cond_dim", 0)
         avail_feats_dim = feats_total - cond_dim - tmd_hidden_dim
-        if tmd_hidden_dim > 0 and avail_feats_dim < 5:
-            raise ValueError("feats_dim - tmd_hidden_dim - cond_dim must be >= 5 when using TMD.")
+        if tmd_hidden_dim > 0 and avail_feats_dim < (MAX_CHILDREN + 4):
+            raise ValueError(f"feats_dim - tmd_hidden_dim - cond_dim must be >= {MAX_CHILDREN + 4} when using TMD.")
         if avail_feats_dim > 0:
+            N = pos_new.size(0)
             features = []
             feats_used = 0
             is_leaf = leaf_mask_next.to(dtype=pos_new.dtype).unsqueeze(-1)
             features.append(is_leaf)
             feats_used += 1
 
-            if feats_used < avail_feats_dim:
-                geo_feat = geo_feat_all.unsqueeze(-1)
-                features.append(geo_feat)
-                feats_used += 1
+            if feats_used + MAX_CHILDREN <= avail_feats_dim:
+                # One-hot ordinal encoding (10D): child i lights up bit i
+                geo_idx = geo_feat_all.long().clamp(0, MAX_CHILDREN - 1)
+                geo_onehot = pos_new.new_zeros((N, MAX_CHILDREN))
+                # Set one-hot for actual children (geo_ordinal >= 0; sentinel is -1)
+                child_mask = pre_geom_p0['geo_ordinal'] >= 0
+                # Override for new leaves (whose geo_ordinal in pre_geom_p0 is stale)
+                child_mask[leaf_idx_next] = True
+                if child_mask.any():
+                    geo_onehot[child_mask] = geo_onehot[child_mask].scatter_(
+                        1, geo_idx[child_mask].unsqueeze(-1), 1.0
+                    )
+                features.append(geo_onehot)
+                feats_used += MAX_CHILDREN
 
             if feats_used < avail_feats_dim:
-                new_flag = pos_new.new_zeros((pos_new.size(0), 1))
+                new_flag = pos_new.new_zeros((N, 1))
                 new_flag[leaf_idx_next] = 1.0
                 features.append(new_flag)
                 feats_used += 1
@@ -401,7 +408,7 @@ class Expansion(Method):
                 feats_used += 1
 
             if feats_used < avail_feats_dim:
-                pad = pos_new.new_zeros((pos_new.size(0), avail_feats_dim - feats_used))
+                pad = pos_new.new_zeros((N, avail_feats_dim - feats_used))
                 features.append(pad)
 
             node_feats = th.cat(features, dim=-1)
@@ -588,18 +595,26 @@ class Expansion(Method):
         #         uniq.tolist(),
         #     )
 
+        MAX_CHILDREN = 10  # one-hot ordinal dimension
         if avail_feats_dim > 0:
-            is_leaf = pos_gt.new_zeros((pos_gt.size(0), 1))
+            N_nodes = pos_gt.size(0)
+            is_leaf = pos_gt.new_zeros((N_nodes, 1))
             is_leaf[batch.leaf_idx] = 1.0
             features = [is_leaf]
             feats_used = 1
 
-            # Geometry-derived ordinal feature for siblings (replaces binary L/R)
-            if feats_used < avail_feats_dim:
+            # One-hot ordinal encoding (10D): child i lights up bit i
+            if feats_used + MAX_CHILDREN <= avail_feats_dim:
                 geo_ordinal = pre_geom_p0['geo_ordinal'].to(device=pos_gt.device, dtype=pos_gt.dtype)
-                geo_feat = geo_ordinal.clamp(min=0.0).unsqueeze(-1)  # sentinel -1.0 → 0.0
-                features.append(geo_feat)
-                feats_used += 1
+                geo_idx = geo_ordinal.long().clamp(0, MAX_CHILDREN - 1)
+                geo_onehot = pos_gt.new_zeros((N_nodes, MAX_CHILDREN))
+                child_mask = geo_ordinal >= 0  # sentinel -1 → all-zeros
+                if child_mask.any():
+                    geo_onehot[child_mask] = geo_onehot[child_mask].scatter_(
+                        1, geo_idx[child_mask].unsqueeze(-1), 1.0
+                    )
+                features.append(geo_onehot)
+                feats_used += MAX_CHILDREN
 
             # Add indicator for nodes flagged as newly expanded leaves (when provided)
             if hasattr(batch, "new_leaf_mask_from_next") and feats_used < avail_feats_dim:
@@ -609,9 +624,9 @@ class Expansion(Method):
                 else:
                     new_mask_tensor = pos_gt.new_tensor(new_mask, dtype=pos_gt.dtype)
                 new_mask_tensor = new_mask_tensor.view(-1)
-                if new_mask_tensor.numel() != pos_gt.size(0):
-                    aligned = pos_gt.new_zeros(pos_gt.size(0))
-                    count = min(new_mask_tensor.numel(), pos_gt.size(0))
+                if new_mask_tensor.numel() != N_nodes:
+                    aligned = pos_gt.new_zeros(N_nodes)
+                    count = min(new_mask_tensor.numel(), N_nodes)
                     if count > 0:
                         aligned[:count] = new_mask_tensor[:count]
                     new_mask_tensor = aligned
@@ -631,9 +646,9 @@ class Expansion(Method):
 
             # Fill remaining dimensions with zeros if needed
             if feats_used < avail_feats_dim:
-                extra = pos_gt.new_zeros((pos_gt.size(0), avail_feats_dim - feats_used))
+                extra = pos_gt.new_zeros((N_nodes, avail_feats_dim - feats_used))
                 features.append(extra)
-            
+
             node_feats = th.cat(features, dim=-1)
         else:
             node_feats = pos_gt.new_zeros((pos_gt.size(0), 0))

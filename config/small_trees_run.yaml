@@ -19,8 +19,9 @@ reduction:
 training:
   batch_size: 128
   lr: 5e-4
-  num_steps: 30000 # ~200 epochs; considering 1 step = 1 batch
+  num_steps: 1 # ~200 epochs; considering 1 step = 1 batch
   max_num_workers: 0
+  log_interval: 1000
   log_interval: 1000
   save_checkpoint: True
   resume: False #"/itet-stor/guptau/net_scratch/dendrite_gen/outputs/2026-03-21/08-51-39/checkpoints/step_60000.pt" # False, True (latest checkpoint), step number, or path to .pt file
@@ -53,6 +54,7 @@ model:
   num_global_tokens: 4
   offset_head_hidden: 128
   use_global_fallback_frames: False
+  so2_axis: [0., 1., 0.]
   so2_axis: [0., 1., 0.]
 
 ema:

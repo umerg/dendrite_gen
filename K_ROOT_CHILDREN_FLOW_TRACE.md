@@ -185,6 +185,10 @@ Expansion.sample_graphs(target_size, model, tmd, num_root_children)
     |       +-- precompute_full_geometry(pos_new, ...) -> pre_geom_p0  (ONCE on P_0)
     |       |     geo_feat = geo_ordinal (internal nodes) + geo_angle_new (new leaves)
     |       |
+    |       +-- Override pre_geom_p0['local_forward/sideways'][leaves] = leaf_fwd/side
+    |       |     ★ Critical for root children at step 0: replaces deterministic fallback
+    |       |       with random shared frame from compute_local_bases_for_leaves
+    |       |
     |       +-- DenoisingDiffusionModel.sample(..., pre_geom_p0=pre_geom_p0)
     |       |     |
     |       |     +-- C = randn(L, 3) * sigma_max   (pure noise, local frame)
@@ -1034,6 +1038,9 @@ Expansion.sample_graphs(num_root_children=nrc)
           │     ├── compute_geo_order()                   → geo_ordinal for internal nodes
           │     ├── compute_branch_angles_parent_centric()
           │     └── compute_local_bases()                 → local_forward for patch_geometry
+          ├── override pre_geom_p0['local_forward/sideways'][leaves] = leaf_fwd/side
+          │     └── critical for root children at step 0: replaces deterministic
+          │       fallback with random shared frame from compute_local_bases_for_leaves
           ├── geo_feat = geo_ordinal (internal) + geo_angle_new (new leaves)
           ├── [feature assembly with geo_feat]
           ├── DenoisingDiffusionModel.sample(pre_geom_p0=...)
