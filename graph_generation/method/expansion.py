@@ -616,8 +616,8 @@ class Expansion(Method):
                 features.append(geo_onehot)
                 feats_used += MAX_CHILDREN
 
-            # Add indicator for nodes flagged as newly expanded leaves (when provided)
-            if hasattr(batch, "new_leaf_mask_from_next") and feats_used < avail_feats_dim:
+            # Add indicator for nodes flagged as newly expanded leaves
+            if feats_used < avail_feats_dim:
                 new_mask = batch.new_leaf_mask_from_next
                 if isinstance(new_mask, th.Tensor):
                     new_mask_tensor = new_mask.to(pos_gt.device, dtype=pos_gt.dtype)

@@ -41,15 +41,20 @@ def get_expansion_items(cfg: DictConfig, train_graphs, diffusion=None):
         factory_kwargs["weighted_reduction"] = cfg.reduction.weighted_reduction
 
     red_factory = factory_cls(**factory_kwargs) # initialised cherry/depth reduction factory
+    pos_scale_factor = getattr(cfg.dataset, "pos_scale_factor", None)
     print(f"Extracting adjacency and position matrices for {len(train_graphs)} training graphs...")
     adjs = []
     poses = []
     tmds = []
     for G in train_graphs:
         A, P, _ = nx_graph_to_adj_pos(G)
+        if pos_scale_factor is not None:
+            P = P / float(pos_scale_factor)
         adjs.append(A)
         poses.append(P)
         tmds.append(compute_tmd_mixed(G))
+    if pos_scale_factor is not None:
+        print(f"Positions scaled by 1/{pos_scale_factor} (offsets now ~unit scale).")
     print("Extraction done.")
 
     print("Creating training reduction sequences...")
@@ -184,6 +189,7 @@ def get_expansion_items(cfg: DictConfig, train_graphs, diffusion=None):
         "train_dataloader": train_dataloader,
         "method": method,
         "model": model,
+        "pos_scale_factor": pos_scale_factor,
     }
 
 
@@ -310,6 +316,7 @@ def main(cfg: DictConfig):
         test_graphs=test_graphs,
         metrics=validation_metrics,
         cfg=cfg,
+        pos_scale_factor=method_items.get("pos_scale_factor"),
     )
     if cfg.testing:
         trainer.test()

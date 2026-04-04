@@ -47,7 +47,9 @@ class Trainer:
         test_graphs: list[nx.Graph],
         metrics: list[Metric],
         cfg,
+        pos_scale_factor: float | None = None,
     ):
+        self.pos_scale_factor = pos_scale_factor
         self.train_iterator = iter(train_dataloader)
         self.train_graphs = train_graphs
         self.validation_graphs = validation_graphs
@@ -415,6 +417,13 @@ class Trainer:
         inv_perm = np.empty_like(pred_perm)
         inv_perm[pred_perm] = np.arange(len(pred_perm))
         results["pred_graphs"] = [pred_graphs[i] for i in inv_perm]
+
+        # Rescale positions back to original coordinate space
+        if self.pos_scale_factor is not None:
+            for G in results["pred_graphs"]:
+                for n in G.nodes():
+                    G.nodes[n]['pos'] = G.nodes[n]['pos'] * self.pos_scale_factor
+
         if self.device == "cuda":
             th.cuda.empty_cache()
         _t_generation = time() - _t0_gen

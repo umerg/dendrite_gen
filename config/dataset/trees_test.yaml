@@ -1,3 +1,4 @@
 name: tree_dataset
 data_dir: /scratch/guptau/neurons_v1
 load: True
+pos_scale_factor: 0.053425 
