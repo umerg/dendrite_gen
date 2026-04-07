@@ -43,6 +43,75 @@ from graph_generation.method.helpers import (
 
 # global linear attention
 
+# --- Pad/unpad helpers for batched attention ---
+
+def _pad_to_batch(flat: torch.Tensor, batch_ids: torch.Tensor):
+    """Convert flat [sum_N, D] + batch_ids [sum_N] -> padded [B, N_max, D] + mask [B, N_max].
+
+    Handles non-contiguous graph assignment (sampling path) via argsort.
+    Returns (padded, mask, sorted_indices, counts) for unpadding.
+    """
+    device = flat.device
+    B = int(batch_ids.max().item()) + 1
+    N = flat.size(0)
+    D = flat.size(-1)
+
+    # Sort by graph ID to make contiguous
+    sorted_indices = torch.argsort(batch_ids, stable=True)
+    sorted_feats = flat[sorted_indices]
+    sorted_batch = batch_ids[sorted_indices]
+
+    # Per-graph counts
+    _, counts = torch.unique_consecutive(sorted_batch, return_counts=True)
+    N_max = int(counts.max().item())
+
+    # Fast path: all graphs same size (e.g. global tokens) — just reshape
+    if int(counts.min().item()) == N_max:
+        padded = sorted_feats.reshape(B, N_max, D)
+        mask = torch.ones(B, N_max, dtype=torch.bool, device=device)
+        return padded, mask, sorted_indices, counts
+
+    # Build within-graph offsets: offset[i] = i - start_of_its_graph
+    starts = torch.zeros(B, device=device, dtype=torch.long)
+    starts[1:] = counts.cumsum(0)[:-1]
+    offsets = torch.arange(N, device=device) - starts[sorted_batch]
+
+    # Scatter into padded tensor
+    padded = flat.new_zeros(B, N_max, D)
+    padded[sorted_batch, offsets] = sorted_feats
+
+    # Build mask: True where valid
+    mask = torch.arange(N_max, device=device).unsqueeze(0) < counts.unsqueeze(1)
+
+    return padded, mask, sorted_indices, counts
+
+
+def _unpad_from_batch(padded: torch.Tensor, counts: torch.Tensor,
+                      sorted_indices: torch.Tensor, original_N: int):
+    """Convert padded [B, N_max, D] back to flat [sum_N, D] in original order."""
+    B, N_max, D = padded.shape
+    device = padded.device
+
+    # Rebuild within-graph offsets (same logic as _pad_to_batch)
+    sorted_batch = torch.arange(B, device=device).repeat_interleave(counts)
+    starts = torch.zeros(B, device=device, dtype=torch.long)
+    starts[1:] = counts.cumsum(0)[:-1]
+    total = int(counts.sum().item())
+    offsets = torch.arange(total, device=device) - starts[sorted_batch]
+
+    # Fast path: all graphs same size — just reshape
+    if int(counts.min().item()) == N_max:
+        flat_sorted = padded.reshape(total, D)
+    else:
+        flat_sorted = padded[sorted_batch, offsets]
+
+    # Invert sort to restore original element order
+    flat_original = flat_sorted.new_empty(original_N, D)
+    flat_original[sorted_indices] = flat_sorted
+
+    return flat_original
+
+
 class Attention_Sparse(Attention):
     def __init__(self, **kwargs):
         """ Wraps the attention class to operate with pytorch-geometric inputs. """
@@ -76,6 +145,22 @@ class Attention_Sparse(Attention):
         # returns (unique_ids, counts)
         return torch.unique(b, return_counts=True)
 
+    def batched_forward(self, q: torch.Tensor, kv: torch.Tensor,
+                        *, q_batch: torch.Tensor, kv_batch: torch.Tensor):
+        """Single-kernel batched attention with padding and masking.
+        Replaces the per-graph Python loop with one fused Attention.forward() call.
+        """
+        # Pad queries and KVs into [B, N_max, D] tensors
+        q_padded, _q_mask, q_sort, q_counts = _pad_to_batch(q, q_batch)
+        kv_padded, kv_mask, _kv_sort, _kv_counts = _pad_to_batch(kv, kv_batch)
+
+        # Call base Attention.forward — mask is KV-side [B, N_kv_max]
+        # (prevents queries from attending to padding positions in kv)
+        out_padded = super().forward(q_padded, kv_padded, mask=kv_mask)
+
+        # Unpad back to flat [sum_q, D] in original element order
+        return _unpad_from_batch(out_padded, q_counts, q_sort, q.size(0))
+
     def sparse_forward_with_separate_batches(self,
                                            q: torch.Tensor,
                                            kv: torch.Tensor,
@@ -94,22 +179,7 @@ class Attention_Sparse(Attention):
             kv_ = rearrange(kv, 'm d -> () m d')
             return super().forward(q_, kv_, mask=None).squeeze(0)
 
-        # multi-graph path
-        (uq, _), (uk, _) = self._unique_counts(q_batch), self._unique_counts(kv_batch)
-        # assume the same set of graph ids exists in both batches
-        assert torch.equal(uq, uk), "q_batch and kv_batch must index the same set of graphs in order."
-
-        out = q.new_zeros(q.shape)
-        for gid in uq.tolist():
-            q_sel = (q_batch == gid)
-            k_sel = (kv_batch == gid)
-            q_g = q[q_sel]
-            kv_g = kv[k_sel]
-            q_g = rearrange(q_g, 'n d -> () n d')
-            kv_g = rearrange(kv_g, 'm d -> () m d')
-            out_g = super().forward(q_g, kv_g, mask=None).squeeze(0)
-            out[q_sel] = out_g
-        return out
+        return self.batched_forward(q, kv, q_batch=q_batch, kv_batch=kv_batch)
 
 
 class GlobalLinearAttention_Sparse(nn.Module):
