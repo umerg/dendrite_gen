@@ -1,8 +1,8 @@
 defaults:
   - _self_
-  - dataset: trees
-  - diffusion: basic
-  - method: expansion
+  - dataset: trees # trees.yaml
+  - diffusion: basic # basic.yaml
+  - method: expansion # expansion.yaml
 
 reduction:
   type: "depth"
