@@ -47,7 +47,7 @@ def load_swc_graph(path):
             z = float(parts[4])
             parent = int(parts[6])
 
-            if parent == 0:
+            if parent <= 0:
                 root_id = nid
 
             G.add_node(nid, pos=np.array([x, y, z], dtype=np.float64))
@@ -93,7 +93,7 @@ def load_swc_graphs_from_dir(dir_path):
         name = swc_file.name
         if name.startswith("._"):
             continue
-        if not name.endswith(".csv.swc"):
+        if not name.endswith(".swc"):
             continue
         graphs.append(load_swc_graph(swc_file))
     return graphs
