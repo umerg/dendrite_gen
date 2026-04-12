@@ -41,11 +41,13 @@ class Expansion(Method):
         red_threshold: int = 0,
         expansion_loss_weight: float = 1.0,
         use_size_ratio: bool = True,
+        max_tree_size: int = 500,
     ):
         super().__init__(diffusion=diffusion)
         self.red_threshold = red_threshold
         self.expansion_loss_weight = float(expansion_loss_weight)
         self.use_size_ratio = use_size_ratio
+        self.max_tree_size = max_tree_size
     
     def sample_graphs(self, target_size: th.Tensor, model: Module, tmd: th.Tensor | None = None,
                       num_root_children: th.Tensor | int | None = None):
@@ -84,7 +86,8 @@ class Expansion(Method):
         leaf_expansion = th.ones_like(leaf_idx)  # root's spawn count is overridden in expand
         leaf_mask = th.ones((num_graphs,), device=device, dtype=th.bool)
 
-        max_steps = int(target_size.max().item() * 2)
+        effective_max = min(int(target_size.max().item()), self.max_tree_size)
+        max_steps = effective_max * 2
         step = 0
         terminated = False
 
@@ -209,6 +212,12 @@ class Expansion(Method):
                 # Legacy: spawn exactly 1 child
                 root_should_spawn = (target_size[leaf_batch] > 1).long()
                 spawn_counts_final = th.where(is_root_leaf, root_should_spawn, spawn_counts_final)
+
+        # Cap spawning so no graph exceeds max_tree_size
+        if self.max_tree_size is not None and self.max_tree_size > 0:
+            size_per_leaf_graph = size_per_graph[leaf_batch]
+            over_cap = size_per_leaf_graph >= self.max_tree_size
+            spawn_counts_final[over_cap] = 0
 
         total_new_children = int(spawn_counts_final.sum().item())
         if total_new_children == 0:
@@ -445,6 +454,12 @@ class Expansion(Method):
             exp_pred = exp_pred.unsqueeze(-1)
         expansion_score = exp_pred.squeeze(-1)
         leaf_expansion_next = (expansion_score > map_threshold).long() + 1
+
+        # Force-stop expansion for graphs at max_tree_size
+        if self.max_tree_size is not None and self.max_tree_size > 0:
+            leaf_batch_next = batch_new[leaf_idx_next]
+            at_cap = node_counts_per_graph[leaf_batch_next] >= self.max_tree_size
+            leaf_expansion_next[at_cap] = 1  # 1 = no expansion
 
         remaining_capacity_new = target_size.to(device) - node_counts_per_graph
         terminated = leaf_idx_next.numel() == 0

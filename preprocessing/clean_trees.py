@@ -19,6 +19,7 @@ import os
 from pathlib import Path
 import sys
 import math
+import warnings
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Tuple, Set
@@ -45,15 +46,17 @@ def read_swc(path: Path) -> pd.DataFrame:
       2) fallback: detect comma usage or single-column parse -> manual tokenizer
     """
     try:
-        df = pd.read_csv(
-            path,
-            comment='#',
-            header=None,
-            delim_whitespace=True,
-            names=SWC_COLS,
-            usecols=range(7),
-            engine='python'
-        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", FutureWarning)
+            df = pd.read_csv(
+                path,
+                comment='#',
+                header=None,
+                delim_whitespace=True,
+                names=SWC_COLS,
+                usecols=range(7),
+                engine='python'
+            )
         # If we only got a single column, likely comma-delimited input; trigger fallback
         if df.shape[1] == 1:
             raise ValueError("Whitespace parse produced single column; retry as CSV")
@@ -389,6 +392,36 @@ def collapse_degree2(
     return out
 
 
+# ---------- Re-root helper ----------
+
+def _reroot_df_at_node(df: pd.DataFrame, root_nid: int, root_parent_value: int) -> pd.DataFrame:
+    """BFS from root_nid, reassign parent column to orient tree from that node."""
+    ids = set(df['id'].astype(int))
+    if root_nid not in ids:
+        raise ValueError(f"Root node {root_nid} not found in SWC data")
+    # Build undirected adjacency from existing parent pointers
+    adj: Dict[int, List[int]] = {int(nid): [] for nid in df['id']}
+    for _, row in df.iterrows():
+        nid, par = int(row['id']), int(row['parent'])
+        if par in adj:
+            adj[nid].append(par)
+            adj[par].append(nid)
+    # BFS from root_nid
+    new_parent = {root_nid: root_parent_value}
+    q = deque([root_nid])
+    visited = {root_nid}
+    while q:
+        u = q.popleft()
+        for v in adj[u]:
+            if v not in visited:
+                new_parent[v] = u
+                visited.add(v)
+                q.append(v)
+    df = df.copy()
+    df['parent'] = df['id'].apply(lambda nid: new_parent[int(nid)])
+    return df
+
+
 # ---------- One-shot cleaner ----------
 
 def clean_swc_tree(
@@ -399,6 +432,7 @@ def clean_swc_tree(
     max_depth: int | None = None,
     eps_scale: float = 0.1,
     keep_attrs: bool = True,
+    root_mode: str = "parent",
 ) -> pd.DataFrame:
     """
     Full pipeline for one SWC file.
@@ -418,6 +452,10 @@ def clean_swc_tree(
         its children were already pruned and it won't be split.
       - Final collapse ensures synthetic node insertion does not leave residual internal degree-2 chains.
     """
+    # (0) re-root if needed
+    if root_mode == "index":
+        df = _reroot_df_at_node(df, root_nid=1, root_parent_value=root_parent_value)
+
     # (1) initial tree
     tree_initial = SWCTree(df, root_parent_value=root_parent_value)
 
@@ -468,6 +506,9 @@ def main():
     ap.add_argument("--drop-attrs", action="store_true", help="Drop original type/radius (write type=3, radius=1.0)")
     ap.add_argument("--eps-scale", type=float, default=0.1, help="Offset scale for deg=4 split (fraction of local child distances)")
     ap.add_argument("--recursive", action="store_true", help="Recurse into subfolders for .swc files")
+    ap.add_argument("--root-mode", choices=["parent", "index"], default="parent",
+                    help="'parent': root=node with parent<=root_parent_value (default). "
+                         "'index': root=node with id=1 (soma convention).")
     args = ap.parse_args()
 
     in_dir = args.input_dir
@@ -502,10 +543,10 @@ def main():
                 keep_parent_value=args.root_parent,
                 max_depth=args.max_depth,
                 eps_scale=args.eps_scale,
-                keep_attrs=(not args.drop_attrs)
+                keep_attrs=(not args.drop_attrs),
+                root_mode=args.root_mode,
             )
             write_swc(df_clean, dst, root_parent_value=args.root_parent)
-            log(f"[OK] {src} -> {dst}  (nodes: {len(df)} -> {len(df_clean)})")
         except Exception as e:
             log(f"[FAIL] {src}: {e}")
 

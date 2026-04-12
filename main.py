@@ -168,6 +168,7 @@ def get_expansion_items(cfg: DictConfig, train_graphs, diffusion=None):
             red_threshold=cfg.reduction.red_threshold,
             expansion_loss_weight=expansion_loss_weight,
             use_size_ratio=use_size_ratio,
+            max_tree_size=getattr(cfg.method, "max_tree_size", 500),
         )
     elif method_name == "expansion":
         method = gg.method.Expansion_OneShot(
