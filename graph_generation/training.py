@@ -351,17 +351,36 @@ class Trainer:
         # Log results (test_results empty if metrics disabled & no improvements tracked)
         self.log({"validation": val_results, "test": test_results})
 
+        # Strip Figure objects from results before pickling: PNGs are already
+        # saved to eval_plots/ and their paths are stored in *_path keys. Keeping
+        # live Figure objects in the pickle payload bloats artifacts and is
+        # fragile across matplotlib versions.
+        def _strip_figures(results_dict):
+            for sub in results_dict.values():
+                if isinstance(sub, dict):
+                    sub.pop("examples", None)
+                    sub.pop("examples_compare", None)
+
         # Dump results (persist even if metrics disabled to keep artifacts of generated graphs/plots)
         if self.cfg.training.save_checkpoint:
             val_dir = self.output_dir / "validation"
             val_dir.mkdir(exist_ok=True)
+            _strip_figures(val_results)
             with open(val_dir / f"step_{self.step}.pkl", "wb") as f:
                 pickle.dump(val_results, f)
             if test_results:
                 test_dir = self.output_dir / "test"
                 test_dir.mkdir(exist_ok=True)
+                _strip_figures(test_results)
                 with open(test_dir / f"step_{self.step}.pkl", "wb") as f:
                     pickle.dump(test_results, f)
+
+        # Release matplotlib figure buffers. Figures created via plt.subplots()
+        # are registered in matplotlib._pylab_helpers.Gcf and are NOT freed by
+        # Python GC when their references drop — they must be closed explicitly.
+        # Without this, canvas buffers accumulate ~10-20 MB per validation and
+        # cause a linear RSS leak over long runs.
+        plt.close('all')
 
     @th.no_grad()
     def evaluate(self, eval_graphs: list[nx.Graph], beta):
