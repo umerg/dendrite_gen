@@ -7,3 +7,4 @@ use_geo_lr_mask: True
 use_radial_distance: False
 deterministic_expansion: True
 use_size_ratio: False
+max_tree_size: 300

@@ -1,0 +1,4 @@
+name: neurons_dataset
+data_dir: /scratch/guptau/neurons_final
+load: True
+pos_scale_factor: 45.1
