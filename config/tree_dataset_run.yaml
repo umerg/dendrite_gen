@@ -4,6 +4,9 @@ defaults:
   - diffusion: basic # basic.yaml
   - method: expansion # expansion.yaml
 
+method:
+  expansion_loss_weight: 0.5
+
 reduction:
   type: "depth"
   mode: "stochastic"
@@ -17,7 +20,7 @@ reduction:
   red_threshold: 0
 
 training:
-  batch_size: 256 # can adjust based on GPU memory, but does make steps slower on increasing and hence there is a tradoff on updates per unit time
+  batch_size: 512 # can adjust based on GPU memory
   lr: 5e-4
   num_steps: 300000 
   max_num_workers: 0
@@ -29,8 +32,8 @@ training:
   scheduler_eta_min: 1e-5          
 
 validation:
-  batch_size: # adjust according train/val split - currently only 50 samples in val set
-  interval: 1000 # can make 5k
+  batch_size: 512 # adjust according train/val split - currently only 50 samples in val set
+  interval: 5000 # can make 5k
   first_step: 0
   per_graph_size: False
   enable_metrics: False
@@ -40,17 +43,17 @@ testing: False # if True, only evaluate on test set
 
 model:
   name: egnn
-  num_layers: 6
-  feats_dim: 64
-  m_dim: 64
+  num_layers: 10
+  feats_dim: 128
+  m_dim: 128
   tmd_in_dim: 768
-  tmd_hidden_dim: 32
+  tmd_hidden_dim: 64
   dropout: 0.1
   norm_feats: True
   global_linear_attn_every: 2
-  global_linear_attn_heads: 4
-  global_linear_attn_dim_head: 16
-  num_global_tokens: 4
+  global_linear_attn_heads: 8
+  global_linear_attn_dim_head: 32
+  num_global_tokens: 8
   offset_head_hidden: 128
   use_global_fallback_frames: False
   so2_axis: [0., 0., 1.] # z-axis for trees, y-axis for neurons
@@ -66,4 +69,4 @@ debugging_max_batches: 50
 debugging_dir: "small_trees_debug"
 
 wandb: # also working, can log in and use
-  logging: False
+  logging: True
