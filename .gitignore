@@ -157,3 +157,7 @@ wandb/
 # artifacts
 
 sampling_experiments/artifacts/
+
+
+.vscode
+outputs
