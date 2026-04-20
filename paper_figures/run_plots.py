@@ -1,4 +1,23 @@
-"""Entry point for generating paper figures.
+"""
+
+
+
+
+
+
+************************************************
+************************************************
+DEPRECIATED
+************************************************
+************************************************
+
+
+
+
+
+
+
+Entry point for generating paper figures.
 
 The intent is to keep this script data-source driven so figures can be
 regenerated when new SWC examples or evaluation outputs become available.

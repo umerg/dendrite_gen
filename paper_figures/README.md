@@ -8,8 +8,16 @@ figures and supporting tables.
 
 ## Current Structure
 
-- `run_plots.py`
-  - top-level plotting entrypoint
+- `common.py`
+  - shared GT/pred loading, pairing, selection, and output-root helpers
+- `run_all_plots.py`
+  - simple orchestrator for the current paper plot set
+- `run_qualitative.py`
+  - qualitative 2D figure runner
+- `run_tree_stats.py`
+  - tree-level statistics runner
+- `run_distribution_stats.py`
+  - within-tree distribution runner
 - `qualitative/`
   - currently contains 2D qualitative plots
 - `stats/`
@@ -21,22 +29,18 @@ figures and supporting tables.
 
 ## Currently Implemented
 
-### Plots
+### Runners
 
-`run_plots.py` currently supports:
+- `run_qualitative.py`
+  - `simple2d`, `overlay2d`, `gallery2d`
+- `run_tree_stats.py`
+  - tree-level histogram grid
+- `run_distribution_stats.py`
+  - pooled, tree-averaged, or single-tree distribution histograms
+- `run_all_plots.py`
+  - calls the current family runners with simple defaults
 
-- `simple2d`
-  - side-by-side GT / predicted 2D plot
-- `overlay2d`
-  - single-axis GT / predicted 2D overlay
-- `gallery2d`
-  - small qualitative gallery of 2D overlays
-- `treelevel_hist`
-  - grid of overlaid GT / predicted histograms for tree-level scalar metrics
-- `distribution_hist`
-  - grid of GT / predicted histograms for within-tree distribution metrics
-- `--all`
-  - runs all currently implemented plot targets
+All runners write into the same output root, with one subfolder per runner.
 
 ### Inputs
 
@@ -58,86 +62,70 @@ The current stats layer is graph-based:
 
 ## Example Commands
 
-Generate all currently implemented plots:
+Generate the current full paper plot set:
 
 ```bash
-python -m dendrite_gen.paper_figures.run_plots \
+python -m dendrite_gen.paper_figures.run_all_plots \
+  --gt-dir /path/to/gt_swc \
+  --pred-pkl /path/to/validation/step_30000.pkl \
+  --ema-key ema_1 \
+  --projection xy \
+  --max-pairs 6 \
+  --out-dir dendrite_gen/outputs/paper_figures
+```
+
+Generate one side-by-side 2D plot:
+
+```bash
+python -m dendrite_gen.paper_figures.run_qualitative \
+  --gt-dir /path/to/gt_swc \
+  --pred-pkl /path/to/validation/step_30000.pkl \
+  --figure simple2d \
+  --projection xy \
+  --max-pairs 1 \
+  --out-dir dendrite_gen/outputs/paper_figures
+```
+
+Generate all qualitative plots:
+
+```bash
+python -m dendrite_gen.paper_figures.run_qualitative \
   --gt-dir /path/to/gt_swc \
   --pred-pkl /path/to/validation/step_30000.pkl \
   --ema-key ema_1 \
   --all \
   --projection xy \
   --max-pairs 6 \
-  --out-dir dendrite_gen/outputs/paper_figures/all_xy
-```
-
-Generate one side-by-side 2D plot:
-
-```bash
-python -m dendrite_gen.paper_figures.run_plots \
-  --gt-dir /path/to/gt_swc \
-  --pred-pkl /path/to/validation/step_30000.pkl \
-  --figure simple2d \
-  --projection xy \
-  --max-pairs 1 \
-  --out-dir dendrite_gen/outputs/paper_figures/debug
-```
-
-Generate one 2D overlay:
-
-```bash
-python -m dendrite_gen.paper_figures.run_plots \
-  --gt-dir /path/to/gt_swc \
-  --pred-pkl /path/to/validation/step_30000.pkl \
-  --ema-key ema_1 \
-  --figure overlay2d \
-  --projection xy \
-  --max-pairs 1 \
-  --out-dir dendrite_gen/outputs/paper_figures/overlay2d_xy
-```
-
-Generate a small 2D gallery:
-
-```bash
-python -m dendrite_gen.paper_figures.run_plots \
-  --gt-dir /path/to/gt_swc \
-  --pred-pkl /path/to/validation/step_30000.pkl \
-  --ema-key ema_1 \
-  --figure gallery2d \
-  --projection xy \
-  --max-pairs 6 \
-  --out-dir dendrite_gen/outputs/paper_figures/gallery2d_xy
+  --out-dir dendrite_gen/outputs/paper_figures
 ```
 
 Generate a tree-level histogram grid:
 
 ```bash
-python -m dendrite_gen.paper_figures.run_plots \
+python -m dendrite_gen.paper_figures.run_tree_stats \
   --gt-dir /path/to/gt_swc \
   --pred-pkl /path/to/validation/step_30000.pkl \
   --ema-key ema_1 \
-  --figure treelevel_hist \
   --max-pairs 64 \
   --ncols 3 \
-  --out-dir dendrite_gen/outputs/paper_figures/treelevel_hist
+  --out-dir dendrite_gen/outputs/paper_figures
 ```
 
 Generate pooled within-tree distribution histograms:
 
 ```bash
-python -m dendrite_gen.paper_figures.run_plots \
+python -m dendrite_gen.paper_figures.run_distribution_stats \
   --gt-dir /path/to/gt_swc \
   --pred-pkl /path/to/validation/step_30000.pkl \
   --ema-key ema_1 \
-  --figure distribution_hist \
   --distribution-mode pooled \
   --max-pairs 64 \
   --ncols 3 \
-  --out-dir dendrite_gen/outputs/paper_figures/distribution_hist
+  --out-dir dendrite_gen/outputs/paper_figures
 ```
 
 Show the CLI:
 
 ```bash
-python -m dendrite_gen.paper_figures.run_plots --help
+python -m dendrite_gen.paper_figures.run_all_plots --help
 ```
