@@ -34,7 +34,11 @@ validation:
   first_step: 0
   per_graph_size: False
   enable_metrics: False
-  enable_plots: True
+  enable_plots: True            # 3D multi-azimuth views (orbiting uhat) of gen + GT
+  enable_dist_metrics: True     # Wasserstein-1 of gen-vs-GT stat distributions
+  ged_enabled: True             # avg tree-edit distance (capped by node/pair count)
+  ged_timeout: 5.0
+  plot_angles: [[20, 30], [20, 120], [20, 210]]   # (elev, azim) around uhat
 
 testing: False # if True, only evaluate on test set
 
