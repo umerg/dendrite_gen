@@ -512,6 +512,14 @@ class Trainer:
             if "root" not in G.graph or G.graph.get("root") not in G.nodes:
                 G.graph["root"] = 0 if G.number_of_nodes() > 0 else None
 
+        # Model SO(2) symmetry axis: extents/plots are measured relative to it
+        # (never hardcoded z). Shared by the dist metrics and the 3D plots below.
+        uhat_np = (
+            model.uhat.detach().cpu().numpy().reshape(-1)
+            if getattr(model, "uhat", None) is not None
+            else np.array([0.0, 0.0, 1.0])
+        )
+
         # Distribution-level comparison of generated vs GT statistics (Wasserstein-1
         # per stat + avg tree-edit distance). Logged as floats -> wandb scalars.
         if getattr(self.cfg.validation, "enable_dist_metrics", True):
@@ -519,6 +527,7 @@ class Trainer:
             results["dist"] = compute_distribution_metrics(
                 results["pred_graphs"],
                 eval_graphs,
+                uhat=uhat_np,
                 ged_enabled=getattr(self.cfg.validation, "ged_enabled", True),
                 ged_timeout=getattr(self.cfg.validation, "ged_timeout", 5.0),
             )
@@ -564,11 +573,8 @@ class Trainer:
         enable_plots = getattr(self.cfg.validation, 'enable_plots', True)
 
         if enable_plots and len(results["pred_graphs"]) > 0:
-            # Read uhat from the model so azimuths orbit the *true* symmetry axis
-            # for any so2_axis (never hardcode z).
-            uhat = None
-            if getattr(model, "uhat", None) is not None:
-                uhat = model.uhat.detach().cpu().numpy().reshape(-1)
+            # Azimuths orbit the *true* symmetry axis (shared uhat_np computed above).
+            uhat = uhat_np
             angles = getattr(self.cfg.validation, "plot_angles", None) or DEFAULT_ANGLES
             angles = [tuple(a) for a in angles]
             max_examples = min(8, len(results["pred_graphs"]))

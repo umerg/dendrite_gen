@@ -22,6 +22,7 @@ from typing import Iterable
 import numpy as np
 import networkx as nx
 from scipy.stats import wasserstein_distance
+from scipy.spatial.distance import pdist
 
 from validation.structural_metrics import (
     branch_length_values,
@@ -93,27 +94,47 @@ def _tmd_bar_lengths(G: nx.Graph) -> np.ndarray:
     return np.abs(pairs[:, 1] - pairs[:, 0])
 
 
-def _size_extent(G: nx.Graph) -> dict[str, float]:
-    """Per-tree scalar size/extent stats. Returns nan-filled dict on degenerate trees."""
+def _size_extent(G: nx.Graph, uhat) -> dict[str, float]:
+    """
+    Per-tree size/extent stats decomposed in the model's SO(2) symmetry frame.
+
+    The generator is equivariant to rotation about ``uhat``, so extents are measured
+    relative to that axis (not world x/y/z) to be both semantically correct and
+    invariant to azimuthal rotation about uhat:
+      - axial_extent : extent along uhat (max - min of pos . uhat) -- the "height"
+      - radial_span  : planar diameter perpendicular to uhat (max pairwise distance
+                       of nodes projected onto the plane orthogonal to uhat)
+      - total_extent : 3D diameter (max pairwise distance) -- overall reach
+
+    Returns a nan-filled dict on degenerate (empty/unrooted) trees.
+    """
     out = {
         "node_count": float(G.number_of_nodes()),
         "leaf_count": float("nan"),
         "bifurcation_count": float("nan"),
-        "height": float("nan"),
-        "span_xy": float("nan"),
-        "bbox_diag": float("nan"),
+        "axial_extent": float("nan"),
+        "radial_span": float("nan"),
+        "total_extent": float("nan"),
     }
     root = _root_of(G)
     if root is not None:
         _parent, children = _root_tree(G, root)
         out["leaf_count"] = float(sum(1 for ch in children.values() if len(ch) == 0))
         out["bifurcation_count"] = float(sum(1 for ch in children.values() if len(ch) >= 2))
-    if G.number_of_nodes() > 0:
-        pts = np.stack([_pos_to_xyz(G.nodes[n].get("pos", np.zeros(3))) for n in G.nodes()], axis=0)
-        ranges = pts.max(axis=0) - pts.min(axis=0)
-        out["height"] = float(ranges[2])
-        out["span_xy"] = float(max(ranges[0], ranges[1]))
-        out["bbox_diag"] = float(np.linalg.norm(ranges))
+    n = G.number_of_nodes()
+    if n > 0:
+        u = np.asarray(uhat, dtype=np.float64).reshape(3)
+        u = u / (np.linalg.norm(u) + 1e-12)
+        pts = np.stack([_pos_to_xyz(G.nodes[k].get("pos", np.zeros(3))) for k in G.nodes()], axis=0)
+        s = pts @ u  # axial coordinate along uhat
+        out["axial_extent"] = float(s.max() - s.min())
+        if n >= 2:
+            pts_perp = pts - np.outer(s, u)  # components in the plane orthogonal to uhat
+            out["radial_span"] = float(pdist(pts_perp).max())  # planar diameter
+            out["total_extent"] = float(pdist(pts).max())      # 3D diameter
+        else:
+            out["radial_span"] = 0.0
+            out["total_extent"] = 0.0
     return out
 
 
@@ -124,6 +145,7 @@ def compute_distribution_metrics(
     gen_graphs: list[nx.Graph],
     gt_graphs: list[nx.Graph],
     *,
+    uhat=(0.0, 0.0, 1.0),  # SO(2) symmetry axis; pass model.uhat at the call site
     ged_enabled: bool = True,
     ged_timeout: float | None = 5.0,  # kept for config compatibility; zss has no real timeout
 ) -> dict[str, float]:
@@ -150,10 +172,11 @@ def compute_distribution_metrics(
         _pool(gen_graphs, _tmd_bar_lengths), _pool(gt_graphs, _tmd_bar_lengths)
     )
 
-    # Per-tree size/extent statistics (one value per tree -> distribution over trees).
-    gen_ext = [_size_extent(G) for G in gen_graphs]
-    gt_ext = [_size_extent(G) for G in gt_graphs]
-    for key in ("node_count", "leaf_count", "bifurcation_count", "height", "span_xy", "bbox_diag"):
+    # Per-tree size/extent statistics (one value per tree -> distribution over trees),
+    # decomposed in the uhat frame.
+    gen_ext = [_size_extent(G, uhat) for G in gen_graphs]
+    gt_ext = [_size_extent(G, uhat) for G in gt_graphs]
+    for key in ("node_count", "leaf_count", "bifurcation_count", "axial_extent", "radial_span", "total_extent"):
         gen_vals = np.array([d[key] for d in gen_ext], dtype=np.float64)
         gt_vals = np.array([d[key] for d in gt_ext], dtype=np.float64)
         metrics[f"{key}_w1"] = _w1(gen_vals, gt_vals)
