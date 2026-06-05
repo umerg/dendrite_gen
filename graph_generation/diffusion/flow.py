@@ -39,6 +39,7 @@ class FlowMatchingModel(Module):
         beta_a: float = 2.0,
         beta_b: float = 1.0,
         sigma_min: float = 0.0,
+        prior_std_pos: list | tuple | None = None,
     ):
         super().__init__()
         self.num_steps = num_steps
@@ -49,6 +50,20 @@ class FlowMatchingModel(Module):
         self.beta_a = float(beta_a)
         self.beta_b = float(beta_b)
         self.sigma_min = float(sigma_min)
+        # Optional anisotropic (per-axis) prior std for the local-frame position offset
+        # C = (forward, sideways, axial). None -> isotropic scalar prior_std (unchanged
+        # behavior). When set, this normalizes the prior to the data's per-axis C_0 scale.
+        if prior_std_pos is not None:
+            prior_std_pos = tuple(float(s) for s in prior_std_pos)
+            if len(prior_std_pos) != 3:
+                raise ValueError(f"prior_std_pos must have length 3, got {len(prior_std_pos)}.")
+        self.prior_std_pos = prior_std_pos
+
+    def _pos_scale(self, device: th.device, dtype: th.dtype):
+        """Per-axis prior std for the position offset C [.,3]; scalar if isotropic."""
+        if self.prior_std_pos is None:
+            return self.prior_std
+        return th.tensor(self.prior_std_pos, device=device, dtype=dtype).view(1, 3)
 
     def _sample_time(self, num_graphs: int, device: th.device) -> th.Tensor:
         """Sample one flow time t in [0, 1] per graph, shape [num_graphs]."""
@@ -100,7 +115,7 @@ class FlowMatchingModel(Module):
         t_leaf = t_graph[leaf_batch].view(-1, 1)
 
         # Linear / OT path: noise at t=0, data at t=1.
-        C_noise = th.randn_like(C_0) * self.prior_std
+        C_noise = th.randn_like(C_0) * self._pos_scale(C_0.device, C_0.dtype)
         e_noise = th.randn_like(e_0) * self.prior_std
         C_t = (1.0 - t_leaf) * C_noise + t_leaf * C_0
         e_t = (1.0 - t_leaf) * e_noise + t_leaf * e_0
@@ -208,7 +223,7 @@ class FlowMatchingModel(Module):
         grid = th.linspace(0.0, 1.0, steps=steps + 1, device=device)
 
         # Initialise from the Gaussian prior at t=0.
-        C = th.randn((L, 3), device=device) * self.prior_std
+        C = th.randn((L, 3), device=device) * self._pos_scale(device, P_0.dtype)
         e = th.randn((L, 1), device=device) * self.prior_std
 
         C1_pred = th.zeros_like(C)

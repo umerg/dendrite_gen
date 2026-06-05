@@ -1,6 +1,10 @@
 name: "flow"
 num_steps: 50        # straight paths need fewer steps than diffusion's 64
 prior_std: 1.0       # Gaussian prior scale; tune to local-frame C_0 magnitude
+prior_std_pos: null  # per-axis prior std [forward, sideways, axial] of C_0 in scaled space;
+                     # null -> isotropic prior_std. Dataset-specific (do NOT hardcode here).
+                     # Neuron values (÷45.1, ~800 graphs): [0.74, 0.61, 0.83] -- set via CLI
+                     # override 'diffusion.prior_std_pos=[0.74,0.61,0.83]' for neuron runs.
 time_dist: "uniform" # "uniform" | "beta"
 beta_a: 2.0
 beta_b: 1.0
