@@ -62,6 +62,30 @@ def _w1(gen_vals: np.ndarray, gt_vals: np.ndarray) -> float:
     return float(wasserstein_distance(gen_vals, gt_vals))
 
 
+def _iqr(vals: np.ndarray) -> float:
+    """Interquartile range (Q75 - Q25) over finite values; nan if < 2 finite values."""
+    vals = np.asarray(vals, dtype=np.float64)
+    vals = vals[np.isfinite(vals)]
+    if vals.size < 2:
+        return float("nan")
+    q75, q25 = np.percentile(vals, [75.0, 25.0])
+    return float(q75 - q25)
+
+
+def _iqr_ratio(gen_vals: np.ndarray, gt_vals: np.ndarray) -> float:
+    """
+    Dispersion ratio IQR(gen) / IQR(gt) -- a robust spread/diversity diagnostic.
+
+    W1 conflates location and spread; this isolates spread. ~1 means the generated set's
+    spread matches GT; <1 flags under-dispersion (mode collapse toward a stereotyped tree);
+    >1 flags over-dispersion. nan if GT IQR is ~0 or either side has < 2 finite values.
+    """
+    gi, ti = _iqr(gen_vals), _iqr(gt_vals)
+    if not np.isfinite(gi) or not np.isfinite(ti) or ti <= 1e-12:
+        return float("nan")
+    return float(gi / ti)
+
+
 # --- per-graph statistic extractors --------------------------------------------------
 
 
@@ -161,25 +185,27 @@ def compute_distribution_metrics(
         arrs = [a for a in arrs if a.size > 0]
         return np.concatenate(arrs) if arrs else np.zeros((0,), dtype=np.float64)
 
-    # Pooled-distribution statistics (every value across every tree contributes).
-    metrics["branch_length_w1"] = _w1(
-        _pool(gen_graphs, _branch_lengths), _pool(gt_graphs, _branch_lengths)
-    )
-    metrics["bifurcation_angle_w1"] = _w1(
-        _pool(gen_graphs, _bifurcation_angles), _pool(gt_graphs, _bifurcation_angles)
-    )
-    metrics["tmd_barlen_w1"] = _w1(
-        _pool(gen_graphs, _tmd_bar_lengths), _pool(gt_graphs, _tmd_bar_lengths)
-    )
+    # Pooled-distribution statistics (every value across every tree contributes). Each is
+    # pooled once, then reduced to both a W1 (location/shape) and an IQR ratio (spread).
+    for name, fn in (
+        ("branch_length", _branch_lengths),
+        ("bifurcation_angle", _bifurcation_angles),
+        ("tmd_barlen", _tmd_bar_lengths),
+    ):
+        gen_pool = _pool(gen_graphs, fn)
+        gt_pool = _pool(gt_graphs, fn)
+        metrics[f"{name}_w1"] = _w1(gen_pool, gt_pool)
+        metrics[f"{name}_iqr_ratio"] = _iqr_ratio(gen_pool, gt_pool)
 
     # Per-tree size/extent statistics (one value per tree -> distribution over trees),
-    # decomposed in the uhat frame.
+    # decomposed in the uhat frame. Same pair of reductions per statistic.
     gen_ext = [_size_extent(G, uhat) for G in gen_graphs]
     gt_ext = [_size_extent(G, uhat) for G in gt_graphs]
     for key in ("node_count", "leaf_count", "bifurcation_count", "axial_extent", "radial_span", "total_extent"):
         gen_vals = np.array([d[key] for d in gen_ext], dtype=np.float64)
         gt_vals = np.array([d[key] for d in gt_ext], dtype=np.float64)
         metrics[f"{key}_w1"] = _w1(gen_vals, gt_vals)
+        metrics[f"{key}_iqr_ratio"] = _iqr_ratio(gen_vals, gt_vals)
 
     # Average tree-edit distance over index-paired trees (both target the same node
     # count, so pairing by index is valid). Capped by node count and pair count.
