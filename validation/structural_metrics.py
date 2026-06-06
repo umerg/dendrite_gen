@@ -12,10 +12,13 @@ from typing import Dict, Iterable, List, Tuple
 import math
 import networkx as nx
 import numpy as np
-from persim import bottleneck as _bottleneck
+try:
+    from persim import bottleneck as _bottleneck
+except ImportError:  # optional dependency (only needed for bottleneck_distance)
+    _bottleneck = None
 try:
     from zss import distance as _zss_distance
-except ModuleNotFoundError:  # optional dependency
+except ImportError:  # optional dependency (only needed for graph_edit_distance_topology)
     _zss_distance = None
 
 
@@ -219,6 +222,10 @@ def bottleneck_distance(
     Accepts PersistenceDiagram-like objects (with .as_pairs) or array-like (M,2).
     If canonicalize=True, pairs are converted to (min, max).
     """
+    if _bottleneck is None:
+        raise ModuleNotFoundError(
+            "persim is required for bottleneck_distance. Install with: pip install persim"
+        )
     dgm1 = _diagram_pairs(diagram_a)
     dgm2 = _diagram_pairs(diagram_b)
     if canonicalize:
