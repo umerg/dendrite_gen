@@ -1,7 +1,7 @@
 defaults:
   - _self_
   - dataset: neurons # neurons.yaml
-  - diffusion: basic # basic.yaml
+  - diffusion: flow # basic.yaml
   - method: expansion # expansion.yaml
 
 reduction:
@@ -19,11 +19,11 @@ reduction:
 training:
   batch_size: 512 # can adjust based on GPU memory, but does make steps slower on increasing and hence there is a tradoff on updates per unit time
   lr: 5e-4
-  num_steps: 500000 
+  num_steps: 300000 
   max_num_workers: 0
   log_interval: 1000 # can make 5K as well
   save_checkpoint: True
-  resume: "/itet-stor/guptau/net_scratch/dendrite_gen/outputs/2026-04-12/20-21-33/checkpoints/step_150000.pt" # False, True (latest checkpoint), step number, or path to .pt file
+  resume: False # False, True (latest checkpoint), step number, or path to .pt file
   lr_scheduler: "cosine_annealing"              
   scheduler_T_max: ${training.num_steps}  
   scheduler_eta_min: 1e-5          
@@ -64,7 +64,7 @@ ema: # can adjust for more stable training, but I haven't had the chance to expe
   gamma: 1.0
   power: 1.0
 
-name: neuron_dataset_experiment_final_continued
+name: flow_neuron_1
 debugging: False
 debugging_max_batches: 50
 debugging_dir: "neurons_debug"
