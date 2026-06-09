@@ -23,7 +23,7 @@ training:
   max_num_workers: 0
   log_interval: 1000 # can make 5K as well
   save_checkpoint: True
-  resume: False # False, True (latest checkpoint), step number, or path to .pt file
+  resume: "/itet-stor/guptau/net_scratch/dendrite_gen/outputs/2026-06-06/20-32-36/checkpoints/step_175000.pt" # False, True (latest checkpoint), step number, or path to .pt file
   lr_scheduler: "cosine_annealing"              
   scheduler_T_max: ${training.num_steps}  
   scheduler_eta_min: 1e-5          
@@ -36,7 +36,7 @@ validation:
   enable_metrics: False
   enable_plots: True            # 3D multi-azimuth views (orbiting uhat) of gen + GT
   enable_dist_metrics: True     # Wasserstein-1 of gen-vs-GT stat distributions
-  ged_enabled: True             # avg tree-edit distance (capped by node/pair count)
+  ged_enabled: False             # avg tree-edit distance (capped by node/pair count)
   ged_timeout: 5.0
   plot_angles: [[20, 30], [20, 120], [20, 210]]   # (elev, azim) around uhat
 
@@ -44,11 +44,11 @@ testing: False # if True, only evaluate on test set
 
 model:
   name: egnn
-  num_layers: 6
+  num_layers: 8
   feats_dim: 64
   m_dim: 64
-  tmd_in_dim: 768
-  tmd_hidden_dim: 32
+  tmd_in_dim: 0
+  tmd_hidden_dim: 0
   dropout: 0.1
   norm_feats: True
   global_linear_attn_every: 2
@@ -64,7 +64,7 @@ ema: # can adjust for more stable training, but I haven't had the chance to expe
   gamma: 1.0
   power: 1.0
 
-name: flow_neuron_1
+name: flow_neuron_unconditional
 debugging: False
 debugging_max_batches: 50
 debugging_dir: "neurons_debug"

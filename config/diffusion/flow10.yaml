@@ -1,5 +1,5 @@
 name: "flow"
-num_steps: 50        # straight paths need fewer steps than diffusion's 64
+num_steps: 10        # straight paths need fewer steps than diffusion's 64
 prior_std: 1.0       # Gaussian prior scale; tune to local-frame C_0 magnitude
 prior_std_pos: [0.74, 0.61, 0.83]  # per-axis prior std [forward, sideways, axial] of C_0 in scaled space;
                      # null -> isotropic prior_std. Dataset-specific (do NOT hardcode here).
