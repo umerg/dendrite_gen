@@ -50,6 +50,53 @@ def test_returns_expected_keys_and_finite():
         assert np.isfinite(m[k]), f"{k} should be finite, got {m[k]}"
 
 
+def test_iqr_ratio_keys_present():
+    gen = [_toy_tree(1.0, i) for i in range(4)]
+    gt = [_toy_tree(1.1, i + 100) for i in range(5)]
+    m = compute_distribution_metrics(gen, gt, ged_enabled=False)
+    expected = {
+        "branch_length_iqr_ratio",
+        "bifurcation_angle_iqr_ratio",
+        "tmd_barlen_iqr_ratio",
+        "node_count_iqr_ratio",
+        "leaf_count_iqr_ratio",
+        "bifurcation_count_iqr_ratio",
+        "axial_extent_iqr_ratio",
+        "radial_span_iqr_ratio",
+        "total_extent_iqr_ratio",
+    }
+    assert expected.issubset(set(m.keys()))
+
+
+def test_iqr_ratio_flags_under_dispersion():
+    # GT spans a wide range of sizes; generated set is collapsed to ~one size.
+    scales = np.linspace(0.5, 3.0, 8)
+    gt = [_toy_tree(float(s), i + 200) for i, s in enumerate(scales)]
+    gen = [_toy_tree(1.0, i + 300) for i in range(8)]  # near-identical sizes
+    m = compute_distribution_metrics(gen, gt, ged_enabled=False)
+    assert m["total_extent_iqr_ratio"] < 0.5, m["total_extent_iqr_ratio"]
+    assert m["radial_span_iqr_ratio"] < 0.5, m["radial_span_iqr_ratio"]
+
+
+def test_iqr_ratio_matched_spread_near_one():
+    # Same spread of sizes on both sides (only jitter seeds differ) -> ratio ~ 1.
+    scales = np.linspace(0.5, 3.0, 8)
+    gt = [_toy_tree(float(s), i) for i, s in enumerate(scales)]
+    gen = [_toy_tree(float(s), i + 1000) for i, s in enumerate(scales)]
+    m = compute_distribution_metrics(gen, gt, ged_enabled=False)
+    for k in ("total_extent_iqr_ratio", "radial_span_iqr_ratio", "axial_extent_iqr_ratio"):
+        assert 0.5 <= m[k] <= 2.0, f"{k}={m[k]}"
+
+
+def test_iqr_ratio_divide_by_zero_is_nan():
+    # node/leaf/bifurcation counts are constant across toy trees -> GT IQR is 0 ->
+    # ratio must be nan (not inf).
+    gen = [_toy_tree(1.0, i) for i in range(4)]
+    gt = [_toy_tree(1.1, i + 100) for i in range(5)]
+    m = compute_distribution_metrics(gen, gt, ged_enabled=False)
+    assert np.isnan(m["node_count_iqr_ratio"])
+
+
 def test_identical_sets_give_zero_w1():
     gt = [_toy_tree(1.0, i) for i in range(5)]
     m = compute_distribution_metrics(gt, gt)
