@@ -170,7 +170,8 @@ class Trainer:
                     project="tree_gen",
                     config=build_wandb_config(cfg),
                     name=cfg.name,
-                    resume=self.run_id,
+                    id=self.run_id,
+                    resume="allow" if self.run_id else None,
                 )
                 self.run_id = self.wandb_run.id
             except Exception as e:  # pragma: no cover
