@@ -24,9 +24,10 @@ training:
   log_interval: 1000 # can make 5K as well
   save_checkpoint: True
   resume: False # False, True (latest checkpoint), step number, or path to .pt file
-  lr_scheduler: "cosine_annealing"              
-  scheduler_T_max: ${training.num_steps}  
-  scheduler_eta_min: 1e-5          
+  lr_scheduler: "cosine_annealing"
+  scheduler_T_max: ${training.num_steps}
+  scheduler_eta_min: 1e-5
+  grad_clip_norm: 1.0   # max global grad-norm; null disables clipping. Pre-clip norm is always logged as training/grad_norm
 
 validation:
   batch_size: 64 # adjust according train/val split - currently only 50 samples in val set
@@ -71,3 +72,4 @@ debugging_dir: "neurons_debug"
 
 wandb: # also working, can log in and use
   logging: True
+  new_run: False  # when resuming, set True to fork a NEW wandb experiment instead of rejoining the checkpoint's run

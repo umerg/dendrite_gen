@@ -158,6 +158,14 @@ class Trainer:
         if cfg.training.resume:
             self.resume_from_checkpoint(cfg.training.resume)
             print(f"Resumed from step {self.step}, LR={self.optimizer.param_groups[0]['lr']}")
+            # Fork into a FRESH wandb run instead of rejoining the checkpoint's
+            # original run. Keeps the loaded model/optimizer/scheduler/step but
+            # drops the stored run_id so wandb.init() starts a new experiment —
+            # prevents a resumed run (e.g. branching off step 75k to test a config
+            # change) from overwriting the source run's logged history.
+            if getattr(cfg.wandb, "new_run", False):
+                print(f"[wandb] new_run=True -> forking a fresh wandb run (dropping run_id={self.run_id})")
+                self.run_id = None
         else:
             self.step = 0
             self.best_validation_scores = {beta: -1 for beta in cfg.ema.betas} # what are EMA betas? TODO
@@ -174,6 +182,14 @@ class Trainer:
                     resume="allow" if self.run_id else None,
                 )
                 self.run_id = self.wandb_run.id
+                # Plot everything against our own training step instead of
+                # wandb's internal global step. On resume, wandb restores its
+                # internal step to the previous run's MAX logged step and
+                # silently drops any log() at an earlier/equal step ("ignoring
+                # partial history record"). Using a custom step metric makes
+                # records land immediately regardless of the resumed step.
+                self.wandb_run.define_metric("train_step")
+                self.wandb_run.define_metric("*", step_metric="train_step")
             except Exception as e:  # pragma: no cover
                 print(f"[wandb disabled] {e}")
                 self.wandb_run = None
@@ -333,6 +349,17 @@ class Trainer:
         _t0 = time()
         loss.backward()
         loss_terms["t_backward"] = time() - _t0
+
+        # Gradient-norm logging (always on) + optional clipping. clip_grad_norm_
+        # returns the PRE-clip total norm: with max_norm=inf it computes the norm
+        # without clipping (behavior unchanged when grad_clip_norm is null), and
+        # with a finite value it clips and still returns the pre-clip norm — so a
+        # single run both surfaces gradient spikes (training/grad_norm) and tames
+        # them. No AMP/GradScaler is in use, so no unscale_ is needed.
+        grad_clip = getattr(self.cfg.training, "grad_clip_norm", None)
+        max_norm = float(grad_clip) if grad_clip is not None else float("inf")
+        total_norm = th.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm)
+        loss_terms["grad_norm"] = float(total_norm)
 
         _t0 = time()
         self.optimizer.step()
@@ -631,12 +658,12 @@ class Trainer:
                 if hasattr(self, 'logger'):
                     self.logger.info(f"{prefix}{key}: {value}")
                 if self.cfg.wandb.logging and self.wandb_run is not None:
-                    self.wandb_run.log({f"{prefix}{key}": value}, step=self.step)
+                    self.wandb_run.log({f"{prefix}{key}": value, "train_step": self.step})
             elif isinstance(value, Figure):
                 # Wandb logging for figures currently disabled or wandb import commented out.
                 # Keeping placeholder for future reactivation.
                 if getattr(self.cfg.wandb, 'logging', False) and self.wandb_run is not None and wandb is not None:
                     try:
-                        self.wandb_run.log({f"{prefix}{key}": wandb.Image(value)}, step=self.step)
+                        self.wandb_run.log({f"{prefix}{key}": wandb.Image(value), "train_step": self.step})
                     except Exception as e:
                         print(f"[wandb logging skipped] {e}")
