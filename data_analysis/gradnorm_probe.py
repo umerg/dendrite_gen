@@ -149,8 +149,8 @@ def main():
                     help="abs path to step_XXXXX.pt; if omitted, runs with RANDOM weights (plumbing test only)")
     ap.add_argument("--data-dir", type=Path, default=Path("/Users/umer/Documents/neurons_final/train"))
     ap.add_argument("--config-name", default="neuron_dataset_run_2")
-    ap.add_argument("--pool-graphs", type=int, default=400)
-    ap.add_argument("--n-batches", type=int, default=15)
+    ap.add_argument("--pool-graphs", type=int, default=200)
+    ap.add_argument("--n-batches", type=int, default=12)
     ap.add_argument("--worst-csv", type=Path, default=None)
     ap.add_argument("--enrich-k", type=int, default=8, help="# worst samples injected into the enriched batch")
     ap.add_argument("--eval", action="store_true", help="run model.eval() (no dropout) instead of train()")
@@ -158,19 +158,9 @@ def main():
     ap.add_argument("--device", default="auto")
     args = ap.parse_args()
 
-    # Force line-buffered stdout so progress shows immediately even when the
-    # output is redirected to a log file / job-scheduler capture (Python block-
-    # buffers stdout to a pipe by default, which makes the run look frozen).
-    try:
-        sys.stdout.reconfigure(line_buffering=True)
-    except Exception:  # pragma: no cover
-        pass
-
     device = ("cuda" if th.cuda.is_available() else "cpu") if args.device == "auto" else args.device
-    print(f"device = {device}")
-    if device == "cpu":
-        print("NOTE: CPU is slow for the 512-sample forward+backward passes (~10-30s each). "
-              "Use a free GPU (--device cuda, or CUDA_VISIBLE_DEVICES=<free gpu>) for ~seconds/batch.")
+    print(f"[device] {device}" + ("  (CPU: expect minutes; use a free GPU for seconds)" if device == "cpu" else ""))
+    t_start = time.perf_counter()
 
     # --- compose the exact run config (model dims, flow params, reduction, pos_scale) ---
     from hydra import initialize_config_dir, compose
@@ -182,15 +172,25 @@ def main():
           f"diffusion={cfg.diffusion.name}")
 
     # --- build model/method/dataset via training's own path (arch matches checkpoint) ---
-    _t_setup = time.time()
+    _t = time.perf_counter()
     pool = load_pool(args.data_dir, args.pool_graphs, args.worst_csv, args.seed)
     if not pool:
         print("No graphs loaded — aborting.")
         sys.exit(1)
+    print(f"[timing] loaded pool in {time.perf_counter()-_t:.1f}s")
+
+    # tmd is unused for this run (tmd_in_dim/tmd_hidden_dim == 0) but get_expansion_items
+    # computes a TMD per graph — stub it to avoid that wasted setup cost.
+    import main as _main
+    if getattr(cfg.model, "tmd_hidden_dim", 0) == 0 and getattr(cfg.model, "tmd_in_dim", 0) == 0:
+        _main.compute_tmd_mixed = lambda G: np.zeros((1,), dtype=np.float32)
+        print("[setup] tmd dims are 0 -> skipping TMD computation")
+
+    _t = time.perf_counter()
     diffusion = build_diffusion(cfg)
     items = get_expansion_items(cfg, pool, diffusion=diffusion)
-    print(f"setup (load {len(pool)} graphs + TMD + precompute reductions) took {time.time() - _t_setup:.0f}s")
     model, method = items["model"], items["method"]
+    print(f"[timing] built model/method/dataset (reductions precomputed) in {time.perf_counter()-_t:.1f}s")
 
     if args.checkpoint is not None:
         ckpt = th.load(args.checkpoint, map_location="cpu")
@@ -221,15 +221,16 @@ def main():
     rows = []
 
     # random sweep
-    print(f"running {args.n_batches} random-sweep batches (bs={bs}) ...")
+    print(f"\n[measuring] {args.n_batches} random batches + 3 targeted "
+          f"(forward+backward each, no progress bar in get_loss)...")
     sweep = []
-    t0 = time.time()
     for b in range(args.n_batches):
+        _t = time.perf_counter()
         pick = rng.sample(range(len(samples)), bs)
         r = measure(method, model, [samples[i] for i in pick], device, args.seed + b)
         sweep.append(r["grad_norm"])
-        print(f"  sweep {b + 1}/{args.n_batches}: grad_norm={r['grad_norm']:.4f} "
-              f"pos={r['pos_loss']:.4f}  ({time.time() - t0:.0f}s elapsed)")
+        print(f"  sweep {b+1}/{args.n_batches}: grad_norm={r['grad_norm']:.4f} "
+              f"pos_loss={r['pos_loss']:.4f} ({time.perf_counter()-_t:.1f}s/batch)")
     sweep = np.array(sweep)
     rows.append(("random-sweep (mean)", float(sweep.mean()), None, None, None))
     rows.append(("random-sweep (min)", float(sweep.min()), None, None, None))
@@ -250,11 +251,13 @@ def main():
         enr[j] = int(order_worst[j])
     targeted["enriched(random+worst%d)" % args.enrich_k] = [samples[i] for i in enr]
 
-    print("running targeted batches ...")
     for name, smp in targeted.items():
+        _t = time.perf_counter()
         r = measure(method, model, smp, device, args.seed)
-        print(f"  [{name}] grad_norm={r['grad_norm']:.4f} pos={r['pos_loss']:.4f}")
         rows.append((name, r["grad_norm"], r["pos_loss"], r["exp_loss"], r["num_leaves"]))
+        print(f"  {name}: grad_norm={r['grad_norm']:.4f} pos_loss={r['pos_loss']:.4f} "
+              f"({time.perf_counter()-_t:.1f}s)")
+    print(f"[timing] total {time.perf_counter()-t_start:.1f}s")
 
     # --- report ---
     line = "=" * 86
