@@ -23,14 +23,21 @@ def run_cylinder_trees(
     out_root: Path,
     plot_mode: str = "pair",
     angles: Sequence[tuple[float, float]] = (DEFAULT_3D_ANGLES[0],),
-    segments: int = 12,
+    segments: int = 16,
     radius_attr: str = "radius",
     radius_scale: float = 1.0,
     default_radius: float = 1.0,
+    synthesize_radii: bool = False,
+    twig_radius: float | None = None,
+    twig_radius_scale: float = 0.002,
+    pipe_exponent: float = 0.35,
+    length_exponent: float = 0.12,
+    radius_smoothing_passes: int = 1,
     show_axes: bool = False,
     cap_ends: bool = False,
 ) -> None:
     """Render selected GT/pred pairs as cylinder models."""
+    from .geometry.radii import SYNTHESIZED_RADIUS_ATTR, with_synthesized_radii
     from .qualitative.plots_3d import (
         plot_tree_cylinder_pair_3d,
         plot_tree_cylinder_single_3d,
@@ -47,6 +54,27 @@ def run_cylinder_trees(
         gt_graph = context.gt_graphs[gt_idx]
         pred_graph = context.pred_graphs[pred_idx]
         stem = gt_path.stem
+        render_radius_attr = radius_attr
+
+        if synthesize_radii:
+            synthesis_kwargs = dict(
+                twig_radius=twig_radius,
+                twig_radius_scale=twig_radius_scale,
+                pipe_exponent=pipe_exponent,
+                length_exponent=length_exponent,
+                smoothing_passes=radius_smoothing_passes,
+            )
+            gt_graph = with_synthesized_radii(
+                gt_graph,
+                radius_attr=SYNTHESIZED_RADIUS_ATTR,
+                **synthesis_kwargs,
+            )
+            pred_graph = with_synthesized_radii(
+                pred_graph,
+                radius_attr=SYNTHESIZED_RADIUS_ATTR,
+                **synthesis_kwargs,
+            )
+            render_radius_attr = SYNTHESIZED_RADIUS_ATTR
 
         for elev, azim in angles:
             tag = _angle_tag(float(elev), float(azim))
@@ -54,7 +82,7 @@ def run_cylinder_trees(
                 elev=float(elev),
                 azim=float(azim),
                 segments=segments,
-                radius_attr=radius_attr,
+                radius_attr=render_radius_attr,
                 radius_scale=radius_scale,
                 default_radius=default_radius,
                 show_axes=show_axes,
@@ -129,7 +157,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--segments",
         type=int,
-        default=12,
+        default=16,
         help="Number of radial segments per branch cylinder.",
     )
     parser.add_argument(
@@ -149,6 +177,41 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=float,
         default=1.0,
         help="Radius used for nodes without a valid radius attribute.",
+    )
+    parser.add_argument(
+        "--synthesize-radii",
+        action="store_true",
+        help="Synthesize visual radii before rendering instead of reading --radius-attr.",
+    )
+    parser.add_argument(
+        "--twig-radius",
+        type=float,
+        default=None,
+        help="Terminal twig radius for synthesized radii. Defaults to graph size times --twig-radius-scale.",
+    )
+    parser.add_argument(
+        "--twig-radius-scale",
+        type=float,
+        default=0.002,
+        help="Graph bounding-box diagonal fraction used as synthesized twig radius when --twig-radius is omitted.",
+    )
+    parser.add_argument(
+        "--pipe-exponent",
+        type=float,
+        default=0.35,
+        help="Subtree tip-count exponent for synthesized radii.",
+    )
+    parser.add_argument(
+        "--length-exponent",
+        type=float,
+        default=0.12,
+        help="Downstream-length exponent for synthesized radii.",
+    )
+    parser.add_argument(
+        "--radius-smoothing-passes",
+        type=int,
+        default=1,
+        help="Number of parent-child monotonicity passes after synthesized path smoothing.",
     )
     parser.add_argument(
         "--show-axes",
@@ -182,6 +245,12 @@ def main() -> None:
         radius_attr=args.radius_attr,
         radius_scale=args.radius_scale,
         default_radius=args.default_radius,
+        synthesize_radii=args.synthesize_radii,
+        twig_radius=args.twig_radius,
+        twig_radius_scale=args.twig_radius_scale,
+        pipe_exponent=args.pipe_exponent,
+        length_exponent=args.length_exponent,
+        radius_smoothing_passes=args.radius_smoothing_passes,
         show_axes=args.show_axes,
         cap_ends=args.cap_ends,
     )

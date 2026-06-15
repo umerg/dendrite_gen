@@ -58,7 +58,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--cylinder-segments",
         type=int,
-        default=12,
+        default=16,
         help="Number of radial segments per branch cylinder.",
     )
     parser.add_argument(
@@ -78,6 +78,41 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=float,
         default=1.0,
         help="Radius used for nodes without a valid cylinder radius attribute.",
+    )
+    parser.add_argument(
+        "--cylinder-synthesize-radii",
+        action="store_true",
+        help="Synthesize visual radii for optional cylinder renderings instead of reading the radius attribute.",
+    )
+    parser.add_argument(
+        "--cylinder-twig-radius",
+        type=float,
+        default=None,
+        help="Terminal twig radius for synthesized cylinder radii.",
+    )
+    parser.add_argument(
+        "--cylinder-twig-radius-scale",
+        type=float,
+        default=0.002,
+        help="Graph bounding-box diagonal fraction used as synthesized cylinder twig radius when omitted.",
+    )
+    parser.add_argument(
+        "--cylinder-pipe-exponent",
+        type=float,
+        default=0.35,
+        help="Subtree tip-count exponent for synthesized cylinder radii.",
+    )
+    parser.add_argument(
+        "--cylinder-length-exponent",
+        type=float,
+        default=0.12,
+        help="Downstream-length exponent for synthesized cylinder radii.",
+    )
+    parser.add_argument(
+        "--cylinder-radius-smoothing-passes",
+        type=int,
+        default=1,
+        help="Number of parent-child monotonicity passes after synthesized cylinder path smoothing.",
     )
     parser.add_argument(
         "--tmd-filtrations",
@@ -211,6 +246,12 @@ def main() -> None:
             radius_attr=args.cylinder_radius_attr,
             radius_scale=args.cylinder_radius_scale,
             default_radius=args.cylinder_default_radius,
+            synthesize_radii=args.cylinder_synthesize_radii,
+            twig_radius=args.cylinder_twig_radius,
+            twig_radius_scale=args.cylinder_twig_radius_scale,
+            pipe_exponent=args.cylinder_pipe_exponent,
+            length_exponent=args.cylinder_length_exponent,
+            radius_smoothing_passes=args.cylinder_radius_smoothing_passes,
         )
     run_tree_stats(
         context,

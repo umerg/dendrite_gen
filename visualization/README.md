@@ -39,7 +39,7 @@ Use `--include-cylinders` to add the first-pass cylinder tree model renderings.
 - `run_qualitative.py`
   - individual 2D tree views and galleries
 - `run_cylinder_trees.py`
-  - 3D cylinder-model tree renderings using stored or default radii
+  - 3D cylinder-model tree renderings using stored, default, or synthesized visual radii
 - `run_tree_stats.py`
   - tree-level statistics runner
 - `run_distribution_stats.py`
@@ -97,6 +97,24 @@ files loaded through the repo loader now preserve the SWC radius column. Graphs
 without radii, such as most generated validation-pickle graphs, use radius
 `1.0` for every node. Use `--radius-scale` if you want a quick visual thickness
 adjustment.
+
+For bare skeletons you can synthesize rTwig-inspired visual radii before
+rendering:
+
+```bash
+python3 -m dendrite_gen.visualization.run_cylinder_trees \
+  --gt-dir /path/to/gt_swc \
+  --pred-pkl /path/to/validation/step_30000.pkl \
+  --ema-key ema_1 \
+  --max-pairs 3 \
+  --plot-mode pair \
+  --synthesize-radii \
+  --out-dir dendrite_gen/outputs/visualization
+```
+
+The synthesis roots the graph, estimates downstream branch demand, smooths each
+root-to-tip path monotonically, and merges path predictions into a per-node
+render radius. These are visualization radii, not measured geometry.
 
 Generate one side-by-side 2D plot:
 
