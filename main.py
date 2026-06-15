@@ -292,6 +292,15 @@ def main(cfg: DictConfig):
             diffusion = gg.diffusion.EDMDiffusionModel(
                 num_steps=diffusion_cfg.num_steps,
             )
+        elif diffusion_name == "flow":
+            diffusion = gg.diffusion.FlowMatchingModel(
+                num_steps=diffusion_cfg.num_steps,
+                prior_std=getattr(diffusion_cfg, "prior_std", 1.0),
+                time_dist=getattr(diffusion_cfg, "time_dist", "uniform"),
+                beta_a=getattr(diffusion_cfg, "beta_a", 2.0),
+                beta_b=getattr(diffusion_cfg, "beta_b", 1.0),
+                sigma_min=getattr(diffusion_cfg, "sigma_min", 0.0),
+            )
         else:
             raise ValueError(f"Unknown diffusion name: {diffusion_name}")
 

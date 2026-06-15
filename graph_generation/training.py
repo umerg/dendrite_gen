@@ -36,6 +36,47 @@ from .metrics import Metric
 from .model import EMA, EMA1
 
 
+def _maybe_add_alias(alias_cfg: dict, source_obj, source_key: str, alias_key: str):
+    if source_obj is None or not hasattr(source_obj, source_key):
+        return
+    value = getattr(source_obj, source_key)
+    if value is not None:
+        alias_cfg[alias_key] = value
+
+
+def build_wandb_config(cfg):
+    base_cfg = OmegaConf.to_container(cfg, resolve=True)
+    if not isinstance(base_cfg, dict):
+        base_cfg = {}
+
+    alias_cfg = {}
+
+    model_cfg = getattr(cfg, "model", None)
+    model_aliases = {
+        "num_layers": "model_num_layers",
+        "feats_dim": "model_feats_dim",
+        "m_dim": "model_m_dim",
+        "tmd_hidden_dim": "model_tmd_hidden_dim",
+        "offset_head_hidden": "model_offset_head_hidden",
+        "global_linear_attn_heads": "model_global_linear_attn_heads",
+        "global_linear_attn_dim_head": "model_global_linear_attn_dim_head",
+        "num_global_tokens": "model_num_global_tokens",
+    }
+    for source_key, alias_key in model_aliases.items():
+        _maybe_add_alias(alias_cfg, model_cfg, source_key, alias_key)
+
+    training_cfg = getattr(cfg, "training", None)
+    _maybe_add_alias(alias_cfg, training_cfg, "num_steps", "training_num_steps")
+    if training_cfg is not None:
+        # Current configs use `training.lr`; keep a fallback for `learning_rate`.
+        if hasattr(training_cfg, "lr") and getattr(training_cfg, "lr") is not None:
+            alias_cfg["training_learning_rate"] = getattr(training_cfg, "lr")
+        elif hasattr(training_cfg, "learning_rate") and getattr(training_cfg, "learning_rate") is not None:
+            alias_cfg["training_learning_rate"] = getattr(training_cfg, "learning_rate")
+
+    return {**base_cfg, **alias_cfg}
+
+
 class Trainer:
     def __init__(
         self,
@@ -125,7 +166,7 @@ class Trainer:
             try:
                 self.wandb_run = wandb.init(
                     project="tree_gen",
-                    config=OmegaConf.to_container(cfg, resolve=True),
+                    config=build_wandb_config(cfg),
                     name=cfg.name,
                     resume=self.run_id,
                 )
@@ -351,17 +392,36 @@ class Trainer:
         # Log results (test_results empty if metrics disabled & no improvements tracked)
         self.log({"validation": val_results, "test": test_results})
 
+        # Strip Figure objects from results before pickling: PNGs are already
+        # saved to eval_plots/ and their paths are stored in *_path keys. Keeping
+        # live Figure objects in the pickle payload bloats artifacts and is
+        # fragile across matplotlib versions.
+        def _strip_figures(results_dict):
+            for sub in results_dict.values():
+                if isinstance(sub, dict):
+                    sub.pop("examples", None)
+                    sub.pop("examples_compare", None)
+
         # Dump results (persist even if metrics disabled to keep artifacts of generated graphs/plots)
         if self.cfg.training.save_checkpoint:
             val_dir = self.output_dir / "validation"
             val_dir.mkdir(exist_ok=True)
+            _strip_figures(val_results)
             with open(val_dir / f"step_{self.step}.pkl", "wb") as f:
                 pickle.dump(val_results, f)
             if test_results:
                 test_dir = self.output_dir / "test"
                 test_dir.mkdir(exist_ok=True)
+                _strip_figures(test_results)
                 with open(test_dir / f"step_{self.step}.pkl", "wb") as f:
                     pickle.dump(test_results, f)
+
+        # Release matplotlib figure buffers. Figures created via plt.subplots()
+        # are registered in matplotlib._pylab_helpers.Gcf and are NOT freed by
+        # Python GC when their references drop — they must be closed explicitly.
+        # Without this, canvas buffers accumulate ~10-20 MB per validation and
+        # cause a linear RSS leak over long runs.
+        plt.close('all')
 
     @th.no_grad()
     def evaluate(self, eval_graphs: list[nx.Graph], beta):

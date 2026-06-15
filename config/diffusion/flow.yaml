@@ -1,0 +1,7 @@
+name: "flow"
+num_steps: 50        # straight paths need fewer steps than diffusion's 64
+prior_std: 1.0       # Gaussian prior scale; tune to local-frame C_0 magnitude
+time_dist: "uniform" # "uniform" | "beta"
+beta_a: 2.0
+beta_b: 1.0
+sigma_min: 0.0       # optional small on-path noise; 0 = pure linear OT path

@@ -102,7 +102,7 @@ def _list_swc_files(dir_path: Path) -> list[Path]:
         name = swc_file.name
         if name.startswith("._"):
             continue
-        if not name.endswith(".csv.swc"):
+        if not name.endswith(".swc"):
             continue
         files.append(swc_file)
     return files
