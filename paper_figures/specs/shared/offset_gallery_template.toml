@@ -1,0 +1,44 @@
+# Template for a curated offset-gallery figure.
+# Copy this file into `paper_figures/specs/local/` and edit it for your own use.
+
+gt_dir = "/Users/speltonen/Documents/projects/generating-trees/data/neurons_val"
+pred_pkl = "/Users/speltonen/Documents/projects/generating-trees/data/neuron_conditional_run_200k.pkl"
+ema_key = "ema_1"
+
+# Root output directory. The runner writes into `<out_dir>/curated_offset_gallery/`.
+out_dir = "/Users/speltonen/Documents/projects/generating-trees/dendrite_gen/outputs/neurons"
+
+# Figure-level settings.
+gallery_name = "custom_offset_gallery"
+projection = "xy"
+
+# Default offsets used unless a sample overrides them below.
+x_gap_scale = 0.08
+y_offset_scale = 0.15
+
+# Space between gallery panels.
+subplot_wspace = 0.14
+subplot_hspace = 0.18
+
+# Ordered list of GT filenames to include in the gallery.
+# You can override the GT/pred spacing for each sample individually.
+[[samples]]
+name = "AEW28_G_137_cor.csv.swc"
+x_gap_scale = 0.10
+y_offset_scale = 0.14
+panel_dx = 0.00
+panel_dy = 0.00
+
+[[samples]]
+name = "SEW33_GD_251_cor.csv.swc"
+x_gap_scale = 0.06
+y_offset_scale = 0.18
+panel_dx = 0.01
+panel_dy = -0.01
+
+[[samples]]
+name = "HEW05_GD_220_cor.csv.swc"
+x_gap_scale = 0.12
+y_offset_scale = 0.10
+panel_dx = -0.01
+panel_dy = 0.00

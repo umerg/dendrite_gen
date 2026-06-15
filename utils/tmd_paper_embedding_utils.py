@@ -57,8 +57,8 @@ import networkx as nx
 # - normalization
 # - persistence image
 try:
-    # When imported as part of the utils package (e.g., from notebooks with repo root on sys.path)
-    from utils.tmd_conditioning_utils import (  # type: ignore
+    # Preferred package import path when using `python -m dendrite_gen...`
+    from dendrite_gen.utils.tmd_conditioning_utils import (
         FiltrationName,
         PersistenceDiagram0D,
         assert_rooted_tree_graph,
@@ -69,17 +69,30 @@ try:
         persistence_image,
     )
 except ModuleNotFoundError:
-    # Fallback for direct module execution/import when utils is already on sys.path
-    from tmd_conditioning_utils import (  # type: ignore
-        FiltrationName,
-        PersistenceDiagram0D,
-        assert_rooted_tree_graph,
-        filtration_height_z,
-        filtration_path_length_from_root,
-        filtration_radial_rho,
-        normalize_filtration_values,
-        persistence_image,
-    )
+    try:
+        # When imported as part of the utils package (e.g., from notebooks with repo root on sys.path)
+        from utils.tmd_conditioning_utils import (  # type: ignore
+            FiltrationName,
+            PersistenceDiagram0D,
+            assert_rooted_tree_graph,
+            filtration_height_z,
+            filtration_path_length_from_root,
+            filtration_radial_rho,
+            normalize_filtration_values,
+            persistence_image,
+        )
+    except ModuleNotFoundError:
+        # Fallback for direct module execution/import when utils is already on sys.path
+        from tmd_conditioning_utils import (  # type: ignore
+            FiltrationName,
+            PersistenceDiagram0D,
+            assert_rooted_tree_graph,
+            filtration_height_z,
+            filtration_path_length_from_root,
+            filtration_radial_rho,
+            normalize_filtration_values,
+            persistence_image,
+        )
 
 # -----------------------------
 # Rooting + critical-tree utils

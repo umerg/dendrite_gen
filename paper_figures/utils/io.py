@@ -12,6 +12,7 @@ single interface.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
 import pickle
 from typing import TYPE_CHECKING, Any
@@ -48,6 +49,49 @@ def load_tree_graph(path: Path) -> "nx.Graph":
     from dendrite_gen.utils.data_loading import load_swc_graph
 
     return load_swc_graph(Path(path))
+
+
+def _pos_to_xyz(pos: Any) -> tuple[float, float, float]:
+    if pos is None:
+        return (0.0, 0.0, 0.0)
+    try:
+        vals = list(pos)
+    except TypeError:
+        vals = [pos]
+    vals = [float(v) for v in vals]
+    if len(vals) < 3:
+        vals.extend([0.0] * (3 - len(vals)))
+    return (vals[0], vals[1], vals[2])
+
+
+def ensure_root_from_origin(G: "nx.Graph", *, tol: float = 1e-5) -> int | None:
+    """Ensure ``G.graph['root']`` is set, defaulting to the node closest to the origin."""
+    if "root" in G.graph and G.graph["root"] in G.nodes:
+        return G.graph["root"]
+    if G.number_of_nodes() == 0:
+        return None
+
+    best_node = None
+    best_norm = None
+    within_tol: list[tuple[int, float]] = []
+    for nid in G.nodes:
+        pos = _pos_to_xyz(G.nodes[nid].get("pos"))
+        norm = math.sqrt(pos[0] * pos[0] + pos[1] * pos[1] + pos[2] * pos[2])
+        if norm <= tol:
+            within_tol.append((nid, norm))
+        if best_norm is None or norm < best_norm:
+            best_norm = norm
+            best_node = nid
+
+    if within_tol:
+        within_tol.sort(key=lambda x: x[1])
+        root = within_tol[0][0]
+    else:
+        root = best_node
+
+    if root is not None:
+        G.graph["root"] = root
+    return root
 
 
 def load_gt_file_graphs(gt_dir: Path) -> tuple[list[Path], list["nx.Graph"]]:
@@ -94,6 +138,8 @@ def load_pred_graphs_from_pickle(
     pred_graphs = extract_pred_graphs(payload, ema_key=ema_key)
     if not pred_graphs:
         raise ValueError("No predicted graphs found in pickle.")
+    for graph in pred_graphs:
+        ensure_root_from_origin(graph)
     return pred_graphs
 
 
@@ -128,4 +174,3 @@ def pair_graphs_by_index(
             }
         )
     return pairs, unmatched
-

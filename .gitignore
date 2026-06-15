@@ -140,6 +140,7 @@ dmypy.json
 
 # ouputs
 outputs/
+paper_figures/specs/local/*.toml
 dataloading_tests/
 debug_graphs/
 expansion_test_plots/

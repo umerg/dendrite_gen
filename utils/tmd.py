@@ -19,8 +19,8 @@ import numpy as np
 import networkx as nx
 
 try:
-    # When imported as part of the utils package (repo root on sys.path)
-    from utils.tmd_conditioning_utils import (  # type: ignore
+    # Preferred package import path when using `python -m dendrite_gen...`
+    from dendrite_gen.utils.tmd_conditioning_utils import (
         FiltrationName,
         PersistenceDiagram0D,
         assert_rooted_tree_graph,
@@ -31,31 +31,51 @@ try:
         normalize_filtration_values,
         persistence_image,
     )
-    from utils.tmd_paper_embedding_utils import (  # type: ignore
+    from dendrite_gen.utils.tmd_paper_embedding_utils import (
         barcode_to_diagram,
         build_critical_tree,
         compute_tmd_barcode,
         root_undirected_tree,
     )
 except ModuleNotFoundError:
-    # Fallback for direct module execution/import when utils is already on sys.path
-    from tmd_conditioning_utils import (  # type: ignore
-        FiltrationName,
-        PersistenceDiagram0D,
-        assert_rooted_tree_graph,
-        compute_0d_persistence_diagram,
-        filtration_height_z,
-        filtration_path_length_from_root,
-        filtration_radial_rho,
-        normalize_filtration_values,
-        persistence_image,
-    )
-    from tmd_paper_embedding_utils import (  # type: ignore
-        barcode_to_diagram,
-        build_critical_tree,
-        compute_tmd_barcode,
-        root_undirected_tree,
-    )
+    try:
+        # When imported as part of the utils package (repo root on sys.path)
+        from utils.tmd_conditioning_utils import (  # type: ignore
+            FiltrationName,
+            PersistenceDiagram0D,
+            assert_rooted_tree_graph,
+            compute_0d_persistence_diagram,
+            filtration_height_z,
+            filtration_path_length_from_root,
+            filtration_radial_rho,
+            normalize_filtration_values,
+            persistence_image,
+        )
+        from utils.tmd_paper_embedding_utils import (  # type: ignore
+            barcode_to_diagram,
+            build_critical_tree,
+            compute_tmd_barcode,
+            root_undirected_tree,
+        )
+    except ModuleNotFoundError:
+        # Fallback for direct module execution/import when utils is already on sys.path
+        from tmd_conditioning_utils import (  # type: ignore
+            FiltrationName,
+            PersistenceDiagram0D,
+            assert_rooted_tree_graph,
+            compute_0d_persistence_diagram,
+            filtration_height_z,
+            filtration_path_length_from_root,
+            filtration_radial_rho,
+            normalize_filtration_values,
+            persistence_image,
+        )
+        from tmd_paper_embedding_utils import (  # type: ignore
+            barcode_to_diagram,
+            build_critical_tree,
+            compute_tmd_barcode,
+            root_undirected_tree,
+        )
 
 MethodName = Literal["0d", "tmd"]
 

@@ -23,6 +23,7 @@ def run_tree_stats(
     *,
     out_root: Path,
     ncols: int = 3,
+    max_pairs: int | None = None,
 ) -> None:
     """Render tree-level statistics figures into the tree_stats subfolder."""
     import pandas as pd
@@ -31,9 +32,10 @@ def run_tree_stats(
     from .stats.tree_stats import graph_tree_scalar_row
 
     out_dir = ensure_runner_out_dir(out_root, "tree_stats")
+    stats_pairs = context.pairs if max_pairs is None else context.pairs[: max(0, max_pairs)]
 
     scalar_frames = []
-    for pair_idx, pair in enumerate(context.selected_pairs):
+    for pair_idx, pair in enumerate(stats_pairs):
         gt_idx = int(pair["gt_idx"])
         pred_idx = int(pair["pred_idx"])
         gt_path = context.gt_files[gt_idx]
@@ -67,7 +69,7 @@ def run_tree_stats(
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Generate tree-level statistics figures.")
-    add_shared_arguments(parser)
+    add_shared_arguments(parser, default_max_pairs=None)
     parser.add_argument(
         "--ncols",
         type=int,
@@ -81,7 +83,7 @@ def main() -> None:
     parser = build_arg_parser()
     args = parser.parse_args()
     context = load_plot_context(args)
-    run_tree_stats(context, out_root=args.out_dir, ncols=args.ncols)
+    run_tree_stats(context, out_root=args.out_dir, ncols=args.ncols, max_pairs=args.max_pairs)
 
 
 if __name__ == "__main__":

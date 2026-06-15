@@ -15,6 +15,7 @@ def run_distribution_stats(
     out_root: Path,
     ncols: int = 3,
     modes: Sequence[str] = ("pooled",),
+    max_pairs: int | None = None,
 ) -> None:
     """Render within-tree distribution figures into the distribution_stats subfolder."""
     import pandas as pd
@@ -24,9 +25,10 @@ def run_distribution_stats(
 
     out_dir = ensure_runner_out_dir(out_root, "distribution_stats")
     distribution_metrics = list(GRAPH_DISTRIBUTION_KEYS)
+    stats_pairs = context.pairs if max_pairs is None else context.pairs[: max(0, max_pairs)]
 
     if "single" in modes:
-        for pair_idx, pair in enumerate(context.selected_pairs):
+        for pair_idx, pair in enumerate(stats_pairs):
             gt_idx = int(pair["gt_idx"])
             pred_idx = int(pair["pred_idx"])
             gt_path = context.gt_files[gt_idx]
@@ -58,7 +60,7 @@ def run_distribution_stats(
     dataset_modes = [mode for mode in modes if mode != "single"]
     if dataset_modes:
         dist_frames = []
-        for pair_idx, pair in enumerate(context.selected_pairs):
+        for pair_idx, pair in enumerate(stats_pairs):
             gt_idx = int(pair["gt_idx"])
             pred_idx = int(pair["pred_idx"])
             gt_path = context.gt_files[gt_idx]
@@ -93,7 +95,7 @@ def run_distribution_stats(
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Generate within-tree distribution figures.")
-    add_shared_arguments(parser)
+    add_shared_arguments(parser, default_max_pairs=None)
     parser.add_argument(
         "--distribution-mode",
         choices=["single", "pooled", "tree_average"],
@@ -124,6 +126,7 @@ def main() -> None:
         out_root=args.out_dir,
         ncols=args.ncols,
         modes=modes,
+        max_pairs=args.max_pairs,
     )
 
 

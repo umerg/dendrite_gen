@@ -25,7 +25,11 @@ def preview_names(items: Sequence[str], *, max_items: int = 5) -> str:
     return preview
 
 
-def add_shared_arguments(parser: argparse.ArgumentParser) -> None:
+def add_shared_arguments(
+    parser: argparse.ArgumentParser,
+    *,
+    default_max_pairs: int | None = 1,
+) -> None:
     """Add the shared data-selection arguments used by runner scripts."""
     parser.add_argument("--gt-dir", type=Path, required=True, help="Directory containing GT SWC files.")
     parser.add_argument(
@@ -43,8 +47,11 @@ def add_shared_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--max-pairs",
         type=int,
-        default=1,
-        help="Maximum number of GT/pred pairs to render.",
+        default=default_max_pairs,
+        help=(
+            "Maximum number of GT/pred pairs to render. "
+            "Use all available pairs when omitted and the runner default is unrestricted."
+        ),
     )
     parser.add_argument(
         "--out-dir",
@@ -70,6 +77,32 @@ class PlotContext:
         return [self.gt_files[int(pair["gt_idx"])].name for pair in self.selected_pairs]
 
 
+def context_with_selected_pairs(context: PlotContext, selected_pairs: list[dict[str, int]]) -> PlotContext:
+    """Return a copy of the plot context with a different selected-pair subset."""
+    return PlotContext(
+        gt_files=context.gt_files,
+        gt_graphs=context.gt_graphs,
+        pred_graphs=context.pred_graphs,
+        pairs=context.pairs,
+        unmatched=context.unmatched,
+        selected_pairs=selected_pairs,
+    )
+
+
+def select_pairs_by_gt_names(context: PlotContext, tree_names: Sequence[str]) -> PlotContext:
+    """Return a new plot context containing only pairs for the requested GT filenames."""
+    requested = list(tree_names)
+    pair_by_name = {
+        context.gt_files[int(pair["gt_idx"])].name: pair
+        for pair in context.pairs
+    }
+    missing = [name for name in requested if name not in pair_by_name]
+    if missing:
+        raise ValueError(f"Requested GT trees were not found in paired data: {missing}")
+    selected_pairs = [pair_by_name[name] for name in requested]
+    return context_with_selected_pairs(context, selected_pairs)
+
+
 def load_plot_context(args: argparse.Namespace, *, print_summary: bool = True) -> PlotContext:
     """Load GT/pred graphs and select the subset of pairs to render."""
     gt_files, gt_graphs = load_gt_file_graphs(args.gt_dir)
@@ -78,7 +111,10 @@ def load_plot_context(args: argparse.Namespace, *, print_summary: bool = True) -
     if not pairs:
         raise ValueError("No GT/pred graph pairs could be formed.")
 
-    selected_pairs = pairs[: max(0, args.max_pairs)]
+    if args.max_pairs is None:
+        selected_pairs = list(pairs)
+    else:
+        selected_pairs = pairs[: max(0, args.max_pairs)]
     if print_summary:
         print(f"Found {len(gt_files)} GT SWC files in {args.gt_dir}")
         print(f"GT file preview: {preview_names([p.name for p in gt_files])}")
