@@ -1,4 +1,4 @@
-"""Runner for qualitative paper figures."""
+"""Runner for qualitative figures."""
 
 from __future__ import annotations
 
@@ -145,7 +145,7 @@ def run_qualitative(
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Generate qualitative paper figures.")
+    parser = argparse.ArgumentParser(description="Generate qualitative figures.")
     add_shared_arguments(parser)
     parser.add_argument(
         "--figure",

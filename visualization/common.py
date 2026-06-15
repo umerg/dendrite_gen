@@ -1,4 +1,4 @@
-"""Shared orchestration helpers for paper-figure runners."""
+"""Shared orchestration helpers for figure runners."""
 
 from __future__ import annotations
 
@@ -56,14 +56,14 @@ def add_shared_arguments(
     parser.add_argument(
         "--out-dir",
         type=Path,
-        default=Path("dendrite_gen/outputs/paper_figures"),
+        default=Path("dendrite_gen/outputs/visualization"),
         help="Root output directory. Each runner writes into its own subfolder here.",
     )
 
 
 @dataclass
 class PlotContext:
-    """Loaded GT/pred data shared across paper-figure runners."""
+    """Loaded GT/pred data shared across figure runners."""
 
     gt_files: list[Path]
     gt_graphs: list
@@ -75,32 +75,6 @@ class PlotContext:
     @property
     def selected_gt_names(self) -> list[str]:
         return [self.gt_files[int(pair["gt_idx"])].name for pair in self.selected_pairs]
-
-
-def context_with_selected_pairs(context: PlotContext, selected_pairs: list[dict[str, int]]) -> PlotContext:
-    """Return a copy of the plot context with a different selected-pair subset."""
-    return PlotContext(
-        gt_files=context.gt_files,
-        gt_graphs=context.gt_graphs,
-        pred_graphs=context.pred_graphs,
-        pairs=context.pairs,
-        unmatched=context.unmatched,
-        selected_pairs=selected_pairs,
-    )
-
-
-def select_pairs_by_gt_names(context: PlotContext, tree_names: Sequence[str]) -> PlotContext:
-    """Return a new plot context containing only pairs for the requested GT filenames."""
-    requested = list(tree_names)
-    pair_by_name = {
-        context.gt_files[int(pair["gt_idx"])].name: pair
-        for pair in context.pairs
-    }
-    missing = [name for name in requested if name not in pair_by_name]
-    if missing:
-        raise ValueError(f"Requested GT trees were not found in paired data: {missing}")
-    selected_pairs = [pair_by_name[name] for name in requested]
-    return context_with_selected_pairs(context, selected_pairs)
 
 
 def load_plot_context(args: argparse.Namespace, *, print_summary: bool = True) -> PlotContext:

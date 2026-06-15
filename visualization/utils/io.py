@@ -1,7 +1,6 @@
-"""Input/output helpers for paper figure generation.
+"""Input/output helpers for figure generation.
 
-This module centralizes file discovery and loading for the paper-facing
-plotting pipeline.
+This module centralizes file discovery and loading for the plotting pipeline.
 
 The existing validation scripts in this repository duplicate several small IO
 helpers (SWC discovery, prediction-pickle parsing, GT/pred pairing). Here we

@@ -1,4 +1,4 @@
-"""Internal graph helpers for paper-figure statistics."""
+"""Internal graph helpers for figure statistics."""
 
 from __future__ import annotations
 

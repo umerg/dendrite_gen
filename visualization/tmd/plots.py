@@ -1,4 +1,4 @@
-"""Persistence-diagram plotting helpers for TMD paper figures."""
+"""Persistence-diagram plotting helpers for TMD figures."""
 
 from __future__ import annotations
 

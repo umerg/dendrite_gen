@@ -1,4 +1,4 @@
-"""Plotting helpers for statistics-driven paper figures."""
+"""Plotting helpers for statistics-driven figures."""
 
 from __future__ import annotations
 

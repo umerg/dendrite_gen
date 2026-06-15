@@ -1,4 +1,4 @@
-"""2D qualitative plotting helpers for paper figures."""
+"""2D qualitative plotting helpers."""
 
 from __future__ import annotations
 
@@ -327,10 +327,6 @@ def plot_tree_offset_gallery_2d(
     max_examples: int = 6,
     x_gap_scale: float = 0.05,
     y_offset_scale: float = 0.2,
-    x_gap_scales: list[float] | None = None,
-    y_offset_scales: list[float] | None = None,
-    panel_dxs: list[float] | None = None,
-    panel_dys: list[float] | None = None,
     subplot_wspace: float = 0.06,
     subplot_hspace: float = 0.10,
     linewidth: float = 1.3,
@@ -366,8 +362,8 @@ def plot_tree_offset_gallery_2d(
             gt,
             pred,
             projection=projection,
-            x_gap_scale=x_gap_scales[idx] if x_gap_scales is not None else x_gap_scale,
-            y_offset_scale=y_offset_scales[idx] if y_offset_scales is not None else y_offset_scale,
+            x_gap_scale=x_gap_scale,
+            y_offset_scale=y_offset_scale,
         )
         plot_tree_2d(
             ax,
@@ -410,13 +406,6 @@ def plot_tree_offset_gallery_2d(
         wspace=subplot_wspace,
         hspace=subplot_hspace,
     )
-    if panel_dxs is not None or panel_dys is not None:
-        for idx in range(n_examples):
-            ax = axes.flat[idx]
-            pos = ax.get_position()
-            dx = panel_dxs[idx] if panel_dxs is not None else 0.0
-            dy = panel_dys[idx] if panel_dys is not None else 0.0
-            ax.set_position([pos.x0 + dx, pos.y0 + dy, pos.width, pos.height])
     fig.savefig(out_path, dpi=DEFAULT_DPI)
     plt.close(fig)
     return out_path

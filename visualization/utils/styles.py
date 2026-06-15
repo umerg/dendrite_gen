@@ -1,4 +1,4 @@
-"""Shared styling constants for paper figures."""
+"""Shared styling constants for figures."""
 
 from __future__ import annotations
 
@@ -10,4 +10,3 @@ EDGE_COLOR = "#6b7280"
 DEFAULT_DPI = 160
 DEFAULT_FIGSIZE = (6.0, 4.5)
 DEFAULT_3D_ANGLES = ((20, 30), (20, 120), (20, 210))
-

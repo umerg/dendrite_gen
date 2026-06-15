@@ -1,4 +1,4 @@
-"""Runner for TMD persistence-diagram paper figures."""
+"""Runner for TMD persistence-diagram figures."""
 
 from __future__ import annotations
 
