@@ -23,7 +23,7 @@ training:
   max_num_workers: 0
   log_interval: 1000 # can make 5K as well
   save_checkpoint: True
-  resume: False # False, True (latest checkpoint), step number, or path to .pt file
+  resume: "/itet-stor/guptau/net_scratch/dendrite_gen/outputs/2026-06-09/22-04-37/checkpoints/step_75000.pt" # False, True (latest checkpoint), step number, or path to .pt file
   lr_scheduler: "cosine_annealing"
   scheduler_T_max: ${training.num_steps}
   scheduler_eta_min: 1e-5
@@ -65,11 +65,11 @@ ema: # can adjust for more stable training, but I haven't had the chance to expe
   gamma: 1.0
   power: 1.0
 
-name: flow_neuron_unconditional_big_flow25
+name: flow_neuron_unconditional_big_flow2_clipped
 debugging: False
 debugging_max_batches: 50
 debugging_dir: "neurons_debug"
 
 wandb: # also working, can log in and use
   logging: True
-  new_run: False  # when resuming, set True to fork a NEW wandb experiment instead of rejoining the checkpoint's run
+  new_run: True  # when resuming, set True to fork a NEW wandb experiment instead of rejoining the checkpoint's run

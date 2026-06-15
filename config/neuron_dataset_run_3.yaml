@@ -19,7 +19,7 @@ reduction:
 training:
   batch_size: 512 # can adjust based on GPU memory, but does make steps slower on increasing and hence there is a tradoff on updates per unit time
   lr: 5e-4
-  num_steps: 300000 
+  num_steps: 60000
   max_num_workers: 0
   log_interval: 1000 # can make 5K as well
   save_checkpoint: True
@@ -27,10 +27,11 @@ training:
   lr_scheduler: "cosine_annealing"              
   scheduler_T_max: ${training.num_steps}  
   scheduler_eta_min: 1e-5          
+  grad_clip_norm: 1.0   # max global grad-norm; null disables clipping. Pre-clip norm is always logged as training/grad_norm
 
 validation:
   batch_size: 64 # adjust according train/val split - currently only 50 samples in val set
-  interval: 25000 # can make 5k
+  interval: 1000 # can make 5k
   first_step: 0
   per_graph_size: False
   enable_metrics: False
@@ -64,7 +65,7 @@ ema: # can adjust for more stable training, but I haven't had the chance to expe
   gamma: 1.0
   power: 1.0
 
-name: flow_neuron_unconditional_big_flow10
+name: flow_neuron_unconditional_big_flow10_firstdecent
 debugging: False
 debugging_max_batches: 50
 debugging_dir: "neurons_debug"
