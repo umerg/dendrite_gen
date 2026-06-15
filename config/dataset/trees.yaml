@@ -1,4 +1,4 @@
 name: tree_dataset
-data_dir: # add path to tree dataset
+data_dir: /scratch/guptau/small_trees # add path to tree dataset
 load: True
 pos_scale_factor: # adjust based on dataset - can be estimated by looking at avg pairwise distance of nodes in a few samples and setting to something like 10x that to bring to ~unit scale

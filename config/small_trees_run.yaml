@@ -1,6 +1,6 @@
 defaults:
   - _self_
-  - dataset: trees_test
+  - dataset: tree_dataset
   - diffusion: flow10
   - method: expansion
 
