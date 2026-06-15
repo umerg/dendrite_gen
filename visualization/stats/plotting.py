@@ -200,6 +200,135 @@ def plot_tree_level_hist_grid(
     return out_path
 
 
+def _paired_metric_values(df: pd.DataFrame, metric: str) -> pd.DataFrame:
+    """Return paired GT/pred values for one tree-level metric."""
+    if "source" not in df.columns or metric not in df.columns:
+        return pd.DataFrame(columns=["gt", "pred"])
+
+    pair_col = "pair_index" if "pair_index" in df.columns else "tree_name"
+    if pair_col not in df.columns:
+        return pd.DataFrame(columns=["gt", "pred"])
+
+    metric_df = df.loc[
+        df["source"].isin(["gt", "pred"]),
+        [pair_col, "source", metric],
+    ].replace([np.inf, -np.inf], np.nan)
+    metric_df = metric_df.dropna(subset=[metric])
+    if metric_df.empty:
+        return pd.DataFrame(columns=["gt", "pred"])
+
+    paired = metric_df.pivot_table(
+        index=pair_col,
+        columns="source",
+        values=metric,
+        aggfunc="first",
+    )
+    if "gt" not in paired.columns or "pred" not in paired.columns:
+        return pd.DataFrame(columns=["gt", "pred"])
+    return paired[["gt", "pred"]].dropna()
+
+
+def _scatter_axis_limits(gt_vals: np.ndarray, pred_vals: np.ndarray) -> tuple[float, float]:
+    values = np.concatenate([gt_vals, pred_vals], axis=0)
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return 0.0, 1.0
+
+    lo = float(np.min(values))
+    hi = float(np.max(values))
+    if hi <= lo:
+        pad = max(abs(lo) * 0.05, 1e-6)
+    else:
+        pad = (hi - lo) * 0.05
+    return lo - pad, hi + pad
+
+
+def plot_tree_level_scatter_grid(
+    df: pd.DataFrame,
+    *,
+    metrics: Sequence[str],
+    out_path: Path,
+    ncols: int = 3,
+) -> Path:
+    """Plot paired GT-vs-pred scatter plots for tree-level metrics."""
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    n_metrics = len(metrics)
+    if n_metrics == 0:
+        raise ValueError("At least one metric is required.")
+    ncols = max(1, ncols)
+    nrows = ceil(n_metrics / ncols)
+
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4.6 * ncols, 4.2 * nrows), squeeze=False)
+
+    for idx, metric in enumerate(metrics):
+        ax = axes.flat[idx]
+        paired = _paired_metric_values(df, metric)
+        ax.set_title(_nice_metric_name(metric))
+
+        if paired.empty:
+            ax.text(
+                0.5,
+                0.5,
+                "No paired values",
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+                color="#6b7280",
+            )
+            ax.set_xticks([])
+            ax.set_yticks([])
+        else:
+            gt_vals = paired["gt"].to_numpy(dtype=float)
+            pred_vals = paired["pred"].to_numpy(dtype=float)
+            lo, hi = _scatter_axis_limits(gt_vals, pred_vals)
+
+            ax.plot(
+                [lo, hi],
+                [lo, hi],
+                color="#6b7280",
+                linestyle="--",
+                linewidth=1.0,
+                alpha=0.8,
+            )
+            ax.scatter(
+                gt_vals,
+                pred_vals,
+                s=5,
+                c=PRED_COLOR,
+                alpha=0.75,
+                edgecolors="black",
+                linewidths=0.25,
+            )
+            ax.set_xlim(lo, hi)
+            ax.set_ylim(lo, hi)
+            ax.set_aspect("equal", adjustable="box")
+            ax.text(
+                0.04,
+                0.96,
+                f"n={len(paired)}",
+                ha="left",
+                va="top",
+                transform=ax.transAxes,
+                color="#4b5563",
+                fontsize=9,
+            )
+
+        ax.set_xlabel("GT")
+        ax.set_ylabel("Pred")
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+
+    for idx in range(n_metrics, nrows * ncols):
+        axes.flat[idx].axis("off")
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=DEFAULT_DPI)
+    plt.close(fig)
+    return out_path
+
+
 def plot_distribution_hist_grid(
     df: pd.DataFrame,
     *,

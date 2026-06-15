@@ -21,9 +21,11 @@ def load_swc_graph(path):
 
     Node attributes:
         pos: np.ndarray shape (3,) float64 (x,y,z) (after recentering)
+        radius: float SWC radius column
+        swc_type: int SWC type column
 
     Returns:
-        G (nx.Graph) with integer node ids matching SWC ids and 'pos' attribute.
+        G (nx.Graph) with integer node ids matching SWC ids and node attributes.
     """
     path = Path(path)
     if not path.exists():
@@ -42,15 +44,22 @@ def load_swc_graph(path):
             if len(parts) < 7:
                 raise ValueError(f"Malformed SWC line (expected >=7 cols): '{line}'")
             nid = int(parts[0])
+            swc_type = int(parts[1])
             x = float(parts[2])
             y = float(parts[3])
             z = float(parts[4])
+            radius = float(parts[5])
             parent = int(parts[6])
 
             if parent <= 0:
                 root_id = nid
 
-            G.add_node(nid, pos=np.array([x, y, z], dtype=np.float64))
+            G.add_node(
+                nid,
+                pos=np.array([x, y, z], dtype=np.float64),
+                radius=radius,
+                swc_type=swc_type,
+            )
             if parent > 0:
                 parent_links.append((nid, parent))
 

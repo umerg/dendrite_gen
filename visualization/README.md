@@ -22,12 +22,15 @@ python3 -m dendrite_gen.visualization.run_all_plots \
 `run_all_plots.py` currently writes:
 
 - qualitative 2D views for `xy`, `xz`, and `yz`
-- tree-level metric histograms
+- optional 3D cylinder-model tree renderings
+- tree-level metric histograms and paired GT-vs-pred scatter plots
 - within-tree distribution histograms
-- TMD persistence-diagram grids
+- TMD persistence-diagram grids, mean persistence-image comparisons, and a joint
+  persistence-image embedding scatter
 
 Use `--skip-tmd` when you want a faster pass without persistence diagrams.
 Use `--projections xy` or `--projections xy xz` to limit the qualitative views.
+Use `--include-cylinders` to add the first-pass cylinder tree model renderings.
 
 ## Structure
 
@@ -35,6 +38,8 @@ Use `--projections xy` or `--projections xy xz` to limit the qualitative views.
   - main entrypoint for the current visualization set
 - `run_qualitative.py`
   - individual 2D tree views and galleries
+- `run_cylinder_trees.py`
+  - 3D cylinder-model tree renderings using stored or default radii
 - `run_tree_stats.py`
   - tree-level statistics runner
 - `run_distribution_stats.py`
@@ -75,6 +80,24 @@ python3 -m dendrite_gen.visualization.run_qualitative \
   --out-dir dendrite_gen/outputs/visualization
 ```
 
+Generate a 3D cylinder-model tree rendering:
+
+```bash
+python3 -m dendrite_gen.visualization.run_cylinder_trees \
+  --gt-dir /path/to/gt_swc \
+  --pred-pkl /path/to/validation/step_30000.pkl \
+  --ema-key ema_1 \
+  --max-pairs 3 \
+  --plot-mode pair \
+  --out-dir dendrite_gen/outputs/visualization
+```
+
+Cylinder rendering reads `node["radius"]` when available. Ground-truth SWC
+files loaded through the repo loader now preserve the SWC radius column. Graphs
+without radii, such as most generated validation-pickle graphs, use radius
+`1.0` for every node. Use `--radius-scale` if you want a quick visual thickness
+adjustment.
+
 Generate one side-by-side 2D plot:
 
 ```bash
@@ -87,7 +110,7 @@ python3 -m dendrite_gen.visualization.run_qualitative \
   --out-dir dendrite_gen/outputs/visualization
 ```
 
-Generate a tree-level histogram grid:
+Generate tree-level histogram and paired scatter grids:
 
 ```bash
 python3 -m dendrite_gen.visualization.run_tree_stats \
@@ -120,10 +143,41 @@ python3 -m dendrite_gen.visualization.run_tmd_figures \
   --pred-pkl /path/to/validation/step_30000.pkl \
   --ema-key ema_1 \
   --filtrations path height rho \
+  --embedding-bins 16 \
+  --embedding-sigma 0.05 \
+  --embedding-color-attributes height max_path_dist \
+  --diagram-distance-attributes height max_path_dist \
   --point-alpha 0.5 \
   --max-pairs 6 \
   --out-dir dendrite_gen/outputs/visualization
 ```
+
+The TMD runner also writes one joint GT/predicted embedding per selected
+filtration, plus mean persistence-image comparison panels such as
+`tmd_mean_pi_path.png`. Embedding outputs include `tmd_embedding_path.png` and
+`tmd_embedding_path_points.csv`. Colored variants are named like
+`tmd_embedding_path_color_height.png`. It also writes one GT/pred pair scatter
+per filtration and selected GT attribute, with x as the GT-vs-pred
+persistence-diagram Wasserstein distance and y as the GT attribute; outputs are named like
+`tmd_diagram_distance_path_by_gt_height.png`. Unlike the per-tree persistence-diagram
+grids, these dataset-level plots use all paired trees by default. Use
+`--embedding-max-pairs` only when you want a smaller debugging run. Use
+`--embedding-combine-filtrations` if you also want the older concatenated
+all-filtrations embedding.
+The reducer defaults to `auto`, which uses UMAP when `umap-learn` is available
+and PCA otherwise. The embedding plot uses a neutral scatter in the main panel
+plus GT/predicted marginal density curves below the x axis and left of the y
+axis. The standalone TMD runner defaults to the `height` color attribute; pass
+`--embedding-color-attributes height max_path_dist` to choose a different list.
+The standalone distance scatter uses the same attribute list by default; pass
+`--diagram-distance-attributes height max_path_dist` only when you want a
+separate y-axis attribute list.
+`run_all_plots.py` defaults to all available tree-level scalar color attributes;
+use the prefixed `--tmd-embedding-color-attributes` and
+`--tmd-diagram-distance-attributes` options there when you want smaller or
+separate sets. The reducer is computed once per embedding filtration and then
+reused for every color-attribute variant. Use `--embedding-connect-pairs` only
+for small subsets where pair lines remain readable.
 
 Show the main CLI:
 

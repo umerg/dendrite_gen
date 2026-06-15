@@ -5,9 +5,14 @@ from __future__ import annotations
 import argparse
 
 from .common import add_shared_arguments, load_plot_context
+from .run_cylinder_trees import run_cylinder_trees
 from .run_distribution_stats import run_distribution_stats
 from .run_qualitative import ALL_QUALITATIVE_PROJECTIONS, QUALITATIVE_FIGURES, run_qualitative
-from .run_tmd_figures import DEFAULT_FILTRATIONS, run_tmd_figures
+from .run_tmd_figures import (
+    DEFAULT_FILTRATIONS,
+    TREE_SCALAR_ATTRIBUTES,
+    run_tmd_figures,
+)
 from .run_tree_stats import run_tree_stats
 
 
@@ -38,6 +43,43 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Skip TMD persistence-diagram visualizations.",
     )
     parser.add_argument(
+        "--include-cylinders",
+        action="store_true",
+        help="Also render selected GT/pred trees as 3D cylinder models.",
+    )
+    parser.add_argument(
+        "--cylinder-angle",
+        nargs=2,
+        type=float,
+        metavar=("ELEV", "AZIM"),
+        default=(20.0, 30.0),
+        help="Camera angle for optional cylinder renderings.",
+    )
+    parser.add_argument(
+        "--cylinder-segments",
+        type=int,
+        default=12,
+        help="Number of radial segments per branch cylinder.",
+    )
+    parser.add_argument(
+        "--cylinder-radius-attr",
+        type=str,
+        default="radius",
+        help="Node attribute containing per-node radii for optional cylinder renderings.",
+    )
+    parser.add_argument(
+        "--cylinder-radius-scale",
+        type=float,
+        default=1.0,
+        help="Multiplier applied to existing or default cylinder radii.",
+    )
+    parser.add_argument(
+        "--cylinder-default-radius",
+        type=float,
+        default=1.0,
+        help="Radius used for nodes without a valid cylinder radius attribute.",
+    )
+    parser.add_argument(
         "--tmd-filtrations",
         nargs="+",
         default=list(DEFAULT_FILTRATIONS),
@@ -48,6 +90,95 @@ def build_arg_parser() -> argparse.ArgumentParser:
         choices=["minmax", "max", "none"],
         default="minmax",
         help="Normalization mode used before computing TMD persistence diagrams.",
+    )
+    parser.add_argument(
+        "--tmd-embedding-bins",
+        type=int,
+        default=16,
+        help="Number of bins per axis for TMD persistence-image embedding vectors.",
+    )
+    parser.add_argument(
+        "--tmd-embedding-sigma",
+        type=float,
+        default=0.05,
+        help="Gaussian sigma for TMD persistence-image embedding vectors.",
+    )
+    parser.add_argument(
+        "--tmd-embedding-weighting",
+        choices=["none", "persistence"],
+        default="persistence",
+        help="Point weighting used for TMD persistence-image embedding vectors.",
+    )
+    parser.add_argument(
+        "--tmd-embedding-reducer",
+        choices=["auto", "umap", "pca"],
+        default="auto",
+        help="2D reducer for the joint TMD embedding. Auto uses UMAP when available, otherwise PCA.",
+    )
+    parser.add_argument(
+        "--tmd-embedding-random-state",
+        type=int,
+        default=0,
+        help="Random seed for stochastic TMD embedding reducers.",
+    )
+    parser.add_argument(
+        "--tmd-umap-n-neighbors",
+        type=int,
+        default=15,
+        help="UMAP n_neighbors used for the TMD embedding when UMAP is selected.",
+    )
+    parser.add_argument(
+        "--tmd-umap-min-dist",
+        type=float,
+        default=0.1,
+        help="UMAP min_dist used for the TMD embedding when UMAP is selected.",
+    )
+    parser.add_argument(
+        "--tmd-embedding-connect-pairs",
+        action="store_true",
+        help="Draw GT-to-pred connection lines in the TMD embedding scatter. Best for small subsets.",
+    )
+    parser.add_argument(
+        "--tmd-embedding-point-alpha",
+        type=float,
+        default=0.35,
+        help="Point opacity for the TMD embedding scatter.",
+    )
+    parser.add_argument(
+        "--tmd-embedding-max-pairs",
+        type=int,
+        default=None,
+        help="Optional limit for the TMD embedding. Defaults to all paired trees.",
+    )
+    parser.add_argument(
+        "--tmd-embedding-combine-filtrations",
+        action="store_true",
+        help="Also write a combined TMD embedding that concatenates all selected filtrations.",
+    )
+    parser.add_argument(
+        "--tmd-embedding-color-attributes",
+        nargs="+",
+        choices=list(TREE_SCALAR_ATTRIBUTES),
+        default=list(TREE_SCALAR_ATTRIBUTES),
+        help=(
+            "Tree-level attributes used to color TMD embedding scatter points. "
+            "One colored plot is written for each TMD embedding filtration and attribute. "
+            "Defaults to all available tree-level scalar attributes."
+        ),
+    )
+    parser.add_argument(
+        "--tmd-diagram-distance-attributes",
+        "--tmd-pi-distance-attributes",
+        nargs="+",
+        choices=list(TREE_SCALAR_ATTRIBUTES),
+        default=None,
+        dest="tmd_diagram_distance_attributes",
+        help=(
+            "GT tree-level attributes used on the y axis of TMD persistence-diagram "
+            "distance scatter plots. One plot is written for each TMD embedding "
+            "filtration and attribute. Defaults to the selected TMD embedding "
+            "color attributes."
+        ),
     )
     return parser
 
@@ -70,6 +201,16 @@ def main() -> None:
             out_root=args.out_dir,
             projection=projection,
             figures=QUALITATIVE_FIGURES,
+        )
+    if args.include_cylinders:
+        run_cylinder_trees(
+            context,
+            out_root=args.out_dir,
+            angles=(tuple(args.cylinder_angle),),
+            segments=args.cylinder_segments,
+            radius_attr=args.cylinder_radius_attr,
+            radius_scale=args.cylinder_radius_scale,
+            default_radius=args.cylinder_default_radius,
         )
     run_tree_stats(
         context,
@@ -98,6 +239,23 @@ def main() -> None:
             filtrations=tuple(args.tmd_filtrations),
             normalize_mode=args.tmd_normalize_mode,
             ncols=args.ncols,
+            embedding_bins=args.tmd_embedding_bins,
+            embedding_sigma=args.tmd_embedding_sigma,
+            embedding_weighting=args.tmd_embedding_weighting,
+            embedding_reducer=args.tmd_embedding_reducer,
+            embedding_random_state=args.tmd_embedding_random_state,
+            umap_n_neighbors=args.tmd_umap_n_neighbors,
+            umap_min_dist=args.tmd_umap_min_dist,
+            embedding_connect_pairs=args.tmd_embedding_connect_pairs,
+            embedding_point_alpha=args.tmd_embedding_point_alpha,
+            embedding_max_pairs=args.tmd_embedding_max_pairs,
+            embedding_combine_filtrations=args.tmd_embedding_combine_filtrations,
+            embedding_color_attributes=tuple(args.tmd_embedding_color_attributes),
+            pair_distance_attributes=(
+                None
+                if args.tmd_diagram_distance_attributes is None
+                else tuple(args.tmd_diagram_distance_attributes)
+            ),
         )
 
 

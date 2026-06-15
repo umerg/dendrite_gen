@@ -28,7 +28,7 @@ def run_tree_stats(
     """Render tree-level statistics figures into the tree_stats subfolder."""
     import pandas as pd
 
-    from .stats.plotting import plot_tree_level_hist_grid
+    from .stats.plotting import plot_tree_level_hist_grid, plot_tree_level_scatter_grid
     from .stats.tree_stats import graph_tree_scalar_row
 
     out_dir = ensure_runner_out_dir(out_root, "tree_stats")
@@ -59,6 +59,15 @@ def run_tree_stats(
     scalar_df = pd.concat(scalar_frames, ignore_index=True)
     out_path = out_dir / "treelevel_hist.png"
     plot_tree_level_hist_grid(
+        scalar_df,
+        metrics=TREE_LEVEL_METRICS,
+        out_path=out_path,
+        ncols=ncols,
+    )
+    print(f"Wrote {out_path}")
+
+    out_path = out_dir / "treelevel_scatter.png"
+    plot_tree_level_scatter_grid(
         scalar_df,
         metrics=TREE_LEVEL_METRICS,
         out_path=out_path,
