@@ -9,6 +9,7 @@ Expansion.get_loss passes as C_0. Components are ordered (forward, sideways, axi
 Outputs per-axis mean/std/skew/kurtosis, covariance/correlation, offset-norm stats, the
 expansion-label balance, and saves marginal histograms + a 3D scatter to a PNG.
 """
+import argparse
 import os
 import random
 import sys
@@ -23,15 +24,46 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+# Ensure repository root is on sys.path when running the script directly.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 import graph_generation as gg
 from utils.data_loading import load_swc_graph, nx_graph_to_adj_pos
 
-DATA = Path("/Users/umer/Documents/neurons_final/train")
-POS_SCALE = 45.1
 N_GRAPHS = int(os.environ.get("N_GRAPHS", "400"))
 BS = 16
 SEED = 0
-OUT = Path(__file__).resolve().parent.parent / "c0_distribution.png"
+
+# SO(2) symmetry axis: neurons use y, trees use z. The axial (3rd) local-frame
+# component is the offset projected onto this axis.
+_AXES = {"x": (1.0, 0.0, 0.0), "y": (0.0, 1.0, 0.0), "z": (0.0, 0.0, 1.0)}
+
+
+def parse_args():
+    ap = argparse.ArgumentParser(
+        description="Empirical local-frame C_0 distribution a flow-matching prior must match."
+    )
+    ap.add_argument(
+        "--data-dir", type=Path,
+        default=Path("/Users/umer/Documents/neurons_final/train"),
+        help="Directory of training SWC files (default: neuron train set).",
+    )
+    ap.add_argument(
+        "--pos-scale", type=float, default=45.1,
+        help="pos_scale_factor: positions are divided by this before geometry "
+             "(default 45.1, neurons). Use 1.0 to inspect raw, unscaled C_0.",
+    )
+    ap.add_argument(
+        "--axis", choices=("x", "y", "z"), default="y",
+        help="SO(2) symmetry axis: 'y' for neurons (default), 'z' for trees.",
+    )
+    ap.add_argument(
+        "--out", type=Path, default=None,
+        help="Output PNG path (default: c0_distribution_<axis>.png at repo root).",
+    )
+    return ap.parse_args()
 
 
 class CaptureDiffusion(Module):
@@ -51,8 +83,9 @@ class CaptureDiffusion(Module):
         return z, z
 
 
-def _load_graphs():
-    files = [f for f in sorted(DATA.iterdir()) if f.suffix == ".swc"]
+def _load_graphs(data_dir):
+    files = [f for f in sorted(data_dir.iterdir())
+             if f.is_file() and f.name.endswith(".swc") and not f.name.startswith("._")]
     rng = random.Random(SEED)
     rng.shuffle(files)
     files = files[:N_GRAPHS]
@@ -76,11 +109,17 @@ def _moments(x):
 
 
 def main():
-    graphs = _load_graphs()
+    args = parse_args()
+    pos_scale = args.pos_scale
+    so2_axis = _AXES[args.axis]
+    axial_label = f"axial({args.axis}=uhat)"
+    out = args.out or (Path(__file__).resolve().parent.parent / f"c0_distribution_{args.axis}.png")
+
+    graphs = _load_graphs(args.data_dir)
     adjs, poses = [], []
     for G in graphs:
         A, P, _ = nx_graph_to_adj_pos(G)
-        poses.append(P / POS_SCALE)
+        poses.append(P / pos_scale)
         adjs.append(A)
 
     red_factory = gg.depth_reduction.DepthReductionFactory(
@@ -88,10 +127,10 @@ def main():
     )
     ds = gg.data.PrecomputedRedDataset(adjs=adjs, poses=poses, red_factory=red_factory, tmds=None)
 
-    # For neurons uhat is the y-axis (so2_axis=[0,1,0]); the local frame depends on it.
+    # The local frame depends on uhat: neurons use the y-axis, trees the z-axis.
     model = gg.model.SO2_EGNN_Network(
         n_layers=2, feats_dim=4, pos_dim=3, m_dim=16, edge_attr_dim=1,
-        so2_axis=(0.0, 1.0, 0.0),
+        so2_axis=so2_axis,
     )
     cap = CaptureDiffusion()
     method = gg.method.Expansion(diffusion=cap)
@@ -113,7 +152,7 @@ def main():
     C = th.cat(cap.C, 0).numpy()          # [M, 3] (forward, sideways, axial)
     E = th.cat(cap.E, 0).numpy()          # [M]
     M = C.shape[0]
-    axes = ["forward", "sideways", "axial(y=uhat)"]
+    axes = ["forward", "sideways", axial_label]
 
     mu, sd, skew, kurt = _moments(C)
     norms = np.linalg.norm(C, axis=1)
@@ -121,8 +160,8 @@ def main():
     corr = np.corrcoef(C.T)
 
     print("\n" + "=" * 70)
-    print(f"C_0 distribution over {M} leaf offsets from {len(graphs)} neurons")
-    print(f"(positions scaled by 1/{POS_SCALE}; depth reduction; local frame)")
+    print(f"C_0 distribution over {M} leaf offsets from {len(graphs)} graphs")
+    print(f"(positions scaled by 1/{pos_scale}; depth reduction; local frame; uhat={args.axis})")
     print("=" * 70)
     print(f"{'axis':<12}{'mean':>10}{'std':>10}{'skew':>10}{'kurtosis':>10}")
     for k, ax in enumerate(axes):
@@ -157,10 +196,10 @@ def main():
     a4.set_title(f"|C| offset norm\nmean={norms.mean():.3f}")
     a4.axvline(np.sqrt(3), color="r", ls="--", lw=1, label="E|N(0,1)³|≈√3")
     a4.legend(fontsize=7)
-    fig.suptitle(f"Local-frame child offset C_0 — {M} offsets, {len(graphs)} neurons (scale 1/{POS_SCALE})")
+    fig.suptitle(f"Local-frame child offset C_0 — {M} offsets, {len(graphs)} graphs (scale 1/{pos_scale}, uhat={args.axis})")
     fig.tight_layout()
-    fig.savefig(OUT, dpi=120)
-    print(f"\nSaved plot to {OUT}")
+    fig.savefig(out, dpi=120)
+    print(f"\nSaved plot to {out}")
 
 
 if __name__ == "__main__":

@@ -5,6 +5,8 @@ prior_std_pos: [0.74, 0.61, 0.83]  # per-axis prior std [forward, sideways, axia
                      # null -> isotropic prior_std. Dataset-specific (do NOT hardcode here).
                      # Neuron values (÷45.1, ~800 graphs): [0.74, 0.61, 0.83] -- set via CLI
                      # override 'diffusion.prior_std_pos=[0.74,0.61,0.83]' for neuron runs.
+                     # Tree values (÷0.5, ~1000 graphs, z-axis): [0.57, 0.51, 1.70] -- override
+                     # 'diffusion.prior_std_pos=[0.57,0.51,1.70]' for tree runs.
 time_dist: "uniform" # "uniform" | "beta"
 beta_a: 2.0
 beta_b: 1.0
