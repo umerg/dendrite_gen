@@ -5,7 +5,13 @@ from __future__ import annotations
 import argparse
 
 from .common import add_shared_arguments, load_plot_context
-from .run_cylinder_trees import run_cylinder_trees
+from .run_cylinder_trees import (
+    DEFAULT_PLOTLY_TEXTURE,
+    DEFAULT_PLOTLY_TEXTURE_MAX_AXIAL_SEGMENTS,
+    DEFAULT_PLOTLY_TEXTURE_STRENGTH,
+    DEFAULT_PLOTLY_TEXTURE_TARGET_LENGTH_SCALE,
+    run_cylinder_trees,
+)
 from .run_distribution_stats import run_distribution_stats
 from .run_qualitative import ALL_QUALITATIVE_PROJECTIONS, QUALITATIVE_FIGURES, run_qualitative
 from .run_tmd_figures import (
@@ -58,7 +64,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--cylinder-segments",
         type=int,
-        default=16,
+        default=8,
         help="Number of radial segments per branch cylinder.",
     )
     parser.add_argument(
@@ -168,6 +174,40 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=10,
         help="Plotly joint sphere mesh resolution for optional cylinder renderings.",
+    )
+    parser.add_argument(
+        "--cylinder-plotly-texture",
+        choices=["none", "bark"],
+        default=DEFAULT_PLOTLY_TEXTURE,
+        help="Procedural Plotly branch texture for optional cylinder renderings.",
+    )
+    parser.add_argument(
+        "--cylinder-plotly-texture-strength",
+        type=float,
+        default=DEFAULT_PLOTLY_TEXTURE_STRENGTH,
+        help="Strength of the procedural Plotly branch texture for optional cylinder renderings.",
+    )
+    parser.add_argument(
+        "--cylinder-plotly-texture-target-length-scale",
+        type=float,
+        default=DEFAULT_PLOTLY_TEXTURE_TARGET_LENGTH_SCALE,
+        help=(
+            "Target optional Plotly bark cell length as a multiple of the "
+            "graph's median edge length."
+        ),
+    )
+    parser.add_argument(
+        "--cylinder-plotly-texture-target-aspect",
+        type=float,
+        default=argparse.SUPPRESS,
+        dest="cylinder_plotly_texture_target_length_scale",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--cylinder-plotly-texture-max-axial-segments",
+        type=int,
+        default=DEFAULT_PLOTLY_TEXTURE_MAX_AXIAL_SEGMENTS,
+        help="Maximum axial bark texture cells per original branch edge.",
     )
     parser.add_argument(
         "--tmd-filtrations",
@@ -316,6 +356,10 @@ def main() -> None:
             show_joints=not args.cylinder_no_joints,
             joint_scale=args.cylinder_joint_scale,
             joint_segments=args.cylinder_joint_segments,
+            plotly_texture=args.cylinder_plotly_texture,
+            plotly_texture_strength=args.cylinder_plotly_texture_strength,
+            plotly_texture_target_length_scale=args.cylinder_plotly_texture_target_length_scale,
+            plotly_texture_max_axial_segments=args.cylinder_plotly_texture_max_axial_segments,
         )
     run_tree_stats(
         context,

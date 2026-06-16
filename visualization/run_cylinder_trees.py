@@ -7,11 +7,18 @@ from pathlib import Path
 from typing import Sequence
 
 from .common import PlotContext, add_shared_arguments, ensure_runner_out_dir, load_plot_context
+from .qualitative.plotly_defaults import (
+    DEFAULT_PLOTLY_TEXTURE,
+    DEFAULT_PLOTLY_TEXTURE_MAX_AXIAL_SEGMENTS,
+    DEFAULT_PLOTLY_TEXTURE_STRENGTH,
+    DEFAULT_PLOTLY_TEXTURE_TARGET_LENGTH_SCALE,
+)
 from .utils.styles import DEFAULT_3D_ANGLES
 
 
 CYLINDER_PLOT_MODES = ("pair", "gt", "pred", "all")
 CYLINDER_BACKENDS = ("matplotlib", "pyvista", "plotly")
+CYLINDER_PLOTLY_TEXTURES = ("none", "bark")
 
 
 def _angle_tag(elev: float, azim: float) -> str:
@@ -24,7 +31,7 @@ def run_cylinder_trees(
     out_root: Path,
     plot_mode: str = "pair",
     angles: Sequence[tuple[float, float]] = (DEFAULT_3D_ANGLES[0],),
-    segments: int = 16,
+    segments: int = 5,
     radius_attr: str = "radius",
     radius_scale: float = 1.0,
     default_radius: float = 1.0,
@@ -45,6 +52,10 @@ def run_cylinder_trees(
     show_joints: bool = True,
     joint_scale: float = 1.05,
     joint_segments: int = 10,
+    plotly_texture: str = DEFAULT_PLOTLY_TEXTURE,
+    plotly_texture_strength: float = DEFAULT_PLOTLY_TEXTURE_STRENGTH,
+    plotly_texture_target_length_scale: float = DEFAULT_PLOTLY_TEXTURE_TARGET_LENGTH_SCALE,
+    plotly_texture_max_axial_segments: int = DEFAULT_PLOTLY_TEXTURE_MAX_AXIAL_SEGMENTS,
 ) -> None:
     """Render selected GT/pred pairs as cylinder models."""
     from .geometry.curves import with_curved_branches
@@ -54,6 +65,8 @@ def run_cylinder_trees(
         raise ValueError(f"Unsupported cylinder plot mode '{plot_mode}'.")
     if backend not in CYLINDER_BACKENDS:
         raise ValueError(f"Unsupported cylinder backend '{backend}'.")
+    if plotly_texture not in CYLINDER_PLOTLY_TEXTURES:
+        raise ValueError(f"Unsupported Plotly texture '{plotly_texture}'.")
 
     if backend == "plotly":
         from .qualitative.plots_3d_plotly import (
@@ -141,6 +154,10 @@ def run_cylinder_trees(
                     show_joints=show_joints,
                     joint_scale=joint_scale,
                     joint_segments=joint_segments,
+                    plotly_texture=plotly_texture,
+                    plotly_texture_strength=plotly_texture_strength,
+                    plotly_texture_target_length_scale=plotly_texture_target_length_scale,
+                    plotly_texture_max_axial_segments=plotly_texture_max_axial_segments,
                 )
 
             if plot_mode in {"pair", "all"}:
@@ -332,6 +349,40 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=10,
         help="Plotly joint sphere mesh resolution.",
     )
+    parser.add_argument(
+        "--plotly-texture",
+        choices=CYLINDER_PLOTLY_TEXTURES,
+        default=DEFAULT_PLOTLY_TEXTURE,
+        help="Procedural Plotly branch texture. Use 'none' for flat branch color.",
+    )
+    parser.add_argument(
+        "--plotly-texture-strength",
+        type=float,
+        default=DEFAULT_PLOTLY_TEXTURE_STRENGTH,
+        help="Strength of the procedural Plotly branch texture.",
+    )
+    parser.add_argument(
+        "--plotly-texture-target-length-scale",
+        type=float,
+        default=DEFAULT_PLOTLY_TEXTURE_TARGET_LENGTH_SCALE,
+        help=(
+            "Target Plotly bark cell length as a multiple of the graph's "
+            "median edge length; lower values make shorter trunk cells."
+        ),
+    )
+    parser.add_argument(
+        "--plotly-texture-target-aspect",
+        type=float,
+        default=argparse.SUPPRESS,
+        dest="plotly_texture_target_length_scale",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--plotly-texture-max-axial-segments",
+        type=int,
+        default=DEFAULT_PLOTLY_TEXTURE_MAX_AXIAL_SEGMENTS,
+        help="Maximum axial bark texture cells per original branch edge.",
+    )
     return parser
 
 
@@ -371,6 +422,10 @@ def main() -> None:
         show_joints=not args.no_joints,
         joint_scale=args.joint_scale,
         joint_segments=args.joint_segments,
+        plotly_texture=args.plotly_texture,
+        plotly_texture_strength=args.plotly_texture_strength,
+        plotly_texture_target_length_scale=args.plotly_texture_target_length_scale,
+        plotly_texture_max_axial_segments=args.plotly_texture_max_axial_segments,
     )
 
 

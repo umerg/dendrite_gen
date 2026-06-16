@@ -125,7 +125,16 @@ will fail before creating a VTK window.
 For an interactive browser view that can be rotated, use `--backend plotly`.
 This writes self-contained `.html` files to `cylinders_plotly/`. Plotly
 renderings add small joint spheres at endpoints and branchpoints by default;
-use `--no-joints` to render only the cylinder frustums.
+use `--no-joints` to render only the cylinder frustums. Plotly branch meshes
+also use a procedural bark-like color texture by default; use
+`--plotly-texture none` for a flat branch color, or tune it with
+`--plotly-texture-strength`, which controls the contrast of the bark palette.
+Strength values less than or equal to zero disable the texture path and render
+flat brown branches even when `--plotly-texture bark` is selected.
+Bark texture cells are subdivided in proportion to edge length using the
+graph's median edge length as the default cell size; lower
+`--plotly-texture-target-length-scale` values make shorter cells, which is
+useful when the main trunk looks too coarsely segmented.
 
 Curved branch centerlines are available as an explicit visualization-only
 option:
