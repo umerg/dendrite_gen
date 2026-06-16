@@ -8,6 +8,11 @@ from typing import Sequence
 
 from .common import PlotContext, add_shared_arguments, ensure_runner_out_dir, load_plot_context
 from .qualitative.plotly_defaults import (
+    DEFAULT_PLOTLY_LEAF_COUNT,
+    DEFAULT_PLOTLY_LEAF_OPACITY,
+    DEFAULT_PLOTLY_LEAF_SCALE,
+    DEFAULT_PLOTLY_LEAF_SEED,
+    DEFAULT_PLOTLY_LEAVES,
     DEFAULT_PLOTLY_TEXTURE,
     DEFAULT_PLOTLY_TEXTURE_MAX_AXIAL_SEGMENTS,
     DEFAULT_PLOTLY_TEXTURE_STRENGTH,
@@ -56,6 +61,11 @@ def run_cylinder_trees(
     plotly_texture_strength: float = DEFAULT_PLOTLY_TEXTURE_STRENGTH,
     plotly_texture_target_length_scale: float = DEFAULT_PLOTLY_TEXTURE_TARGET_LENGTH_SCALE,
     plotly_texture_max_axial_segments: int = DEFAULT_PLOTLY_TEXTURE_MAX_AXIAL_SEGMENTS,
+    plotly_leaves: bool = DEFAULT_PLOTLY_LEAVES,
+    plotly_leaf_count: int = DEFAULT_PLOTLY_LEAF_COUNT,
+    plotly_leaf_opacity: float = DEFAULT_PLOTLY_LEAF_OPACITY,
+    plotly_leaf_scale: float = DEFAULT_PLOTLY_LEAF_SCALE,
+    plotly_leaf_seed: int = DEFAULT_PLOTLY_LEAF_SEED,
 ) -> None:
     """Render selected GT/pred pairs as cylinder models."""
     from .geometry.curves import with_curved_branches
@@ -95,6 +105,8 @@ def run_cylinder_trees(
 
     if curve_branches:
         out_dir_name = f"{out_dir_name}_curved"
+    if backend == "plotly" and plotly_leaves:
+        out_dir_name = f"{out_dir_name}_leaves"
     out_dir = ensure_runner_out_dir(out_root, out_dir_name)
 
     for pair in context.selected_pairs:
@@ -158,6 +170,11 @@ def run_cylinder_trees(
                     plotly_texture_strength=plotly_texture_strength,
                     plotly_texture_target_length_scale=plotly_texture_target_length_scale,
                     plotly_texture_max_axial_segments=plotly_texture_max_axial_segments,
+                    plotly_leaves=plotly_leaves,
+                    plotly_leaf_count=plotly_leaf_count,
+                    plotly_leaf_opacity=plotly_leaf_opacity,
+                    plotly_leaf_scale=plotly_leaf_scale,
+                    plotly_leaf_seed=plotly_leaf_seed,
                 )
 
             if plot_mode in {"pair", "all"}:
@@ -383,6 +400,39 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=DEFAULT_PLOTLY_TEXTURE_MAX_AXIAL_SEGMENTS,
         help="Maximum axial bark texture cells per original branch edge.",
     )
+    parser.add_argument(
+        "--plotly-leaves",
+        action="store_true",
+        default=DEFAULT_PLOTLY_LEAVES,
+        help="Add translucent low-poly leaf canopy polyhedra to Plotly renderings.",
+    )
+    parser.add_argument(
+        "--plotly-leaf-count",
+        type=int,
+        default=DEFAULT_PLOTLY_LEAF_COUNT,
+        help=(
+            "Requested number of low-poly leaf blobs. Terminal tips are partitioned "
+            "into this many coverage groups when possible."
+        ),
+    )
+    parser.add_argument(
+        "--plotly-leaf-opacity",
+        type=float,
+        default=DEFAULT_PLOTLY_LEAF_OPACITY,
+        help="Opacity of the translucent Plotly leaf canopy polyhedra.",
+    )
+    parser.add_argument(
+        "--plotly-leaf-scale",
+        type=float,
+        default=DEFAULT_PLOTLY_LEAF_SCALE,
+        help="Size multiplier for Plotly low-poly leaf canopy polyhedra.",
+    )
+    parser.add_argument(
+        "--plotly-leaf-seed",
+        type=int,
+        default=DEFAULT_PLOTLY_LEAF_SEED,
+        help="Seed for deterministic Plotly leaf polyhedron placement.",
+    )
     return parser
 
 
@@ -426,6 +476,11 @@ def main() -> None:
         plotly_texture_strength=args.plotly_texture_strength,
         plotly_texture_target_length_scale=args.plotly_texture_target_length_scale,
         plotly_texture_max_axial_segments=args.plotly_texture_max_axial_segments,
+        plotly_leaves=args.plotly_leaves,
+        plotly_leaf_count=args.plotly_leaf_count,
+        plotly_leaf_opacity=args.plotly_leaf_opacity,
+        plotly_leaf_scale=args.plotly_leaf_scale,
+        plotly_leaf_seed=args.plotly_leaf_seed,
     )
 
 

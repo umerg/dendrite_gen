@@ -11,6 +11,11 @@ from plotly.subplots import make_subplots
 
 from .plots_3d import BRANCH_COLOR, compute_node_radii
 from .plotly_defaults import (
+    DEFAULT_PLOTLY_LEAF_COUNT,
+    DEFAULT_PLOTLY_LEAF_OPACITY,
+    DEFAULT_PLOTLY_LEAF_SCALE,
+    DEFAULT_PLOTLY_LEAF_SEED,
+    DEFAULT_PLOTLY_LEAVES,
     DEFAULT_PLOTLY_TEXTURE,
     DEFAULT_PLOTLY_TEXTURE_MAX_AXIAL_SEGMENTS,
     DEFAULT_PLOTLY_TEXTURE_STRENGTH,
@@ -58,6 +63,62 @@ BARK_COLORSCALE = [
     [0.75, "#b77738"],
     [1.0, "#e09946"],
 ]
+
+LEAF_COLORSCALE = [
+    [0.0, "#405f2d"],
+    [0.35, "#5f7f3f"],
+    [0.7, "#7f9b55"],
+    [1.0, "#a6b66f"],
+]
+LEAF_TRACE_NAME = "Low-poly leaves"
+LEAF_OPACITY_SLIDER_VALUES = tuple(round(value, 2) for value in np.linspace(0.0, 0.85, 18))
+
+LEAF_POLYHEDRON_VERTICES = np.array(
+    [
+        [-1.0, 1.61803398875, 0.0],
+        [1.0, 1.61803398875, 0.0],
+        [-1.0, -1.61803398875, 0.0],
+        [1.0, -1.61803398875, 0.0],
+        [0.0, -1.0, 1.61803398875],
+        [0.0, 1.0, 1.61803398875],
+        [0.0, -1.0, -1.61803398875],
+        [0.0, 1.0, -1.61803398875],
+        [1.61803398875, 0.0, -1.0],
+        [1.61803398875, 0.0, 1.0],
+        [-1.61803398875, 0.0, -1.0],
+        [-1.61803398875, 0.0, 1.0],
+    ],
+    dtype=float,
+)
+LEAF_POLYHEDRON_VERTICES /= np.linalg.norm(
+    LEAF_POLYHEDRON_VERTICES,
+    axis=1,
+    keepdims=True,
+)
+LEAF_POLYHEDRON_FACES = [
+    (0, 11, 5),
+    (0, 5, 1),
+    (0, 1, 7),
+    (0, 7, 10),
+    (0, 10, 11),
+    (1, 5, 9),
+    (5, 11, 4),
+    (11, 10, 2),
+    (10, 7, 6),
+    (7, 1, 8),
+    (3, 9, 4),
+    (3, 4, 2),
+    (3, 2, 6),
+    (3, 6, 8),
+    (3, 8, 9),
+    (4, 9, 5),
+    (2, 4, 11),
+    (6, 2, 10),
+    (8, 6, 7),
+    (9, 8, 1),
+]
+
+
 def _hex_to_rgb01(color: str) -> np.ndarray:
     value = color.strip()
     if value.startswith("#") and len(value) == 7:
@@ -143,6 +204,482 @@ def _texture_axial_segment_count(
     target_length = max(float(texture_target_length), 1e-9)
     adaptive_count = int(np.ceil(max(float(length), 0.0) / target_length))
     return max(1, min(max(int(texture_max_axial_segments), 1), adaptive_count))
+
+
+def _unit_vector(vector: np.ndarray, fallback: np.ndarray) -> np.ndarray:
+    arr = np.asarray(vector, dtype=float)
+    norm = float(np.linalg.norm(arr))
+    if norm <= 1e-12:
+        fallback_arr = np.asarray(fallback, dtype=float)
+        fallback_norm = float(np.linalg.norm(fallback_arr))
+        if fallback_norm <= 1e-12:
+            return np.array([0.0, 0.0, 1.0], dtype=float)
+        return fallback_arr / fallback_norm
+    return arr / norm
+
+
+def _resolve_leaf_root(graph: "nx.Graph", pos: dict[int, np.ndarray]) -> int | None:
+    graph_root = graph.graph.get("root")
+    if graph_root in graph and graph_root in pos:
+        return graph_root
+    if 0 in graph and 0 in pos:
+        return 0
+    if 1 in graph and 1 in pos:
+        return 1
+    if pos:
+        return min(pos, key=lambda node: (float(pos[node][2]), str(node)))
+    return None
+
+
+def _graph_path_distances(graph: "nx.Graph", pos: dict[int, np.ndarray]) -> dict[int, float]:
+    distances: dict[int, float] = {}
+    root = _resolve_leaf_root(graph, pos)
+    starts = []
+    if root is not None:
+        starts.append(root)
+    starts.extend(sorted((node for node in graph.nodes if node in pos), key=str))
+
+    for start in starts:
+        if start in distances or start not in pos:
+            continue
+        distances[start] = 0.0
+        queue = [start]
+        for node in queue:
+            for neighbor in sorted(graph.neighbors(node), key=str):
+                if neighbor in distances or neighbor not in pos:
+                    continue
+                edge_length = float(np.linalg.norm(pos[node] - pos[neighbor]))
+                distances[neighbor] = distances[node] + max(edge_length, 1e-12)
+                queue.append(neighbor)
+    return distances
+
+
+def _leaf_tip_nodes(graph: "nx.Graph", pos: dict[int, np.ndarray]) -> list[int]:
+    root = _resolve_leaf_root(graph, pos)
+    return sorted(
+        [
+            node
+            for node in graph.nodes
+            if node in pos and node != root and graph.degree[node] <= 1
+        ],
+        key=str,
+    )
+
+
+def _leaf_anchor_nodes(
+    graph: "nx.Graph",
+    pos: dict[int, np.ndarray],
+    *,
+    leaf_count: int,
+    seed: int,
+) -> list[int]:
+    requested_count = max(int(leaf_count), 0)
+    if requested_count <= 0:
+        return []
+
+    nodes = [node for node in graph.nodes if node in pos]
+    if not nodes:
+        return []
+
+    tips = _leaf_tip_nodes(graph, pos)
+    if tips:
+        return tips
+
+    all_points = np.stack([pos[node] for node in nodes], axis=0)
+    z_min = float(np.min(all_points[:, 2]))
+    z_range = max(float(np.ptp(all_points[:, 2])), 1e-12)
+    distances = _graph_path_distances(graph, pos)
+    max_distance = max([float(value) for value in distances.values()] or [1.0])
+    max_distance = max(max_distance, 1e-12)
+    root = _resolve_leaf_root(graph, pos)
+
+    scored: list[tuple[float, int]] = []
+    for node_index, node in enumerate(nodes):
+        if node == root and len(nodes) > 1:
+            continue
+        dist_norm = float(distances.get(node, 0.0)) / max_distance
+        height_norm = (float(pos[node][2]) - z_min) / z_range
+        tip_bonus = 0.20 if graph.degree[node] <= 1 else 0.0
+        branch_bonus = 0.08 if graph.degree[node] >= 3 else 0.0
+        jitter = 0.10 * _hash01(seed, node_index + 1, dist_norm, height_norm)
+        score = 0.52 * dist_norm + 0.34 * height_norm + tip_bonus + branch_bonus + jitter
+        scored.append((float(score), node))
+
+    if not scored:
+        return []
+
+    scored.sort(key=lambda item: (-item[0], str(item[1])))
+    candidate_count = min(len(scored), max(requested_count * 5, requested_count, 12))
+    candidates = [node for _, node in scored[:candidate_count]]
+
+    anchors: list[int] = []
+    for extra_index in range(requested_count):
+        draw = _hash01(seed, extra_index + 1, 91.0)
+        candidate_index = min(int((draw**1.7) * len(candidates)), len(candidates) - 1)
+        anchors.append(candidates[candidate_index])
+    return anchors
+
+
+def _leaf_anchor_groups(
+    anchors: list[int],
+    pos: dict[int, np.ndarray],
+    *,
+    blob_count: int,
+    seed: int,
+) -> list[list[int]]:
+    if not anchors:
+        return []
+
+    requested_count = max(int(blob_count), 1)
+    if requested_count >= len(anchors):
+        groups = [[anchor] for anchor in anchors]
+        for extra_index in range(requested_count - len(anchors)):
+            anchor_index = min(
+                int(_hash01(seed, extra_index + 1, 307.0) * len(anchors)),
+                len(anchors) - 1,
+            )
+            groups.append([anchors[anchor_index]])
+        return groups
+
+    anchor_points = np.stack([pos[anchor] for anchor in anchors], axis=0)
+    selected_indices = [
+        int(
+            np.argmax(
+                anchor_points[:, 2]
+                + np.asarray(
+                    [
+                        0.01 * _hash01(seed, idx + 1, 311.0)
+                        for idx in range(len(anchors))
+                    ],
+                    dtype=float,
+                )
+            )
+        )
+    ]
+    while len(selected_indices) < requested_count:
+        selected_points = anchor_points[selected_indices]
+        distances = np.linalg.norm(
+            anchor_points[:, None, :] - selected_points[None, :, :],
+            axis=2,
+        )
+        min_distances = np.min(distances, axis=1)
+        min_distances[selected_indices] = -1.0
+        jitter = np.asarray(
+            [
+                0.08 * _hash01(seed, len(selected_indices) + 1, idx + 1, 313.0)
+                for idx in range(len(anchors))
+            ],
+            dtype=float,
+        )
+        selected_indices.append(int(np.argmax(min_distances * (1.0 + jitter))))
+
+    groups: list[list[int]] = [[] for _ in selected_indices]
+    coverage = np.zeros(len(anchors), dtype=bool)
+    selected_points = anchor_points[selected_indices]
+    for anchor_index, anchor in enumerate(anchors):
+        distances = np.linalg.norm(selected_points - anchor_points[anchor_index], axis=1)
+        group_index = int(np.argmin(distances))
+        groups[group_index].append(anchor)
+        coverage[anchor_index] = True
+
+    if not np.all(coverage):
+        for anchor_index, covered in enumerate(coverage):
+            if covered:
+                continue
+            distances = np.linalg.norm(selected_points - anchor_points[anchor_index], axis=1)
+            groups[int(np.argmin(distances))].append(anchors[anchor_index])
+
+    return [group for group in groups if group]
+
+
+def _leaf_cluster_points(
+    graph: "nx.Graph",
+    pos: dict[int, np.ndarray],
+    *,
+    anchors: list[int],
+    cluster_index: int,
+    seed: int,
+) -> np.ndarray:
+    valid_anchors = [anchor for anchor in anchors if anchor in pos]
+    if not valid_anchors:
+        return np.zeros((0, 3), dtype=float)
+
+    hop_limit = 5 + int(7 * _hash01(seed, cluster_index + 1, 17.0))
+    seen = set(valid_anchors)
+    queue = [(anchor, 0) for anchor in valid_anchors]
+    cluster_nodes: list[int] = []
+    for node, depth in queue:
+        if node in pos:
+            cluster_nodes.append(node)
+        if depth >= hop_limit:
+            continue
+        neighbors = [neighbor for neighbor in sorted(graph.neighbors(node), key=str) if neighbor in pos]
+        for neighbor_index, neighbor in enumerate(neighbors):
+            if neighbor in seen:
+                continue
+            grow_probability = 0.88 if depth == 0 else 0.78 - 0.045 * depth
+            if graph.degree[neighbor] != 2:
+                grow_probability += 0.10
+            grow_probability = float(np.clip(grow_probability, 0.28, 0.94))
+            if depth == 0 or _hash01(seed, cluster_index + 1, depth + 5, neighbor_index + 3) <= grow_probability:
+                seen.add(neighbor)
+                queue.append((neighbor, depth + 1))
+
+    if len(cluster_nodes) < 2:
+        for anchor in valid_anchors:
+            for neighbor in sorted(graph.neighbors(anchor), key=str):
+                if neighbor in pos and neighbor not in cluster_nodes:
+                    cluster_nodes.append(neighbor)
+                if len(cluster_nodes) >= 2:
+                    break
+            if len(cluster_nodes) >= 2:
+                break
+
+    return np.stack([pos[node] for node in cluster_nodes], axis=0)
+
+
+def _principal_axis(points: np.ndarray, fallback: np.ndarray) -> np.ndarray:
+    if len(points) < 2:
+        return _unit_vector(fallback, np.array([0.0, 0.0, 1.0], dtype=float))
+    centered = points - np.mean(points, axis=0)
+    try:
+        _, _, vh = np.linalg.svd(centered, full_matrices=False)
+    except np.linalg.LinAlgError:
+        return _unit_vector(fallback, np.array([0.0, 0.0, 1.0], dtype=float))
+    return _unit_vector(vh[0], fallback)
+
+
+def _leaf_cluster_frame(
+    cluster_points: np.ndarray,
+    outward: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    normal_axis = _unit_vector(outward, np.array([0.0, 0.0, 1.0], dtype=float))
+    branch_axis = _principal_axis(cluster_points, np.array([1.0, 0.0, 0.0], dtype=float))
+    branch_axis = branch_axis - float(np.dot(branch_axis, normal_axis)) * normal_axis
+    if float(np.linalg.norm(branch_axis)) <= 1e-12:
+        branch_axis, side_axis = _perpendicular_frame(normal_axis)
+    else:
+        branch_axis = _unit_vector(branch_axis, np.array([1.0, 0.0, 0.0], dtype=float))
+        side_axis = _unit_vector(
+            np.cross(normal_axis, branch_axis),
+            np.array([0.0, 1.0, 0.0], dtype=float),
+        )
+    normal_axis = _unit_vector(np.cross(branch_axis, side_axis), normal_axis)
+    if float(np.dot(normal_axis, outward)) < 0.0:
+        normal_axis = -normal_axis
+    return branch_axis, side_axis, normal_axis
+
+
+def _append_leaf_polyhedron_mesh(
+    vertices: list[np.ndarray],
+    triangles: list[tuple[int, int, int]],
+    facevalues: list[float],
+    *,
+    center: np.ndarray,
+    basis: np.ndarray,
+    axis_lengths: np.ndarray,
+    polyhedron_index: int,
+    seed: int,
+) -> None:
+    axis_lengths = np.maximum(np.asarray(axis_lengths, dtype=float), 1e-12)
+    offset = len(vertices)
+    for vertex_index, unit_vertex in enumerate(LEAF_POLYHEDRON_VERTICES):
+        radial_jitter = 0.78 + 0.36 * _hash01(seed, polyhedron_index + 1, vertex_index + 31)
+        local = np.asarray(unit_vertex, dtype=float) * axis_lengths * radial_jitter
+        vertices.append(center + basis @ local)
+
+    for face_index, face in enumerate(LEAF_POLYHEDRON_FACES):
+        triangles.append(
+            (
+                offset + int(face[0]),
+                offset + int(face[1]),
+                offset + int(face[2]),
+            )
+        )
+        facevalues.append(
+            float(0.18 + 0.74 * _hash01(seed, polyhedron_index + 1, face_index + 101))
+        )
+
+
+def _append_leaf_cluster_mesh(
+    vertices: list[np.ndarray],
+    triangles: list[tuple[int, int, int]],
+    facevalues: list[float],
+    *,
+    cluster_points: np.ndarray,
+    crown_center: np.ndarray,
+    bbox_diag: float,
+    cluster_index: int,
+    leaf_scale: float,
+    seed: int,
+) -> None:
+    if cluster_points.size == 0:
+        return
+
+    cluster_center = np.mean(cluster_points, axis=0)
+    distances = np.linalg.norm(cluster_points - cluster_center, axis=1)
+    spread = float(np.percentile(distances, 75)) if len(distances) else 0.0
+    scale = max(float(leaf_scale), 0.0)
+    min_radius = bbox_diag * 0.034 * scale
+    max_radius = bbox_diag * 0.155 * scale
+    base_radius = float(np.clip(spread * 2.25 + min_radius, min_radius, max_radius))
+    if base_radius <= 0.0:
+        return
+
+    outward = _unit_vector(
+        cluster_center - crown_center + np.array([0.0, 0.0, 0.18 * bbox_diag], dtype=float),
+        np.array([0.0, 0.0, 1.0], dtype=float),
+    )
+    branch_axis, side_axis, normal_axis = _leaf_cluster_frame(cluster_points, outward)
+    basis = np.stack([branch_axis, side_axis, normal_axis], axis=1)
+    local_points = (cluster_points - cluster_center) @ basis
+    local_extent = (
+        0.5 * np.ptp(local_points, axis=0)
+        if len(local_points) > 1
+        else np.zeros(3, dtype=float)
+    )
+    frame_u, frame_v = _perpendicular_frame(outward)
+
+    axis_floor = np.array([1.42, 1.12, 0.92], dtype=float) * base_radius
+    axis_lengths = np.maximum(
+        axis_floor,
+        np.array([0.88, 0.76, 0.62], dtype=float) * local_extent
+        + np.array([0.64, 0.54, 0.44], dtype=float) * base_radius,
+    )
+    axis_lengths = np.minimum(
+        axis_lengths,
+        np.array([0.32, 0.27, 0.22], dtype=float) * bbox_diag * max(float(leaf_scale), 0.0),
+    )
+
+    point_index = int(
+        min(
+            _hash01(seed, cluster_index + 1, 223.0) * len(cluster_points),
+            len(cluster_points) - 1,
+        )
+    )
+    anchor_point = cluster_points[point_index]
+    radial_angle = 2.0 * np.pi * _hash01(seed, cluster_index + 1, 227.0)
+    radial_offset = (
+        (0.10 + 0.26 * _hash01(seed, cluster_index + 1, 229.0))
+        * base_radius
+        * (np.cos(radial_angle) * frame_u + np.sin(radial_angle) * frame_v)
+    )
+    lift = (0.18 + 0.26 * _hash01(seed, cluster_index + 1, 233.0)) * base_radius
+    polyhedron_center = (
+        0.66 * cluster_center
+        + 0.34 * anchor_point
+        + radial_offset
+        + lift * outward
+    )
+
+    rotation = 2.0 * np.pi * _hash01(seed, cluster_index + 1, 239.0)
+    rotated_basis = np.stack(
+        [
+            np.cos(rotation) * branch_axis + np.sin(rotation) * side_axis,
+            -np.sin(rotation) * branch_axis + np.cos(rotation) * side_axis,
+            normal_axis,
+        ],
+        axis=1,
+    )
+    scale_jitter = np.array(
+        [
+            0.86 + 0.30 * _hash01(seed, cluster_index + 1, 251.0),
+            0.82 + 0.34 * _hash01(seed, cluster_index + 1, 257.0),
+            0.78 + 0.30 * _hash01(seed, cluster_index + 1, 263.0),
+        ],
+        dtype=float,
+    )
+    _append_leaf_polyhedron_mesh(
+        vertices,
+        triangles,
+        facevalues,
+        center=polyhedron_center,
+        basis=rotated_basis,
+        axis_lengths=axis_lengths * scale_jitter,
+        polyhedron_index=cluster_index,
+        seed=seed,
+    )
+
+
+def _leaf_mesh_trace(
+    graph: "nx.Graph",
+    pos: dict[int, np.ndarray],
+    *,
+    leaf_count: int,
+    leaf_opacity: float,
+    leaf_scale: float,
+    leaf_seed: int,
+) -> go.Mesh3d | None:
+    anchors = _leaf_anchor_nodes(
+        graph,
+        pos,
+        leaf_count=leaf_count,
+        seed=leaf_seed,
+    )
+    if not anchors:
+        return None
+
+    all_points = np.stack(list(pos.values()), axis=0)
+    bbox_diag = float(np.linalg.norm(np.ptp(all_points, axis=0)))
+    if bbox_diag <= 1e-12:
+        bbox_diag = 1.0
+    anchor_points = np.stack([pos[node] for node in anchors], axis=0)
+    crown_center = np.mean(anchor_points, axis=0)
+    anchor_groups = _leaf_anchor_groups(
+        anchors,
+        pos,
+        blob_count=leaf_count,
+        seed=leaf_seed,
+    )
+
+    vertices: list[np.ndarray] = []
+    triangles: list[tuple[int, int, int]] = []
+    facevalues: list[float] = []
+    for cluster_index, anchor_group in enumerate(anchor_groups):
+        cluster_points = _leaf_cluster_points(
+            graph,
+            pos,
+            anchors=anchor_group,
+            cluster_index=cluster_index,
+            seed=leaf_seed,
+        )
+        _append_leaf_cluster_mesh(
+            vertices,
+            triangles,
+            facevalues,
+            cluster_points=cluster_points,
+            crown_center=crown_center,
+            bbox_diag=bbox_diag,
+            cluster_index=cluster_index,
+            leaf_scale=leaf_scale,
+            seed=leaf_seed,
+        )
+
+    if not vertices or not triangles:
+        return None
+
+    pts = np.asarray(vertices, dtype=float)
+    faces = np.asarray(triangles, dtype=int)
+    return go.Mesh3d(
+        x=pts[:, 0],
+        y=pts[:, 1],
+        z=pts[:, 2],
+        i=faces[:, 0],
+        j=faces[:, 1],
+        k=faces[:, 2],
+        intensity=facevalues,
+        intensitymode="cell",
+        colorscale=LEAF_COLORSCALE,
+        cmin=0.0,
+        cmax=1.0,
+        opacity=float(np.clip(leaf_opacity, 0.0, 1.0)),
+        name=LEAF_TRACE_NAME,
+        flatshading=True,
+        lighting=dict(ambient=0.72, diffuse=0.54, specular=0.05, roughness=0.95),
+        lightposition=dict(x=100, y=200, z=300),
+        hoverinfo="skip",
+        showscale=False,
+    )
 
 
 def _append_frustum_mesh(
@@ -393,6 +930,11 @@ def _tree_mesh_traces(
     plotly_texture_strength: float,
     plotly_texture_target_length_scale: float,
     plotly_texture_max_axial_segments: int,
+    plotly_leaves: bool,
+    plotly_leaf_count: int,
+    plotly_leaf_opacity: float,
+    plotly_leaf_scale: float,
+    plotly_leaf_seed: int,
 ) -> tuple[list[go.Mesh3d | go.Scatter3d], dict[int, np.ndarray]]:
     pos = _graph_positions(graph)
     radii = compute_node_radii(
@@ -495,6 +1037,17 @@ def _tree_mesh_traces(
             traces.append(joint_trace)
     if branch_trace is not None:
         traces.append(branch_trace)
+    if plotly_leaves:
+        leaf_trace = _leaf_mesh_trace(
+            graph,
+            pos,
+            leaf_count=plotly_leaf_count,
+            leaf_opacity=plotly_leaf_opacity,
+            leaf_scale=plotly_leaf_scale,
+            leaf_seed=plotly_leaf_seed,
+        )
+        if leaf_trace is not None:
+            traces.append(leaf_trace)
 
     if not traces:
         coords = np.stack(list(pos.values()), axis=0)
@@ -555,6 +1108,47 @@ def _write_html(fig: go.Figure, out_path: Path) -> Path:
     return out_path
 
 
+def _add_leaf_opacity_slider(fig: go.Figure, *, initial_opacity: float) -> None:
+    leaf_trace_indices = [
+        idx
+        for idx, trace in enumerate(fig.data)
+        if getattr(trace, "name", None) == LEAF_TRACE_NAME
+    ]
+    if not leaf_trace_indices:
+        return
+
+    initial = float(np.clip(initial_opacity, 0.0, 1.0))
+    opacity_values = sorted(set(LEAF_OPACITY_SLIDER_VALUES + (round(initial, 2),)))
+    active_idx = int(np.argmin([abs(value - initial) for value in opacity_values]))
+    steps = [
+        dict(
+            method="restyle",
+            label=f"{value:.2f}",
+            args=[
+                {"opacity": [float(value)] * len(leaf_trace_indices)},
+                leaf_trace_indices,
+            ],
+        )
+        for value in opacity_values
+    ]
+    fig.update_layout(
+        sliders=[
+            dict(
+                active=active_idx,
+                currentvalue=dict(prefix="Leaf opacity: ", font=dict(size=12)),
+                len=0.62,
+                pad=dict(t=6, b=4),
+                x=0.19,
+                y=0.02,
+                xanchor="left",
+                yanchor="bottom",
+                steps=steps,
+            )
+        ],
+        margin=dict(b=56),
+    )
+
+
 def plot_tree_cylinder_single_plotly(
     graph: "nx.Graph",
     *,
@@ -576,6 +1170,11 @@ def plot_tree_cylinder_single_plotly(
     plotly_texture_strength: float = DEFAULT_PLOTLY_TEXTURE_STRENGTH,
     plotly_texture_target_length_scale: float = DEFAULT_PLOTLY_TEXTURE_TARGET_LENGTH_SCALE,
     plotly_texture_max_axial_segments: int = DEFAULT_PLOTLY_TEXTURE_MAX_AXIAL_SEGMENTS,
+    plotly_leaves: bool = DEFAULT_PLOTLY_LEAVES,
+    plotly_leaf_count: int = DEFAULT_PLOTLY_LEAF_COUNT,
+    plotly_leaf_opacity: float = DEFAULT_PLOTLY_LEAF_OPACITY,
+    plotly_leaf_scale: float = DEFAULT_PLOTLY_LEAF_SCALE,
+    plotly_leaf_seed: int = DEFAULT_PLOTLY_LEAF_SEED,
 ) -> Path:
     """Render one tree as an interactive Plotly HTML cylinder model."""
     traces, _ = _tree_mesh_traces(
@@ -594,6 +1193,11 @@ def plot_tree_cylinder_single_plotly(
         plotly_texture_strength=plotly_texture_strength,
         plotly_texture_target_length_scale=plotly_texture_target_length_scale,
         plotly_texture_max_axial_segments=plotly_texture_max_axial_segments,
+        plotly_leaves=plotly_leaves,
+        plotly_leaf_count=plotly_leaf_count,
+        plotly_leaf_opacity=plotly_leaf_opacity,
+        plotly_leaf_scale=plotly_leaf_scale,
+        plotly_leaf_seed=plotly_leaf_seed,
     )
     fig = go.Figure(data=traces)
     fig.update_layout(
@@ -604,6 +1208,7 @@ def plot_tree_cylinder_single_plotly(
         margin=dict(l=0, r=0, t=42 if title else 0, b=0),
         showlegend=False,
     )
+    _add_leaf_opacity_slider(fig, initial_opacity=plotly_leaf_opacity)
     return _write_html(fig, Path(out_path))
 
 
@@ -630,6 +1235,11 @@ def plot_tree_cylinder_pair_plotly(
     plotly_texture_strength: float = DEFAULT_PLOTLY_TEXTURE_STRENGTH,
     plotly_texture_target_length_scale: float = DEFAULT_PLOTLY_TEXTURE_TARGET_LENGTH_SCALE,
     plotly_texture_max_axial_segments: int = DEFAULT_PLOTLY_TEXTURE_MAX_AXIAL_SEGMENTS,
+    plotly_leaves: bool = DEFAULT_PLOTLY_LEAVES,
+    plotly_leaf_count: int = DEFAULT_PLOTLY_LEAF_COUNT,
+    plotly_leaf_opacity: float = DEFAULT_PLOTLY_LEAF_OPACITY,
+    plotly_leaf_scale: float = DEFAULT_PLOTLY_LEAF_SCALE,
+    plotly_leaf_seed: int = DEFAULT_PLOTLY_LEAF_SEED,
 ) -> Path:
     """Render a side-by-side interactive Plotly GT/pred comparison."""
     traces_gt, _ = _tree_mesh_traces(
@@ -648,6 +1258,11 @@ def plot_tree_cylinder_pair_plotly(
         plotly_texture_strength=plotly_texture_strength,
         plotly_texture_target_length_scale=plotly_texture_target_length_scale,
         plotly_texture_max_axial_segments=plotly_texture_max_axial_segments,
+        plotly_leaves=plotly_leaves,
+        plotly_leaf_count=plotly_leaf_count,
+        plotly_leaf_opacity=plotly_leaf_opacity,
+        plotly_leaf_scale=plotly_leaf_scale,
+        plotly_leaf_seed=plotly_leaf_seed,
     )
     traces_pred, _ = _tree_mesh_traces(
         pred,
@@ -665,6 +1280,11 @@ def plot_tree_cylinder_pair_plotly(
         plotly_texture_strength=plotly_texture_strength,
         plotly_texture_target_length_scale=plotly_texture_target_length_scale,
         plotly_texture_max_axial_segments=plotly_texture_max_axial_segments,
+        plotly_leaves=plotly_leaves,
+        plotly_leaf_count=plotly_leaf_count,
+        plotly_leaf_opacity=plotly_leaf_opacity,
+        plotly_leaf_scale=plotly_leaf_scale,
+        plotly_leaf_seed=plotly_leaf_seed,
     )
     fig = make_subplots(
         rows=1,
@@ -686,4 +1306,5 @@ def plot_tree_cylinder_pair_plotly(
         margin=dict(l=0, r=0, t=42, b=0),
         showlegend=False,
     )
+    _add_leaf_opacity_slider(fig, initial_opacity=plotly_leaf_opacity)
     return _write_html(fig, Path(out_path))

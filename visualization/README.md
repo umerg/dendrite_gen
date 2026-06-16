@@ -156,6 +156,19 @@ python3 -m dendrite_gen.visualization.run_cylinder_trees \
 before radius synthesis and rendering. It is off by default, and curved outputs
 are written to separate folders such as `cylinders_plotly_curved/`.
 
+For coarse translucent foliage in Plotly, add `--plotly-leaves`. This grows
+connected neighborhoods across several distal branch segments and draws larger
+overlapping low-poly leaf polyhedra around each neighborhood. Terminal tips are
+assigned into coverage groups, so `--plotly-leaf-count` controls the requested
+number of blobs while still covering every tip when possible. Lower counts make
+larger shared clumps; higher counts split the canopy into finer clumps. The
+feature is off by default; when enabled, Plotly outputs are written to a
+separate folder such as `cylinders_plotly_leaves/` or
+`cylinders_plotly_curved_leaves/`. Tune the canopy with
+`--plotly-leaf-count`, `--plotly-leaf-opacity`, `--plotly-leaf-scale`, and
+`--plotly-leaf-seed`. Leaf-enabled Plotly HTML files include an opacity slider
+that adjusts all leaf clumps in the browser.
+
 Generate one side-by-side 2D plot:
 
 ```bash

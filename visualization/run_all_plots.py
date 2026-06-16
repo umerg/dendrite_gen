@@ -6,6 +6,11 @@ import argparse
 
 from .common import add_shared_arguments, load_plot_context
 from .run_cylinder_trees import (
+    DEFAULT_PLOTLY_LEAF_COUNT,
+    DEFAULT_PLOTLY_LEAF_OPACITY,
+    DEFAULT_PLOTLY_LEAF_SCALE,
+    DEFAULT_PLOTLY_LEAF_SEED,
+    DEFAULT_PLOTLY_LEAVES,
     DEFAULT_PLOTLY_TEXTURE,
     DEFAULT_PLOTLY_TEXTURE_MAX_AXIAL_SEGMENTS,
     DEFAULT_PLOTLY_TEXTURE_STRENGTH,
@@ -210,6 +215,39 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Maximum axial bark texture cells per original branch edge.",
     )
     parser.add_argument(
+        "--cylinder-plotly-leaves",
+        action="store_true",
+        default=DEFAULT_PLOTLY_LEAVES,
+        help="Add translucent low-poly leaf canopy polyhedra to optional Plotly cylinder renderings.",
+    )
+    parser.add_argument(
+        "--cylinder-plotly-leaf-count",
+        type=int,
+        default=DEFAULT_PLOTLY_LEAF_COUNT,
+        help=(
+            "Requested number of low-poly leaf blobs for optional Plotly cylinder renderings. "
+            "Terminal tips are partitioned into this many coverage groups when possible."
+        ),
+    )
+    parser.add_argument(
+        "--cylinder-plotly-leaf-opacity",
+        type=float,
+        default=DEFAULT_PLOTLY_LEAF_OPACITY,
+        help="Opacity of the translucent Plotly leaf canopy polyhedra.",
+    )
+    parser.add_argument(
+        "--cylinder-plotly-leaf-scale",
+        type=float,
+        default=DEFAULT_PLOTLY_LEAF_SCALE,
+        help="Size multiplier for optional Plotly leaf canopy polyhedra.",
+    )
+    parser.add_argument(
+        "--cylinder-plotly-leaf-seed",
+        type=int,
+        default=DEFAULT_PLOTLY_LEAF_SEED,
+        help="Seed for deterministic optional Plotly leaf polyhedron placement.",
+    )
+    parser.add_argument(
         "--tmd-filtrations",
         nargs="+",
         default=list(DEFAULT_FILTRATIONS),
@@ -360,6 +398,11 @@ def main() -> None:
             plotly_texture_strength=args.cylinder_plotly_texture_strength,
             plotly_texture_target_length_scale=args.cylinder_plotly_texture_target_length_scale,
             plotly_texture_max_axial_segments=args.cylinder_plotly_texture_max_axial_segments,
+            plotly_leaves=args.cylinder_plotly_leaves,
+            plotly_leaf_count=args.cylinder_plotly_leaf_count,
+            plotly_leaf_opacity=args.cylinder_plotly_leaf_opacity,
+            plotly_leaf_scale=args.cylinder_plotly_leaf_scale,
+            plotly_leaf_seed=args.cylinder_plotly_leaf_seed,
         )
     run_tree_stats(
         context,
