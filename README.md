@@ -320,14 +320,14 @@ Post-training evaluation compares generated trees against ground-truth SWC morph
 # Basic evaluation (Chamfer distance + structural metrics)
 conda run -n NEURO2 python validation/chamfer.py \
     --gt-dir /path/to/swc/test \
-    --pred-pkl outputs/validation/step_30000.pkl \
+    --pred-pkl /path/to/predictions.pkl \
     --ema-key ema_1 \
     --output-json results.json
 
 # With plots and topology edit distance
 conda run -n NEURO2 python validation/chamfer.py \
     --gt-dir /path/to/swc/test \
-    --pred-pkl outputs/validation/step_30000.pkl \
+    --pred-pkl /path/to/predictions.pkl \
     --ema-key ema_1 \
     --plot-dir plots/ \
     --plot-max 12 \

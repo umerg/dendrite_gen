@@ -22,7 +22,7 @@ from .utils.styles import DEFAULT_3D_ANGLES
 
 
 CYLINDER_PLOT_MODES = ("pair", "gt", "pred", "all")
-CYLINDER_BACKENDS = ("matplotlib", "pyvista", "plotly")
+CYLINDER_BACKENDS = ("matplotlib", "plotly")
 CYLINDER_PLOTLY_TEXTURES = ("none", "bark")
 
 
@@ -51,7 +51,7 @@ def run_cylinder_trees(
     curve_wiggle_scale: float = 0.02,
     curve_momentum: float = 0.75,
     curve_seed: int = 0,
-    backend: str = "matplotlib",
+    backend: str = "plotly",
     show_axes: bool = False,
     cap_ends: bool = False,
     show_joints: bool = True,
@@ -86,14 +86,6 @@ def run_cylinder_trees(
 
         out_dir_name = "cylinders_plotly"
         file_ext = "html"
-    elif backend == "pyvista":
-        from .qualitative.plots_3d_pyvista import (
-            plot_tree_cylinder_pair_pyvista as plot_tree_cylinder_pair,
-            plot_tree_cylinder_single_pyvista as plot_tree_cylinder_single,
-        )
-
-        out_dir_name = "cylinders_pyvista"
-        file_ext = "png"
     else:
         from .qualitative.plots_3d import (
             plot_tree_cylinder_pair_3d as plot_tree_cylinder_pair,
@@ -178,16 +170,35 @@ def run_cylinder_trees(
                 )
 
             if plot_mode in {"pair", "all"}:
-                out_path = out_dir / f"{stem}_cylinder_pair_{tag}.{file_ext}"
-                plot_tree_cylinder_pair(
-                    gt_graph,
-                    pred_graph,
-                    out_path=out_path,
-                    title_gt=f"GT: {gt_path.name}",
-                    title_pred=f"Pred idx {pred_idx}",
-                    **common_kwargs,
-                )
-                print(f"Wrote {out_path}")
+                if backend == "plotly":
+                    gt_out_path = out_dir / f"{stem}_cylinder_pair_gt_{tag}.{file_ext}"
+                    plot_tree_cylinder_single(
+                        gt_graph,
+                        out_path=gt_out_path,
+                        title=f"GT: {gt_path.name}",
+                        **common_kwargs,
+                    )
+                    print(f"Wrote {gt_out_path}")
+
+                    pred_out_path = out_dir / f"{stem}_cylinder_pair_pred{pred_idx}_{tag}.{file_ext}"
+                    plot_tree_cylinder_single(
+                        pred_graph,
+                        out_path=pred_out_path,
+                        title=f"Pred idx {pred_idx}",
+                        **common_kwargs,
+                    )
+                    print(f"Wrote {pred_out_path}")
+                else:
+                    out_path = out_dir / f"{stem}_cylinder_pair_{tag}.{file_ext}"
+                    plot_tree_cylinder_pair(
+                        gt_graph,
+                        pred_graph,
+                        out_path=out_path,
+                        title_gt=f"GT: {gt_path.name}",
+                        title_pred=f"Pred idx {pred_idx}",
+                        **common_kwargs,
+                    )
+                    print(f"Wrote {out_path}")
 
             if plot_mode in {"gt", "all"}:
                 out_path = out_dir / f"{stem}_gt_cylinder_{tag}.{file_ext}"
@@ -251,8 +262,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--backend",
         choices=CYLINDER_BACKENDS,
-        default="matplotlib",
-        help="Rendering backend. Non-default backends write to backend-specific subfolders.",
+        default="plotly",
+        help="Rendering backend. Plotly writes interactive HTML; Matplotlib writes static PNGs.",
     )
     parser.add_argument(
         "--curve-branches",

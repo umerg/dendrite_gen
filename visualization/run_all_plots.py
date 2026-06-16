@@ -6,6 +6,7 @@ import argparse
 
 from .common import add_shared_arguments, load_plot_context
 from .run_cylinder_trees import (
+    CYLINDER_BACKENDS,
     DEFAULT_PLOTLY_LEAF_COUNT,
     DEFAULT_PLOTLY_LEAF_OPACITY,
     DEFAULT_PLOTLY_LEAF_SCALE,
@@ -74,8 +75,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--cylinder-backend",
-        choices=["matplotlib", "pyvista", "plotly"],
-        default="matplotlib",
+        choices=CYLINDER_BACKENDS,
+        default="plotly",
         help="Rendering backend for optional cylinder renderings.",
     )
     parser.add_argument(
