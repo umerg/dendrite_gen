@@ -62,6 +62,41 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Number of radial segments per branch cylinder.",
     )
     parser.add_argument(
+        "--cylinder-backend",
+        choices=["matplotlib", "pyvista", "plotly"],
+        default="matplotlib",
+        help="Rendering backend for optional cylinder renderings.",
+    )
+    parser.add_argument(
+        "--cylinder-curve-branches",
+        action="store_true",
+        help="Render optional cylinder branches as endpoint-preserving random curves.",
+    )
+    parser.add_argument(
+        "--cylinder-curve-subsegments",
+        type=int,
+        default=5,
+        help="Number of curved centerline subsegments per original branch edge.",
+    )
+    parser.add_argument(
+        "--cylinder-curve-wiggle-scale",
+        type=float,
+        default=0.02,
+        help="Curve wiggle amplitude as a fraction of branch path length.",
+    )
+    parser.add_argument(
+        "--cylinder-curve-momentum",
+        type=float,
+        default=0.75,
+        help="Memory factor for smooth optional cylinder curve noise.",
+    )
+    parser.add_argument(
+        "--cylinder-curve-seed",
+        type=int,
+        default=0,
+        help="Seed for deterministic optional cylinder branch curves.",
+    )
+    parser.add_argument(
         "--cylinder-radius-attr",
         type=str,
         default="radius",
@@ -82,7 +117,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--cylinder-synthesize-radii",
         action="store_true",
-        help="Synthesize visual radii for optional cylinder renderings instead of reading the radius attribute.",
+        help=(
+            "Synthesize visual radii for optional cylinder renderings instead of "
+            "reading the radius attribute."
+        ),
     )
     parser.add_argument(
         "--cylinder-twig-radius",
@@ -113,6 +151,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=1,
         help="Number of parent-child monotonicity passes after synthesized cylinder path smoothing.",
+    )
+    parser.add_argument(
+        "--cylinder-no-joints",
+        action="store_true",
+        help="Disable Plotly joint spheres for optional cylinder renderings.",
+    )
+    parser.add_argument(
+        "--cylinder-joint-scale",
+        type=float,
+        default=1.05,
+        help="Plotly joint sphere radius multiplier for optional cylinder renderings.",
+    )
+    parser.add_argument(
+        "--cylinder-joint-segments",
+        type=int,
+        default=10,
+        help="Plotly joint sphere mesh resolution for optional cylinder renderings.",
     )
     parser.add_argument(
         "--tmd-filtrations",
@@ -252,6 +307,15 @@ def main() -> None:
             pipe_exponent=args.cylinder_pipe_exponent,
             length_exponent=args.cylinder_length_exponent,
             radius_smoothing_passes=args.cylinder_radius_smoothing_passes,
+            curve_branches=args.cylinder_curve_branches,
+            curve_subsegments=args.cylinder_curve_subsegments,
+            curve_wiggle_scale=args.cylinder_curve_wiggle_scale,
+            curve_momentum=args.cylinder_curve_momentum,
+            curve_seed=args.cylinder_curve_seed,
+            backend=args.cylinder_backend,
+            show_joints=not args.cylinder_no_joints,
+            joint_scale=args.cylinder_joint_scale,
+            joint_segments=args.cylinder_joint_segments,
         )
     run_tree_stats(
         context,

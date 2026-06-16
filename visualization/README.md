@@ -116,6 +116,37 @@ The synthesis roots the graph, estimates downstream branch demand, smooths each
 root-to-tip path monotonically, and merges path predictions into a per-node
 render radius. These are visualization radii, not measured geometry.
 
+The default renderer is Matplotlib. To try the PyVista/VTK renderer, add
+`--backend pyvista`; those images are written to `cylinders_pyvista/` so they
+do not overwrite the Matplotlib outputs. PyVista rendering needs an OpenGL or
+OSMesa-capable plotting context; in a headless process without one, the runner
+will fail before creating a VTK window.
+
+For an interactive browser view that can be rotated, use `--backend plotly`.
+This writes self-contained `.html` files to `cylinders_plotly/`. Plotly
+renderings add small joint spheres at endpoints and branchpoints by default;
+use `--no-joints` to render only the cylinder frustums.
+
+Curved branch centerlines are available as an explicit visualization-only
+option:
+
+```bash
+python3 -m dendrite_gen.visualization.run_cylinder_trees \
+  --gt-dir /path/to/gt_swc \
+  --pred-pkl /path/to/validation/step_30000.pkl \
+  --ema-key ema_1 \
+  --max-pairs 3 \
+  --plot-mode gt \
+  --synthesize-radii \
+  --curve-branches \
+  --backend plotly \
+  --out-dir dendrite_gen/outputs/visualization
+```
+
+`--curve-branches` inserts smooth, endpoint-preserving random centerline points
+before radius synthesis and rendering. It is off by default, and curved outputs
+are written to separate folders such as `cylinders_plotly_curved/`.
+
 Generate one side-by-side 2D plot:
 
 ```bash

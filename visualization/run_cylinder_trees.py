@@ -11,6 +11,7 @@ from .utils.styles import DEFAULT_3D_ANGLES
 
 
 CYLINDER_PLOT_MODES = ("pair", "gt", "pred", "all")
+CYLINDER_BACKENDS = ("matplotlib", "pyvista", "plotly")
 
 
 def _angle_tag(elev: float, azim: float) -> str:
@@ -33,20 +34,56 @@ def run_cylinder_trees(
     pipe_exponent: float = 0.35,
     length_exponent: float = 0.12,
     radius_smoothing_passes: int = 1,
+    curve_branches: bool = False,
+    curve_subsegments: int = 5,
+    curve_wiggle_scale: float = 0.02,
+    curve_momentum: float = 0.75,
+    curve_seed: int = 0,
+    backend: str = "matplotlib",
     show_axes: bool = False,
     cap_ends: bool = False,
+    show_joints: bool = True,
+    joint_scale: float = 1.05,
+    joint_segments: int = 10,
 ) -> None:
     """Render selected GT/pred pairs as cylinder models."""
+    from .geometry.curves import with_curved_branches
     from .geometry.radii import SYNTHESIZED_RADIUS_ATTR, with_synthesized_radii
-    from .qualitative.plots_3d import (
-        plot_tree_cylinder_pair_3d,
-        plot_tree_cylinder_single_3d,
-    )
 
     if plot_mode not in CYLINDER_PLOT_MODES:
         raise ValueError(f"Unsupported cylinder plot mode '{plot_mode}'.")
+    if backend not in CYLINDER_BACKENDS:
+        raise ValueError(f"Unsupported cylinder backend '{backend}'.")
 
-    out_dir = ensure_runner_out_dir(out_root, "cylinders")
+    if backend == "plotly":
+        from .qualitative.plots_3d_plotly import (
+            plot_tree_cylinder_pair_plotly as plot_tree_cylinder_pair,
+            plot_tree_cylinder_single_plotly as plot_tree_cylinder_single,
+        )
+
+        out_dir_name = "cylinders_plotly"
+        file_ext = "html"
+    elif backend == "pyvista":
+        from .qualitative.plots_3d_pyvista import (
+            plot_tree_cylinder_pair_pyvista as plot_tree_cylinder_pair,
+            plot_tree_cylinder_single_pyvista as plot_tree_cylinder_single,
+        )
+
+        out_dir_name = "cylinders_pyvista"
+        file_ext = "png"
+    else:
+        from .qualitative.plots_3d import (
+            plot_tree_cylinder_pair_3d as plot_tree_cylinder_pair,
+            plot_tree_cylinder_single_3d as plot_tree_cylinder_single,
+        )
+
+        out_dir_name = "cylinders"
+        file_ext = "png"
+
+    if curve_branches:
+        out_dir_name = f"{out_dir_name}_curved"
+    out_dir = ensure_runner_out_dir(out_root, out_dir_name)
+
     for pair in context.selected_pairs:
         gt_idx = int(pair["gt_idx"])
         pred_idx = int(pair["pred_idx"])
@@ -55,6 +92,17 @@ def run_cylinder_trees(
         pred_graph = context.pred_graphs[pred_idx]
         stem = gt_path.stem
         render_radius_attr = radius_attr
+
+        if curve_branches:
+            curve_kwargs = dict(
+                subsegments=curve_subsegments,
+                wiggle_scale=curve_wiggle_scale,
+                momentum=curve_momentum,
+                seed=curve_seed,
+                radius_attrs=(radius_attr,),
+            )
+            gt_graph = with_curved_branches(gt_graph, **curve_kwargs)
+            pred_graph = with_curved_branches(pred_graph, **curve_kwargs)
 
         if synthesize_radii:
             synthesis_kwargs = dict(
@@ -88,10 +136,16 @@ def run_cylinder_trees(
                 show_axes=show_axes,
                 cap_ends=cap_ends,
             )
+            if backend == "plotly":
+                common_kwargs.update(
+                    show_joints=show_joints,
+                    joint_scale=joint_scale,
+                    joint_segments=joint_segments,
+                )
 
             if plot_mode in {"pair", "all"}:
-                out_path = out_dir / f"{stem}_cylinder_pair_{tag}.png"
-                plot_tree_cylinder_pair_3d(
+                out_path = out_dir / f"{stem}_cylinder_pair_{tag}.{file_ext}"
+                plot_tree_cylinder_pair(
                     gt_graph,
                     pred_graph,
                     out_path=out_path,
@@ -102,8 +156,8 @@ def run_cylinder_trees(
                 print(f"Wrote {out_path}")
 
             if plot_mode in {"gt", "all"}:
-                out_path = out_dir / f"{stem}_gt_cylinder_{tag}.png"
-                plot_tree_cylinder_single_3d(
+                out_path = out_dir / f"{stem}_gt_cylinder_{tag}.{file_ext}"
+                plot_tree_cylinder_single(
                     gt_graph,
                     out_path=out_path,
                     title=f"GT: {gt_path.name}",
@@ -112,8 +166,8 @@ def run_cylinder_trees(
                 print(f"Wrote {out_path}")
 
             if plot_mode in {"pred", "all"}:
-                out_path = out_dir / f"{stem}_pred{pred_idx}_cylinder_{tag}.png"
-                plot_tree_cylinder_single_3d(
+                out_path = out_dir / f"{stem}_pred{pred_idx}_cylinder_{tag}.{file_ext}"
+                plot_tree_cylinder_single(
                     pred_graph,
                     out_path=out_path,
                     title=f"Pred idx {pred_idx}",
@@ -161,6 +215,41 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Number of radial segments per branch cylinder.",
     )
     parser.add_argument(
+        "--backend",
+        choices=CYLINDER_BACKENDS,
+        default="matplotlib",
+        help="Rendering backend. Non-default backends write to backend-specific subfolders.",
+    )
+    parser.add_argument(
+        "--curve-branches",
+        action="store_true",
+        help="Render branch paths as smooth endpoint-preserving random curves.",
+    )
+    parser.add_argument(
+        "--curve-subsegments",
+        type=int,
+        default=5,
+        help="Number of curved centerline subsegments per original branch edge.",
+    )
+    parser.add_argument(
+        "--curve-wiggle-scale",
+        type=float,
+        default=0.02,
+        help="Curve wiggle amplitude as a fraction of branch path length.",
+    )
+    parser.add_argument(
+        "--curve-momentum",
+        type=float,
+        default=0.75,
+        help="Memory factor for smooth curve noise; larger values bend more coherently.",
+    )
+    parser.add_argument(
+        "--curve-seed",
+        type=int,
+        default=0,
+        help="Seed for deterministic branch curves.",
+    )
+    parser.add_argument(
         "--radius-attr",
         type=str,
         default="radius",
@@ -193,7 +282,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--twig-radius-scale",
         type=float,
         default=0.002,
-        help="Graph bounding-box diagonal fraction used as synthesized twig radius when --twig-radius is omitted.",
+        help=(
+            "Graph bounding-box diagonal fraction used as synthesized twig radius "
+            "when --twig-radius is omitted."
+        ),
     )
     parser.add_argument(
         "--pipe-exponent",
@@ -223,6 +315,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Close cylinder ends. Usually off to avoid visible internal seams.",
     )
+    parser.add_argument(
+        "--no-joints",
+        action="store_true",
+        help="Disable Plotly joint spheres at tree endpoints and branchpoints.",
+    )
+    parser.add_argument(
+        "--joint-scale",
+        type=float,
+        default=1.05,
+        help="Plotly joint sphere radius multiplier relative to the node radius.",
+    )
+    parser.add_argument(
+        "--joint-segments",
+        type=int,
+        default=10,
+        help="Plotly joint sphere mesh resolution.",
+    )
     return parser
 
 
@@ -251,8 +360,17 @@ def main() -> None:
         pipe_exponent=args.pipe_exponent,
         length_exponent=args.length_exponent,
         radius_smoothing_passes=args.radius_smoothing_passes,
+        curve_branches=args.curve_branches,
+        curve_subsegments=args.curve_subsegments,
+        curve_wiggle_scale=args.curve_wiggle_scale,
+        curve_momentum=args.curve_momentum,
+        curve_seed=args.curve_seed,
+        backend=args.backend,
         show_axes=args.show_axes,
         cap_ends=args.cap_ends,
+        show_joints=not args.no_joints,
+        joint_scale=args.joint_scale,
+        joint_segments=args.joint_segments,
     )
 
 
