@@ -21,6 +21,22 @@ The visualization runners assume:
 - optional EMA selection can be provided with `--ema-key`
 - GT and predicted graphs are paired by index order
 
+## Convert `.smol` Samples
+
+If you have a `.smol` sample dump and want something the visualization runners
+can read directly, convert it first:
+
+```bash
+python -m dendrite_gen.visualization.convert_smol_to_pred_pkl \
+  --smol-path /path/to/samples.smol \
+  --out-pkl /path/to/samples_converted.pkl
+```
+
+By default this writes a validation-style pickle under `ema_1`, keeps the
+largest connected component from each sample, chooses a root by highest node
+degree, recenters the tree to that root, and turns cyclic components into a
+single BFS spanning tree when needed.
+
 ## Run All Plots
 
 Generate the current validation figure set:
