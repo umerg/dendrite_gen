@@ -21,7 +21,7 @@ from .qualitative.plotly_defaults import (
 from .utils.styles import DEFAULT_3D_ANGLES
 
 
-CYLINDER_PLOT_MODES = ("pair", "gt", "pred", "all")
+CYLINDER_PLOT_MODES = ("pair", "gt", "pred")
 CYLINDER_BACKENDS = ("matplotlib", "plotly")
 CYLINDER_PLOTLY_TEXTURES = ("none", "bark")
 
@@ -169,9 +169,9 @@ def run_cylinder_trees(
                     plotly_leaf_seed=plotly_leaf_seed,
                 )
 
-            if plot_mode in {"pair", "all"}:
+            if plot_mode == "pair":
                 if backend == "plotly":
-                    gt_out_path = out_dir / f"{stem}_cylinder_pair_gt_{tag}.{file_ext}"
+                    gt_out_path = out_dir / f"{stem}_gt_cylinder_{tag}.{file_ext}"
                     plot_tree_cylinder_single(
                         gt_graph,
                         out_path=gt_out_path,
@@ -180,7 +180,7 @@ def run_cylinder_trees(
                     )
                     print(f"Wrote {gt_out_path}")
 
-                    pred_out_path = out_dir / f"{stem}_cylinder_pair_pred{pred_idx}_{tag}.{file_ext}"
+                    pred_out_path = out_dir / f"{stem}_pred{pred_idx}_cylinder_{tag}.{file_ext}"
                     plot_tree_cylinder_single(
                         pred_graph,
                         out_path=pred_out_path,
@@ -200,7 +200,7 @@ def run_cylinder_trees(
                     )
                     print(f"Wrote {out_path}")
 
-            if plot_mode in {"gt", "all"}:
+            if plot_mode == "gt":
                 out_path = out_dir / f"{stem}_gt_cylinder_{tag}.{file_ext}"
                 plot_tree_cylinder_single(
                     gt_graph,
@@ -210,7 +210,7 @@ def run_cylinder_trees(
                 )
                 print(f"Wrote {out_path}")
 
-            if plot_mode in {"pred", "all"}:
+            if plot_mode == "pred":
                 out_path = out_dir / f"{stem}_pred{pred_idx}_cylinder_{tag}.{file_ext}"
                 plot_tree_cylinder_single(
                     pred_graph,

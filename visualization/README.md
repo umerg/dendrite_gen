@@ -67,7 +67,10 @@ python -m dendrite_gen.visualization.run_cylinder_trees \
 
 Cylinder plots default to Plotly `.html` output. With Plotly, `--plot-mode pair`
 writes separate GT and prediction HTML files for each pair instead of a single
-side-by-side page.
+side-by-side page, using the same content-based names as `--plot-mode gt` and
+`--plot-mode pred`: `{stem}_gt_cylinder_{angle}.html` and
+`{stem}_pred{idx}_cylinder_{angle}.html`. The Matplotlib backend still writes a
+true side-by-side pair image as `{stem}_cylinder_pair_{angle}.png`.
 
 Cylinder rendering reads `node["radius"]` when available. Ground-truth SWC
 files loaded through the repo loader preserve the SWC radius column. Generated
