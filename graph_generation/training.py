@@ -15,6 +15,8 @@ from torch.optim import Adam
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from utils.tmd import compute_tmd_mixed
+from validation.dist_metrics import compute_distribution_metrics
+from validation.plot import plot_graph_grid_angles, DEFAULT_ANGLES
 
 # Optional / guarded imports (Hydra, OmegaConf, wandb)
 try:  # Hydra runtime config access
@@ -156,6 +158,14 @@ class Trainer:
         if cfg.training.resume:
             self.resume_from_checkpoint(cfg.training.resume)
             print(f"Resumed from step {self.step}, LR={self.optimizer.param_groups[0]['lr']}")
+            # Fork into a FRESH wandb run instead of rejoining the checkpoint's
+            # original run. Keeps the loaded model/optimizer/scheduler/step but
+            # drops the stored run_id so wandb.init() starts a new experiment —
+            # prevents a resumed run (e.g. branching off step 75k to test a config
+            # change) from overwriting the source run's logged history.
+            if getattr(cfg.wandb, "new_run", False):
+                print(f"[wandb] new_run=True -> forking a fresh wandb run (dropping run_id={self.run_id})")
+                self.run_id = None
         else:
             self.step = 0
             self.best_validation_scores = {beta: -1 for beta in cfg.ema.betas} # what are EMA betas? TODO
@@ -168,9 +178,18 @@ class Trainer:
                     project="tree_gen",
                     config=build_wandb_config(cfg),
                     name=cfg.name,
-                    resume=self.run_id,
+                    id=self.run_id,
+                    resume="allow" if self.run_id else None,
                 )
                 self.run_id = self.wandb_run.id
+                # Plot everything against our own training step instead of
+                # wandb's internal global step. On resume, wandb restores its
+                # internal step to the previous run's MAX logged step and
+                # silently drops any log() at an earlier/equal step ("ignoring
+                # partial history record"). Using a custom step metric makes
+                # records land immediately regardless of the resumed step.
+                self.wandb_run.define_metric("train_step")
+                self.wandb_run.define_metric("*", step_metric="train_step")
             except Exception as e:  # pragma: no cover
                 print(f"[wandb disabled] {e}")
                 self.wandb_run = None
@@ -330,6 +349,17 @@ class Trainer:
         _t0 = time()
         loss.backward()
         loss_terms["t_backward"] = time() - _t0
+
+        # Gradient-norm logging (always on) + optional clipping. clip_grad_norm_
+        # returns the PRE-clip total norm: with max_norm=inf it computes the norm
+        # without clipping (behavior unchanged when grad_clip_norm is null), and
+        # with a finite value it clips and still returns the pre-clip norm — so a
+        # single run both surfaces gradient spikes (training/grad_norm) and tames
+        # them. No AMP/GradScaler is in use, so no unscale_ is needed.
+        grad_clip = getattr(self.cfg.training, "grad_clip_norm", None)
+        max_norm = float(grad_clip) if grad_clip is not None else float("inf")
+        total_norm = th.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm)
+        loss_terms["grad_norm"] = float(total_norm)
 
         _t0 = time()
         self.optimizer.step()
@@ -503,6 +533,36 @@ class Trainer:
         _assert_geometric(eval_graphs)
         _assert_geometric(results["pred_graphs"])
 
+        # Generated graphs are unrooted; the root is materialized first and always
+        # lands at local index 0 (roots get the smallest global indices). Bifurcation
+        # angles, TMD and tree-edit distance all need G.graph["root"].
+        for G in results["pred_graphs"]:
+            if "root" not in G.graph or G.graph.get("root") not in G.nodes:
+                G.graph["root"] = 0 if G.number_of_nodes() > 0 else None
+
+        # Model SO(2) symmetry axis: extents/plots are measured relative to it
+        # (never hardcoded z). Shared by the dist metrics and the 3D plots below.
+        uhat_np = (
+            model.uhat.detach().cpu().numpy().reshape(-1)
+            if getattr(model, "uhat", None) is not None
+            else np.array([0.0, 0.0, 1.0])
+        )
+
+        # Distribution-level comparison of generated vs GT statistics (Wasserstein-1
+        # per stat + avg tree-edit distance). Logged as floats -> wandb scalars.
+        if getattr(self.cfg.validation, "enable_dist_metrics", True):
+            _t0_dist = time()
+            results["dist"] = compute_distribution_metrics(
+                results["pred_graphs"],
+                eval_graphs,
+                uhat=uhat_np,
+                ged_enabled=getattr(self.cfg.validation, "ged_enabled", True),
+                ged_timeout=getattr(self.cfg.validation, "ged_timeout", 5.0),
+            )
+            self.logger.info(
+                "[evaluate beta=%s] dist_metrics=%.1fs", beta, time() - _t0_dist
+            )
+
         # Metric computation gated
         enable_metrics = getattr(self.cfg.validation, 'enable_metrics', True)
         _t0_metrics = time()
@@ -535,80 +595,48 @@ class Trainer:
             beta, len(eval_graphs), _t_generation, _t_metrics,
         )
 
-        # Example plot generation gated
+        # Example plots: 3D multi-azimuth views that orbit the model's uhat axis.
+        # Replaces the old 2D XY-projection grids. Keys are unchanged so
+        # _strip_figures (pickling) and the wandb.Image logging path still apply.
         enable_plots = getattr(self.cfg.validation, 'enable_plots', True)
 
-        if enable_plots:
-            # Plot using stored geometric positions (first two coordinates projected to XY)
+        if enable_plots and len(results["pred_graphs"]) > 0:
+            # Azimuths orbit the *true* symmetry axis (shared uhat_np computed above).
+            uhat = uhat_np
+            angles = getattr(self.cfg.validation, "plot_angles", None) or DEFAULT_ANGLES
+            angles = [tuple(a) for a in angles]
             max_examples = min(8, len(results["pred_graphs"]))
-            cols = min(4, max_examples)
-            rows = int(np.ceil(max_examples / cols))
-            if max_examples > 0:
-                fig, axs = plt.subplots(rows, cols, figsize=(cols * 5, rows * 5))
-                if isinstance(axs, plt.Axes):
-                    axs = np.array([[axs]])
-                axs = np.atleast_2d(axs)
-                for i in range(max_examples):
-                    G = results["pred_graphs"][i]
-                    r = i // cols; c = i % cols
-                    ax = axs[r][c]
-                    # Extract positions
-                    pos_dict = {n: G.nodes[n]['pos'][:2] for n in G.nodes()}
-                    # Draw edges manually for consistent style
-                    for u, v in G.edges():
-                        p1 = pos_dict[u]; p2 = pos_dict[v]
-                        ax.plot([p1[0], p2[0]], [p1[1], p2[1]], color='lightgray', linewidth=1.0, zorder=1)
-                    # Scatter nodes (uniform color since no leaf attribute)
-                    xs = [pos_dict[n][0] for n in G.nodes()]
-                    ys = [pos_dict[n][1] for n in G.nodes()]
-                    ax.scatter(xs, ys, c='tab:blue', s=30, edgecolors='k', linewidths=0.5, zorder=2)
-                    ax.set_title(f"N={G.number_of_nodes()}")
-                    ax.set_xticks([]); ax.set_yticks([])
-                # Hide unused axes
-                for j in range(max_examples, rows * cols):
-                    r = j // cols; c = j % cols
-                    axs[r][c].axis('off')
-                fig.tight_layout()
-                results["examples"] = fig
-                # Save figure to eval_plots directory
-                eval_plots_dir = self.output_dir / 'eval_plots'
-                eval_plots_dir.mkdir(exist_ok=True)
-                fig_path = eval_plots_dir / f"step_{self.step}_beta_{beta}.png"
-                fig.savefig(fig_path, dpi=150)
-                results["examples_path"] = str(fig_path)
+            eval_plots_dir = self.output_dir / 'eval_plots'
+            stem = f"step_{self.step}_beta_{beta}"
 
-                # Side-by-side comparison plots (reference vs predicted), both in original graph order
-                comp_rows = max_examples
-                comp_cols = 2  # reference | predicted
-                comp_fig, comp_axs = plt.subplots(comp_rows, comp_cols, figsize=(comp_cols * 5, comp_rows * 3.5))
-                if isinstance(comp_axs, plt.Axes):
-                    comp_axs = np.array([[comp_axs]])
-                comp_axs = np.atleast_2d(comp_axs)
-                for i in range(max_examples):
-                    refG = eval_graphs[i]
-                    predG = results["pred_graphs"][i]
-                    for col_idx, (Gcur, title_prefix) in enumerate([(refG, 'Eval'), (predG, 'Pred')]):
-                        axc = comp_axs[i][col_idx]
-                        pos_cur = {n: Gcur.nodes[n]['pos'][:2] for n in Gcur.nodes()}
-                        # edges
-                        for u, v in Gcur.edges():
-                            p1 = pos_cur[u]; p2 = pos_cur[v]
-                            axc.plot([p1[0], p2[0]], [p1[1], p2[1]], color='lightgray', linewidth=1.0, zorder=1)
-                        xs = [pos_cur[n][0] for n in Gcur.nodes()]
-                        ys = [pos_cur[n][1] for n in Gcur.nodes()]
-                        axc.scatter(xs, ys, c='tab:blue' if title_prefix=='Eval' else 'tab:orange', s=30, edgecolors='k', linewidths=0.5, zorder=2)
-                        axc.set_title(f"{title_prefix} N={Gcur.number_of_nodes()}")
-                        axc.set_xticks([]); axc.set_yticks([])
-                comp_fig.tight_layout()
-                comp_path = eval_plots_dir / f"step_{self.step}_beta_{beta}_compare.png"
-                comp_fig.savefig(comp_path, dpi=150)
-                results["examples_compare"] = comp_fig
-                results["examples_compare_path"] = str(comp_path)
-            else:
-                results["examples"] = None
-                results["examples_path"] = None
-                results["examples_compare"] = None
-                results["examples_compare_path"] = None
+            gen_fig, gen_path = plot_graph_grid_angles(
+                results["pred_graphs"][:max_examples],
+                out_dir=eval_plots_dir,
+                stem=stem,
+                file_tag="gen3d",
+                angles=angles,
+                uhat=uhat,
+                title_prefix="Gen",
+                max_graphs=max_examples,
+            )
+            results["examples"] = gen_fig
+            results["examples_path"] = str(gen_path)
+
+            # GT references at the same angles for qualitative eyeballing
+            # (the distribution metrics are the quantitative signal).
+            ref_fig, ref_path = plot_graph_grid_angles(
+                eval_graphs[:max_examples],
+                out_dir=eval_plots_dir,
+                stem=stem,
+                file_tag="ref3d",
+                angles=angles,
+                uhat=uhat,
+                title_prefix="GT",
+                node_color="#1f77b4",
+                max_graphs=max_examples,
+            )
+            results["examples_compare"] = ref_fig
+            results["examples_compare_path"] = str(ref_path)
         else:
             results["examples"] = None
             results["examples_path"] = None
@@ -630,12 +658,12 @@ class Trainer:
                 if hasattr(self, 'logger'):
                     self.logger.info(f"{prefix}{key}: {value}")
                 if self.cfg.wandb.logging and self.wandb_run is not None:
-                    self.wandb_run.log({f"{prefix}{key}": value}, step=self.step)
+                    self.wandb_run.log({f"{prefix}{key}": value, "train_step": self.step})
             elif isinstance(value, Figure):
                 # Wandb logging for figures currently disabled or wandb import commented out.
                 # Keeping placeholder for future reactivation.
                 if getattr(self.cfg.wandb, 'logging', False) and self.wandb_run is not None and wandb is not None:
                     try:
-                        self.wandb_run.log({f"{prefix}{key}": wandb.Image(value)}, step=self.step)
+                        self.wandb_run.log({f"{prefix}{key}": wandb.Image(value), "train_step": self.step})
                     except Exception as e:
                         print(f"[wandb logging skipped] {e}")
