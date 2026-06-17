@@ -35,6 +35,15 @@ validation:
   per_graph_size: False
   enable_metrics: False
   enable_plots: True
+  enable_dist_metrics: True
+  enable_ks: True
+  enable_morphometrics: True
+  enable_light_joint: True
+  enable_floor: True
+  tmd_eval_filtration: radial_root
+  tmd_eval_bins: 16
+  tmd_pca_ncomp: 32
+  dc_nearest_k: 5
 
 testing: False # if True, only evaluate on test set
 

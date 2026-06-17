@@ -57,6 +57,9 @@ def _make_cfg():
             enable_metrics=False, enable_plots=True, enable_dist_metrics=True,
             ged_enabled=True, ged_timeout=5.0,
             plot_angles=[[20, 30], [20, 120]],
+            enable_ks=True, enable_morphometrics=True, enable_light_joint=True,
+            enable_floor=True, tmd_eval_filtration="radial_root", tmd_eval_bins=16,
+            tmd_pca_ncomp=32, dc_nearest_k=5,
         ),
         ema=SimpleNamespace(betas=[1], gamma=1.0, power=1.0),
         wandb=SimpleNamespace(logging=False),
@@ -101,9 +104,25 @@ def test_evaluate_emits_dist_metrics_and_3d_plots(tmp_path):
     # Distribution metrics present and well-formed
     assert "dist" in results
     dist = results["dist"]
-    for key in ("branch_length_w1", "tmd_barlen_w1", "node_count_w1", "tree_edit_dist_mean"):
+    for key in (
+        "branch_length_w1", "tmd_barlen_w1", "node_count_w1", "tree_edit_dist_mean",
+        "contraction_w1", "strahler_w1", "branch_length_ks",
+        "mmd_morpho", "coverage_morpho", "mmd_tmd",
+    ):
         assert key in dist, f"missing dist key {key}"
         assert isinstance(dist[key], float)
+
+    # Floor reference lines + headline excess for checkpoint selection
+    assert "floor" in results and isinstance(results["floor"], dict)
+    assert "mmd_morpho" in results["floor"]
+    assert "headline_excess_mmd_morpho" in dist
+
+    # GT-fit cache (bandwidth/std/PCA/floor) is built once and reused across calls
+    key = id(trainer.validation_graphs)
+    assert key in trainer._eval_cache and key in trainer._floor_cache
+    cache_first = trainer._eval_cache[key]
+    trainer.evaluate(trainer.validation_graphs, beta=1)
+    assert trainer._eval_cache[key] is cache_first  # not rebuilt
 
     # 3D figures produced and saved
     assert isinstance(results["examples"], Figure)

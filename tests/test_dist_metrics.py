@@ -32,69 +32,89 @@ def test_returns_expected_keys_and_finite():
     m = compute_distribution_metrics(gen, gt)
 
     expected = {
+        # pooled marginals (W1)
         "branch_length_w1",
         "bifurcation_angle_w1",
         "tmd_barlen_w1",
+        "path_to_root_w1",
+        "radial_to_root_w1",
+        "contraction_w1",
+        "branch_order_w1",
+        # per-tree marginals (W1)
         "node_count_w1",
         "leaf_count_w1",
         "bifurcation_count_w1",
         "axial_extent_w1",
         "radial_span_w1",
         "total_extent_w1",
+        "strahler_w1",
+        "partition_asymmetry_w1",
+        "sholl_peak_w1",
+        "sholl_critical_radius_w1",
+        "sholl_auc_w1",
+        # joint distribution
+        "mmd_morpho",
+        "density_morpho",
+        "coverage_morpho",
+        "mmd_tmd",
+        "density_tmd",
+        "coverage_tmd",
+        # topology
         "tree_edit_dist_mean",
         "tree_edit_skipped_frac",
         "tree_edit_n_pairs",
     }
     assert expected.issubset(set(m.keys()))
-    for k in ("branch_length_w1", "tmd_barlen_w1", "node_count_w1"):
+    for k in ("branch_length_w1", "tmd_barlen_w1", "node_count_w1", "contraction_w1", "mmd_morpho"):
         assert np.isfinite(m[k]), f"{k} should be finite, got {m[k]}"
 
 
-def test_iqr_ratio_keys_present():
+def test_ks_emitted_for_continuous_not_discrete():
     gen = [_toy_tree(1.0, i) for i in range(4)]
     gt = [_toy_tree(1.1, i + 100) for i in range(5)]
     m = compute_distribution_metrics(gen, gt, ged_enabled=False)
-    expected = {
-        "branch_length_iqr_ratio",
-        "bifurcation_angle_iqr_ratio",
-        "tmd_barlen_iqr_ratio",
-        "node_count_iqr_ratio",
-        "leaf_count_iqr_ratio",
-        "bifurcation_count_iqr_ratio",
-        "axial_extent_iqr_ratio",
-        "radial_span_iqr_ratio",
-        "total_extent_iqr_ratio",
-    }
-    assert expected.issubset(set(m.keys()))
+    # continuous features get a KS statistic alongside W1
+    for k in ("branch_length_ks", "bifurcation_angle_ks", "contraction_ks", "axial_extent_ks"):
+        assert k in m, f"missing {k}"
+    # discrete (integer/heavily-tied) features are W1-only in-loop
+    for k in ("branch_order_ks", "node_count_ks", "leaf_count_ks", "bifurcation_count_ks", "strahler_ks"):
+        assert k not in m, f"{k} should not be emitted for a discrete feature"
 
 
-def test_iqr_ratio_flags_under_dispersion():
-    # GT spans a wide range of sizes; generated set is collapsed to ~one size.
-    scales = np.linspace(0.5, 3.0, 8)
-    gt = [_toy_tree(float(s), i + 200) for i, s in enumerate(scales)]
-    gen = [_toy_tree(1.0, i + 300) for i in range(8)]  # near-identical sizes
-    m = compute_distribution_metrics(gen, gt, ged_enabled=False)
-    assert m["total_extent_iqr_ratio"] < 0.5, m["total_extent_iqr_ratio"]
-    assert m["radial_span_iqr_ratio"] < 0.5, m["radial_span_iqr_ratio"]
+def test_enable_ks_false_omits_ks_keys():
+    gen = [_toy_tree(1.0, i) for i in range(4)]
+    gt = [_toy_tree(1.1, i + 100) for i in range(5)]
+    m = compute_distribution_metrics(gen, gt, ged_enabled=False, enable_ks=False)
+    assert not any(k.endswith("_ks") for k in m), [k for k in m if k.endswith("_ks")]
 
 
-def test_iqr_ratio_matched_spread_near_one():
-    # Same spread of sizes on both sides (only jitter seeds differ) -> ratio ~ 1.
-    scales = np.linspace(0.5, 3.0, 8)
+def test_enable_morphometrics_false_omits_new_marginals():
+    gen = [_toy_tree(1.0, i) for i in range(4)]
+    gt = [_toy_tree(1.1, i + 100) for i in range(5)]
+    m = compute_distribution_metrics(gen, gt, ged_enabled=False, enable_morphometrics=False)
+    for k in ("contraction_w1", "strahler_w1", "sholl_peak_w1", "path_to_root_w1"):
+        assert k not in m, f"{k} should be omitted when morphometrics disabled"
+    assert "branch_length_w1" in m  # base marginals stay
+
+
+def test_enable_light_joint_false_omits_joint_keys():
+    gen = [_toy_tree(1.0, i) for i in range(4)]
+    gt = [_toy_tree(1.1, i + 100) for i in range(5)]
+    m = compute_distribution_metrics(gen, gt, ged_enabled=False, enable_light_joint=False)
+    for k in ("mmd_morpho", "mmd_tmd", "density_morpho", "coverage_tmd"):
+        assert k not in m
+
+
+def test_joint_mmd_larger_for_shifted_than_matched():
+    # GT spans a range of sizes so the standardization has real variance; a set drawn
+    # from the same range should give MMD ~ 0, a shifted set clearly more.
+    scales = np.linspace(0.8, 1.2, 10)
     gt = [_toy_tree(float(s), i) for i, s in enumerate(scales)]
-    gen = [_toy_tree(float(s), i + 1000) for i, s in enumerate(scales)]
-    m = compute_distribution_metrics(gen, gt, ged_enabled=False)
-    for k in ("total_extent_iqr_ratio", "radial_span_iqr_ratio", "axial_extent_iqr_ratio"):
-        assert 0.5 <= m[k] <= 2.0, f"{k}={m[k]}"
-
-
-def test_iqr_ratio_divide_by_zero_is_nan():
-    # node/leaf/bifurcation counts are constant across toy trees -> GT IQR is 0 ->
-    # ratio must be nan (not inf).
-    gen = [_toy_tree(1.0, i) for i in range(4)]
-    gt = [_toy_tree(1.1, i + 100) for i in range(5)]
-    m = compute_distribution_metrics(gen, gt, ged_enabled=False)
-    assert np.isnan(m["node_count_iqr_ratio"])
+    matched = [_toy_tree(float(s), i + 100) for i, s in enumerate(scales)]
+    shifted = [_toy_tree(float(s) + 1.0, i + 200) for i, s in enumerate(scales)]
+    m_matched = compute_distribution_metrics(matched, gt, ged_enabled=False)["mmd_morpho"]
+    m_shifted = compute_distribution_metrics(shifted, gt, ged_enabled=False)["mmd_morpho"]
+    assert m_shifted > m_matched, (m_matched, m_shifted)
 
 
 def test_identical_sets_give_zero_w1():
@@ -219,3 +239,60 @@ def test_axial_and_radial_separate_correctly():
     m_wide = compute_distribution_metrics(wide, gt, uhat=uhat, ged_enabled=False)
     assert m_wide["radial_span_w1"] > 1e-3
     assert m_wide["axial_extent_w1"] < 1e-6
+
+
+# --- new morphometric extractors ------------------------------------------------------
+
+
+def test_strahler_and_asymmetry_on_known_tree():
+    from validation.structural_metrics import strahler_number, partition_asymmetry
+
+    # _toy_tree: root 0 -> {1,2}; 1 -> {3,4}; leaves {2,3,4}.
+    G = _toy_tree(1.0, 0)
+    # Subtree leaf counts: leaves(3)=leaves(4)=leaves(2)=1, leaves(1)=2, leaves(0)=3.
+    # Strahler: node1 has two order-1 children -> order 2; node0 children orders {2,1}
+    # -> max=2, not tied -> order 2.
+    assert strahler_number(G) == 2.0
+    # Asymmetry: node0 partition (2,1) -> |2-1|/(2+1-2)=1; node1 partition (1,1) -> 0.
+    # mean over the two branch points = 0.5.
+    assert abs(partition_asymmetry(G) - 0.5) < 1e-9
+
+
+def test_contraction_ratio_in_unit_interval():
+    from validation.structural_metrics import contraction_ratio_values
+
+    vals = contraction_ratio_values(_toy_tree(1.0, 3))
+    assert vals.size > 0
+    assert np.all(vals > 0.0) and np.all(vals <= 1.0 + 1e-9)
+
+
+def test_sholl_summary_keys_and_peak_positive():
+    from validation.structural_metrics import sholl_summary
+
+    s = sholl_summary(_toy_tree(1.0, 1))
+    assert set(s.keys()) == {"sholl_peak", "sholl_critical_radius", "sholl_auc"}
+    assert s["sholl_peak"] >= 1.0
+
+
+def test_degenerate_single_node_is_nan_safe():
+    from validation.structural_metrics import (
+        strahler_number,
+        partition_asymmetry,
+        contraction_ratio_values,
+        path_length_to_root_values,
+        sholl_summary,
+    )
+
+    G = nx.Graph()
+    G.add_node(0, pos=np.zeros(3))
+    G.graph["root"] = 0
+    # per-tree scalars: strahler defined (=1), asymmetry undefined (nan)
+    assert strahler_number(G) == 1.0
+    assert np.isnan(partition_asymmetry(G))
+    # pooled extractors return empty arrays, not exceptions
+    assert contraction_ratio_values(G).size == 0
+    assert path_length_to_root_values(G).size == 0
+    assert all(np.isnan(v) for v in sholl_summary(G).values())
+    # and the full pipeline tolerates a degenerate graph in the set
+    m = compute_distribution_metrics([G], [_toy_tree(1.0, 0)], ged_enabled=False)
+    assert "branch_length_w1" in m

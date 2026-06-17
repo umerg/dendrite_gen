@@ -42,6 +42,14 @@ validation:
   ged_enabled: True             # avg tree-edit distance (capped by node/pair count)
   ged_timeout: 5.0
   plot_angles: [[20, 30], [20, 120], [20, 210]]   # (elev, azim) around uhat
+  enable_ks: True               # KS alongside W1 (continuous features)
+  enable_morphometrics: True    # path/radial/contraction/order/strahler/asymmetry/sholl
+  enable_light_joint: True      # morpho + Euclidean-TMD MMD/Density/Coverage every val
+  enable_floor: True            # real-vs-real reference lines + headline excess
+  tmd_eval_filtration: radial_root
+  tmd_eval_bins: 16
+  tmd_pca_ncomp: 32             # PCA dim for TMD persistence-image embedding (eval)
+  dc_nearest_k: 5               # k for Density/Coverage
 
 testing: False # if True, only evaluate on test set
 

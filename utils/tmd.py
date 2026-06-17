@@ -28,6 +28,7 @@ try:
         filtration_height_z,
         filtration_path_length_from_root,
         filtration_radial_rho,
+        filtration_radial_root,
         normalize_filtration_values,
         persistence_image,
     )
@@ -48,6 +49,7 @@ except ModuleNotFoundError:
             filtration_height_z,
             filtration_path_length_from_root,
             filtration_radial_rho,
+            filtration_radial_root,
             normalize_filtration_values,
             persistence_image,
         )
@@ -67,6 +69,7 @@ except ModuleNotFoundError:
             filtration_height_z,
             filtration_path_length_from_root,
             filtration_radial_rho,
+            filtration_radial_root,
             normalize_filtration_values,
             persistence_image,
         )
@@ -109,6 +112,8 @@ def compute_tmd_barcode_diagram(
         f_full = filtration_height_z(G)
     elif filtration == "rho":
         f_full = filtration_radial_rho(G)
+    elif filtration == "radial_root":
+        f_full = filtration_radial_root(G)
     else:
         raise ValueError(f"Unknown filtration name: {filtration!r}")
 
@@ -135,6 +140,7 @@ def _resolve_method_map(
         "path": "tmd",
         "height": "0d",
         "rho": "0d",
+        "radial_root": "tmd",
     }
 
     if method_by_filtration is None:
@@ -217,6 +223,8 @@ def compute_tmd_mixed(
             f_full = filtration_height_z(G)
         elif name == "rho":
             f_full = filtration_radial_rho(G)
+        elif name == "radial_root":
+            f_full = filtration_radial_root(G)
         else:
             raise ValueError(f"Unknown filtration name: {name!r}")
 
@@ -246,3 +254,24 @@ def compute_tmd_mixed(
         emb_list.append(pi.astype(np.float32))
 
     return np.concatenate(emb_list, axis=0).astype(np.float32)
+
+
+def compute_tmd_embedding(
+    G: nx.Graph,
+    *,
+    filtration: FiltrationName = "radial_root",
+    n_bins: int = 16,
+    sigma: float = 0.05,
+) -> np.ndarray:
+    """
+    Single-filtration TMD persistence-image embedding for evaluation.
+
+    Defaults to the Euclidean-distance-from-root (``radial_root``) filtration: the
+    canonical Kanari radial TMD, which captures branching topology weighted by
+    spatial reach in one compact (n_bins * n_bins,) vector. Deterministic.
+
+    This is intentionally a single filtration (cheaper than ``compute_tmd_mixed``'s
+    3-filtration 768-d vector) and, by using a filtration outside the model's
+    conditioning set, avoids merely scoring reproduction of the conditioning input.
+    """
+    return compute_tmd_mixed(G, filtrations=(filtration,), n_bins=n_bins, sigma=sigma)

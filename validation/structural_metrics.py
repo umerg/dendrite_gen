@@ -190,6 +190,256 @@ def bifurcation_angle_values(
     return np.asarray(angles, dtype=np.float64)
 
 
+# --- additional morphometrics (root-anchored geometry + topology) -------------------
+#
+# These reuse the shared helpers above (_root_tree, _pos_to_xyz) and the rooting
+# conventions in visualization/stats (path/radial distance, branch order). All are
+# nan/empty-safe: a missing/degenerate root yields an empty array (pooled metrics)
+# or nan (per-tree scalars) rather than raising, so they can be pooled across a
+# whole generated set without guarding each call.
+
+
+def _resolve_root_or_none(G: nx.Graph, root: int | None) -> int | None:
+    if root is None:
+        root = G.graph.get("root")
+    if root is None or root not in G.nodes:
+        return None
+    return int(root)
+
+
+def _edge_length(G: nx.Graph, u: int, v: int) -> float:
+    pu = _pos_to_xyz(G.nodes[u].get("pos", np.zeros(3)))
+    pv = _pos_to_xyz(G.nodes[v].get("pos", np.zeros(3)))
+    return float(np.linalg.norm(pu - pv))
+
+
+def path_length_to_root_values(G: nx.Graph, *, root: int | None = None) -> np.ndarray:
+    """Per-non-root-node path length from root along the tree (Euclidean-weighted)."""
+    root = _resolve_root_or_none(G, root)
+    if root is None or G.number_of_nodes() < 2:
+        return np.zeros((0,), dtype=np.float64)
+    path_map = nx.single_source_dijkstra_path_length(
+        G, root, weight=lambda u, v, _d: _edge_length(G, u, v)
+    )
+    return np.asarray(
+        [float(path_map[n]) for n in G.nodes() if n != root and n in path_map],
+        dtype=np.float64,
+    )
+
+
+def radial_distance_to_root_values(G: nx.Graph, *, root: int | None = None) -> np.ndarray:
+    """Per-non-root-node straight-line (Euclidean) distance from the root position."""
+    root = _resolve_root_or_none(G, root)
+    if root is None or G.number_of_nodes() < 2:
+        return np.zeros((0,), dtype=np.float64)
+    root_pos = _pos_to_xyz(G.nodes[root].get("pos", np.zeros(3)))
+    return np.asarray(
+        [
+            float(np.linalg.norm(_pos_to_xyz(G.nodes[n].get("pos", np.zeros(3))) - root_pos))
+            for n in G.nodes()
+            if n != root
+        ],
+        dtype=np.float64,
+    )
+
+
+def contraction_ratio_values(
+    G: nx.Graph, *, root: int | None = None, eps: float = 1e-12
+) -> np.ndarray:
+    """
+    Per-leaf contraction = radial(root->leaf) / path(root->leaf), in (0, 1].
+
+    A robust "tortuosity" surrogate for critical (branch-point-only) trees, where
+    per-branch geometric tortuosity is ~1 by construction. 1 means a straight reach
+    from the root; smaller means the dendrite wanders before terminating.
+    """
+    root = _resolve_root_or_none(G, root)
+    if root is None or G.number_of_nodes() < 2:
+        return np.zeros((0,), dtype=np.float64)
+    _parent, children = _root_tree(G, root)
+    leaves = [n for n, ch in children.items() if len(ch) == 0 and n != root]
+    if not leaves:
+        return np.zeros((0,), dtype=np.float64)
+    path_map = nx.single_source_dijkstra_path_length(
+        G, root, weight=lambda u, v, _d: _edge_length(G, u, v)
+    )
+    root_pos = _pos_to_xyz(G.nodes[root].get("pos", np.zeros(3)))
+    out: list[float] = []
+    for n in leaves:
+        path = float(path_map.get(n, 0.0))
+        if path <= eps:
+            continue
+        radial = float(np.linalg.norm(_pos_to_xyz(G.nodes[n].get("pos", np.zeros(3))) - root_pos))
+        out.append(min(radial / path, 1.0))
+    return np.asarray(out, dtype=np.float64)
+
+
+def branch_order_values(G: nx.Graph, *, root: int | None = None) -> np.ndarray:
+    """
+    Per-non-root-node branch order (number of bifurcations on the root->node path).
+
+    Matches the convention in visualization/stats/_graph.branch_order_map: order
+    increments only when passing through a node of degree >= 3 (a true branch point).
+    """
+    root = _resolve_root_or_none(G, root)
+    if root is None or G.number_of_nodes() < 2:
+        return np.zeros((0,), dtype=np.float64)
+    order = {root: 0}
+    stack = [root]
+    seen = {root}
+    while stack:
+        u = stack.pop()
+        parent_order = order[u]
+        for v in G.neighbors(u):
+            if v in seen:
+                continue
+            seen.add(v)
+            order[v] = parent_order + 1 if (G.degree(u) >= 3 and u != root) else parent_order
+            stack.append(v)
+    return np.asarray([float(order[n]) for n in G.nodes() if n != root], dtype=np.float64)
+
+
+def _postorder_subtree_stats(
+    G: nx.Graph, root: int
+) -> tuple[dict[int, list[int]], dict[int, int], dict[int, int]]:
+    """
+    Bottom-up subtree leaf counts and Strahler numbers for a rooted tree.
+
+    Returns (children_map, subtree_leaves, strahler). Processed in reverse
+    descendants-after-ancestors order (iterative) to avoid recursion limits on
+    deep path-like trees.
+    """
+    _parent, children = _root_tree(G, root)
+    # Ancestors-before-descendants order via stack DFS; reverse gives valid post-order.
+    pre: list[int] = []
+    stack = [root]
+    while stack:
+        u = stack.pop()
+        pre.append(u)
+        for c in children[u]:
+            stack.append(c)
+    subtree_leaves: dict[int, int] = {}
+    strahler: dict[int, int] = {}
+    for u in reversed(pre):
+        ch = children[u]
+        if not ch:
+            subtree_leaves[u] = 1
+            strahler[u] = 1
+            continue
+        subtree_leaves[u] = sum(subtree_leaves[c] for c in ch)
+        child_orders = [strahler[c] for c in ch]
+        m = max(child_orders)
+        strahler[u] = m + 1 if child_orders.count(m) >= 2 else m
+    return children, subtree_leaves, strahler
+
+
+def strahler_number(G: nx.Graph, *, root: int | None = None) -> float:
+    """Horton-Strahler order of the whole rooted tree (per-tree scalar). nan if empty/unrooted."""
+    root = _resolve_root_or_none(G, root)
+    if root is None or G.number_of_nodes() == 0:
+        return float("nan")
+    _children, _leaves, strahler = _postorder_subtree_stats(G, root)
+    return float(strahler[root])
+
+
+def partition_asymmetry(
+    G: nx.Graph, *, root: int | None = None, eps: float = 1e-12
+) -> float:
+    """
+    Van Pelt tree asymmetry index: mean over branch points of the local partition
+    asymmetry |r-s|/(r+s-2) of the subtree leaf counts (r,s); a partition with
+    r+s==2 contributes 0. For multifurcations, averaged over all child pairs.
+
+    Per-tree scalar in [0, 1]; nan if there is no qualifying branch point.
+    """
+    root = _resolve_root_or_none(G, root)
+    if root is None or G.number_of_nodes() == 0:
+        return float("nan")
+    children, subtree_leaves, _strahler = _postorder_subtree_stats(G, root)
+    node_vals: list[float] = []
+    for u, ch in children.items():
+        if len(ch) < 2:
+            continue
+        counts = [subtree_leaves[c] for c in ch]
+        pair_vals: list[float] = []
+        for i in range(len(counts)):
+            for j in range(i + 1, len(counts)):
+                r, s = counts[i], counts[j]
+                denom = r + s - 2
+                pair_vals.append(0.0 if denom <= 0 else abs(r - s) / float(denom))
+        if pair_vals:
+            node_vals.append(float(np.mean(pair_vals)))
+    return float(np.mean(node_vals)) if node_vals else float("nan")
+
+
+def sholl_intersection_profile(
+    G: nx.Graph,
+    *,
+    root: int | None = None,
+    radii: np.ndarray | None = None,
+    n_shells: int = 32,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Sholl analysis: number of edges crossing each concentric sphere centred at the
+    root. An edge (u,v) crosses radius r iff min(d_u,d_v) < r <= max(d_u,d_v), where
+    d_* is the node's radial distance from the root.
+
+    Returns (radii, counts). If ``radii`` is None, uses ``n_shells`` evenly spaced
+    radii over (0, max radial extent]; pass shared ``radii`` (cached from GT) so the
+    gen/GT/floor profiles are directly comparable. Empty arrays on degenerate trees.
+    """
+    root = _resolve_root_or_none(G, root)
+    if root is None or G.number_of_edges() == 0:
+        return np.zeros((0,), dtype=np.float64), np.zeros((0,), dtype=np.float64)
+    root_pos = _pos_to_xyz(G.nodes[root].get("pos", np.zeros(3)))
+    dist = {
+        n: float(np.linalg.norm(_pos_to_xyz(G.nodes[n].get("pos", np.zeros(3))) - root_pos))
+        for n in G.nodes()
+    }
+    if radii is None:
+        max_r = max(dist.values()) if dist else 0.0
+        if max_r <= 0.0:
+            return np.zeros((0,), dtype=np.float64), np.zeros((0,), dtype=np.float64)
+        radii = np.linspace(0.0, max_r, int(n_shells) + 1, dtype=np.float64)[1:]
+    radii = np.asarray(radii, dtype=np.float64).reshape(-1)
+    counts = np.zeros(radii.shape, dtype=np.float64)
+    for u, v in G.edges():
+        lo, hi = sorted((dist[u], dist[v]))
+        counts += ((radii > lo) & (radii <= hi)).astype(np.float64)
+    return radii, counts
+
+
+def sholl_summary(
+    G: nx.Graph,
+    *,
+    root: int | None = None,
+    radii: np.ndarray | None = None,
+    n_shells: int = 32,
+) -> dict[str, float]:
+    """
+    Reduce a Sholl profile to three per-tree scalars:
+      - sholl_peak            : maximum intersection count
+      - sholl_critical_radius : radius of the peak, normalised by max radial extent
+      - sholl_auc             : area under the profile (trapezoid)
+    nan-filled on degenerate trees.
+    """
+    out = {
+        "sholl_peak": float("nan"),
+        "sholl_critical_radius": float("nan"),
+        "sholl_auc": float("nan"),
+    }
+    r, counts = sholl_intersection_profile(G, root=root, radii=radii, n_shells=n_shells)
+    if r.size == 0 or counts.size == 0 or float(counts.max()) <= 0.0:
+        return out
+    peak_idx = int(np.argmax(counts))
+    rmax = float(r.max())
+    out["sholl_peak"] = float(counts.max())
+    out["sholl_critical_radius"] = float(r[peak_idx] / rmax) if rmax > 0 else float("nan")
+    _trapezoid = getattr(np, "trapezoid", np.trapz)
+    out["sholl_auc"] = float(_trapezoid(counts, r))
+    return out
+
+
 def _diagram_pairs(diagram) -> np.ndarray:
     if diagram is None:
         return np.zeros((0, 2), dtype=np.float64)

@@ -14,8 +14,8 @@ from matplotlib.figure import Figure
 from torch.optim import Adam
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
-from utils.tmd import compute_tmd_mixed
-from validation.dist_metrics import compute_distribution_metrics
+from utils.tmd import compute_tmd_mixed, compute_tmd_embedding
+from validation.dist_metrics import compute_distribution_metrics, build_gt_cache
 from validation.plot import plot_graph_grid_angles, DEFAULT_ANGLES
 
 # Optional / guarded imports (Hydra, OmegaConf, wandb)
@@ -101,6 +101,11 @@ class Trainer:
         self.cfg = cfg
 
         self.rng = np.random.default_rng(0)
+        # Per-eval-set caches for the distribution metrics: the GT-fit objects
+        # (morpho mean/std, TMD PCA, MMD bandwidths, Sholl radii) and the
+        # real-vs-real floor are model-independent, so computed once per eval set.
+        self._eval_cache: dict[int, dict] = {}
+        self._floor_cache: dict[int, dict] = {}
         # Prefer CUDA, fallback to CPU (MPS has stability issues with PyG)
         if not cfg.debugging:
             if th.cuda.is_available():
@@ -453,6 +458,58 @@ class Trainer:
         # cause a linear RSS leak over long runs.
         plt.close('all')
 
+    def _eval_embed_fn(self):
+        """Euclidean-from-root TMD persistence-image embedding used for joint metrics."""
+        tmd_bins = getattr(self.cfg.validation, "tmd_eval_bins", 16)
+        filtration = getattr(self.cfg.validation, "tmd_eval_filtration", "radial_root")
+        return lambda G: compute_tmd_embedding(G, filtration=filtration, n_bins=tmd_bins)
+
+    def _gt_cache_for(self, eval_graphs: list[nx.Graph], uhat_np: np.ndarray) -> dict:
+        """Build (once, then cache) the GT-fit objects for the distribution metrics."""
+        key = id(eval_graphs)
+        cache = self._eval_cache.get(key)
+        if cache is None:
+            cache = build_gt_cache(
+                eval_graphs,
+                uhat=tuple(np.asarray(uhat_np, dtype=float).reshape(3).tolist()),
+                embed_fn=self._eval_embed_fn(),
+                tmd_pca_ncomp=getattr(self.cfg.validation, "tmd_pca_ncomp", 32),
+            )
+            self._eval_cache[key] = cache
+        return cache
+
+    def _floor_for(self, eval_graphs: list[nx.Graph], cache: dict, uhat_np: np.ndarray) -> dict:
+        """Real-vs-real floor: a train subset (matched to N) vs the eval/GT set, cached once."""
+        key = id(eval_graphs)
+        floor = self._floor_cache.get(key)
+        if floor is None:
+            n = len(eval_graphs)
+            train = self.train_graphs or []
+            if not train:
+                floor = {}
+            else:
+                rng = np.random.default_rng(0)
+                if len(train) > n:
+                    idx = rng.choice(len(train), size=n, replace=False)
+                    train_sub = [train[i] for i in idx]
+                else:
+                    train_sub = list(train)
+                floor = compute_distribution_metrics(
+                    train_sub,
+                    eval_graphs,
+                    uhat=uhat_np,
+                    gt_cache=cache,
+                    embed_fn=self._eval_embed_fn(),
+                    ged_enabled=False,
+                    enable_ks=getattr(self.cfg.validation, "enable_ks", True),
+                    enable_morphometrics=getattr(self.cfg.validation, "enable_morphometrics", True),
+                    enable_light_joint=getattr(self.cfg.validation, "enable_light_joint", True),
+                    dc_k=getattr(self.cfg.validation, "dc_nearest_k", 5),
+                    tmd_pca_ncomp=getattr(self.cfg.validation, "tmd_pca_ncomp", 32),
+                )
+            self._floor_cache[key] = floor
+        return floor
+
     @th.no_grad()
     def evaluate(self, eval_graphs: list[nx.Graph], beta):
         """Evaluate model for given beta on given graphs."""
@@ -552,13 +609,31 @@ class Trainer:
         # per stat + avg tree-edit distance). Logged as floats -> wandb scalars.
         if getattr(self.cfg.validation, "enable_dist_metrics", True):
             _t0_dist = time()
+            gt_cache = self._gt_cache_for(eval_graphs, uhat_np)
             results["dist"] = compute_distribution_metrics(
                 results["pred_graphs"],
                 eval_graphs,
                 uhat=uhat_np,
                 ged_enabled=getattr(self.cfg.validation, "ged_enabled", True),
                 ged_timeout=getattr(self.cfg.validation, "ged_timeout", 5.0),
+                enable_ks=getattr(self.cfg.validation, "enable_ks", True),
+                enable_morphometrics=getattr(self.cfg.validation, "enable_morphometrics", True),
+                enable_light_joint=getattr(self.cfg.validation, "enable_light_joint", True),
+                gt_cache=gt_cache,
+                embed_fn=self._eval_embed_fn(),
+                dc_k=getattr(self.cfg.validation, "dc_nearest_k", 5),
+                tmd_pca_ncomp=getattr(self.cfg.validation, "tmd_pca_ncomp", 32),
             )
+            # Real-vs-real floor as reference lines + a single headline excess used
+            # for checkpoint selection (gen MMD above the achievable real-vs-real floor).
+            if getattr(self.cfg.validation, "enable_floor", True):
+                floor = self._floor_for(eval_graphs, gt_cache, uhat_np)
+                if floor:
+                    results["floor"] = floor
+                    gen_mmd = results["dist"].get("mmd_morpho", float("nan"))
+                    floor_mmd = floor.get("mmd_morpho", float("nan"))
+                    if np.isfinite(gen_mmd) and np.isfinite(floor_mmd):
+                        results["dist"]["headline_excess_mmd_morpho"] = float(gen_mmd - floor_mmd)
             self.logger.info(
                 "[evaluate beta=%s] dist_metrics=%.1fs", beta, time() - _t0_dist
             )
