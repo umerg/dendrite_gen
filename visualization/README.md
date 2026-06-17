@@ -5,6 +5,7 @@ The current everyday workflows are:
 
 - `run_all_plots.py` for the full validation figure set
 - `run_cylinder_trees.py` for interactive 3D tree renderings
+- `run_unconditional.py` for population-level unconditioned diagnostics
 
 Run the commands in this README from the parent project directory that contains
 the `dendrite_gen/` package, not from inside `dendrite_gen/` itself. In this
@@ -30,6 +31,7 @@ python -m dendrite_gen.visualization.run_all_plots \
   --pred-pkl /path/to/predictions.pkl \
   --ema-key ema_1 \
   --max-pairs 6 \
+  --include-unconditional \
   --out-dir dendrite_gen/outputs/visualization
 ```
 
@@ -38,14 +40,37 @@ distribution plots, and TMD figures. Dataset-level statistics use all paired
 trees by default; `--max-pairs` only limits the paired examples selected for
 sample-style views.
 
+All visualization runners also write a short `README.md` into the output root
+describing how to interpret the generated plot families.
+
 Useful switches:
 
 - `--skip-tmd` for a faster pass without persistence diagrams
 - `--projections xy` or `--projections xy xz` to limit qualitative views
 - `--include-cylinders` to also render selected 3D cylinder trees
+- `--include-unconditional` to also render unconditioned population-level diagnostics
 
 Optional cylinder plots inside `run_all_plots.py` use Plotly by default. Pass
 `--cylinder-backend matplotlib` only when you want static PNG cylinders.
+
+## Unconditioned Diagnostics
+
+Generate a population-level PCA for unconditioned models:
+
+```bash
+python -m dendrite_gen.visualization.run_unconditional \
+  --gt-dir /path/to/gt_swc \
+  --pred-pkl /path/to/predictions.pkl \
+  --ema-key ema_1 \
+  --out-dir dendrite_gen/outputs/visualization
+```
+
+This writes `unconditional/tree_feature_pca.png` plus one feature-colored PCA
+plot per vector component in `unconditional/tree_feature_pca_by_feature/`. GT
+and predicted samples are compared as two distributions, not as index-matched
+pairs. Each tree is embedded using mean and standard deviation summaries of
+branch length, bifurcation angle, path distance, radial distance, and branch
+order, plus height, XY span, and bounding-box diagonal.
 
 ## 3D Plots
 
@@ -93,4 +118,5 @@ neighborhoods. Tune them with `--plotly-leaf-count`,
 ```bash
 python -m dendrite_gen.visualization.run_all_plots --help
 python -m dendrite_gen.visualization.run_cylinder_trees --help
+python -m dendrite_gen.visualization.run_unconditional --help
 ```

@@ -26,6 +26,7 @@ from .run_tmd_figures import (
     run_tmd_figures,
 )
 from .run_tree_stats import run_tree_stats
+from .run_unconditional import run_unconditional
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -58,6 +59,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--include-cylinders",
         action="store_true",
         help="Also render selected GT/pred trees as 3D cylinder models.",
+    )
+    parser.add_argument(
+        "--include-unconditional",
+        action="store_true",
+        help=(
+            "Also render unconditioned population-level PCA diagnostics into "
+            "the unconditional output folder."
+        ),
+    )
+    parser.add_argument(
+        "--unconditional-point-alpha",
+        type=float,
+        default=0.55,
+        help="Point opacity for optional unconditioned PCA diagnostics.",
     )
     parser.add_argument(
         "--cylinder-angle",
@@ -425,6 +440,13 @@ def main() -> None:
         modes=("pooled",),
         max_pairs=args.stats_max_pairs,
     )
+    if args.include_unconditional:
+        run_unconditional(
+            context,
+            out_root=args.out_dir,
+            max_pairs=args.stats_max_pairs,
+            point_alpha=args.unconditional_point_alpha,
+        )
     if not args.skip_tmd:
         run_tmd_figures(
             context,

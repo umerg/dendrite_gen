@@ -12,6 +12,7 @@ from .utils.io import (
     load_pred_graphs_from_pickle,
     pair_graphs_by_index,
 )
+from .utils.readme import write_visualization_readme
 
 
 def preview_names(items: Sequence[str], *, max_items: int = 5) -> str:
@@ -115,6 +116,8 @@ def load_plot_context(args: argparse.Namespace, *, print_summary: bool = True) -
 
 def ensure_runner_out_dir(root: Path, runner_name: str) -> Path:
     """Create and return the runner-specific output subfolder."""
-    out_dir = Path(root) / runner_name
+    root = Path(root)
+    write_visualization_readme(root)
+    out_dir = root / runner_name
     out_dir.mkdir(parents=True, exist_ok=True)
     return out_dir
