@@ -139,6 +139,77 @@ def ratio_by_depth(gen_dep, gen_len, gt_dep, gt_len, maxd=10, min_n=20):
     return out
 
 
+def build_prefix_state(graphs, D, psf, device):
+    """Batched generation state seeded from the GT subtree of depth<=D (GT topology + positions).
+    Frontier = prefix leaves; they expand iff they have pruned GT children. Returns (state, target_size, nrc)."""
+    from torch_geometric.typing import SparseTensor
+    pos, bt, par1b, rows, cols, lidx, lexp = [], [], [], [], [], [], []
+    tsz, nrc = [], []
+    off = 0
+    for gi, G in enumerate(graphs):
+        r = G.graph.get("root", next(iter(G.nodes)))
+        dep = nx.single_source_shortest_path_length(G, r)
+        keep = sorted([n for n in G.nodes if dep[n] <= D], key=lambda n: (dep[n], n))
+        gid = {n: off + i for i, n in enumerate(keep)}  # root gets smallest id in block
+        for n in keep:
+            pos.append(np.asarray(G.nodes[n]["pos"], float) / psf); bt.append(gi)
+            if n == r:
+                par1b.append(0)
+            else:
+                p = next(nb for nb in G.neighbors(n) if dep.get(nb, 1 << 30) == dep[n] - 1)
+                par1b.append(gid[p] + 1)
+        for n in keep:  # child edges within prefix (symmetric)
+            for nb in G.neighbors(n):
+                if nb in gid and dep[nb] == dep[n] + 1:
+                    rows += [gid[n], gid[nb]]; cols += [gid[nb], gid[n]]
+        for n in keep:  # frontier = no kept children
+            kept_ch = [nb for nb in G.neighbors(n) if nb in gid and dep[nb] == dep[n] + 1]
+            if not kept_ch:
+                gt_ch = [nb for nb in G.neighbors(n) if dep.get(nb, -1) == dep[n] + 1]
+                lidx.append(gid[n]); lexp.append(2 if gt_ch else 1)
+        tsz.append(len(G)); nrc.append(int(G.degree[r])); off += len(keep)
+    N = off
+    L = lambda a, dt: th.tensor(a, dtype=dt, device=device)
+    adj = SparseTensor(row=L(rows, th.long), col=L(cols, th.long),
+                       value=th.ones(len(rows), device=device), sparse_sizes=(N, N))
+    leaf_idx = L(lidx, th.long)
+    leaf_mask = th.zeros(N, dtype=th.bool, device=device); leaf_mask[leaf_idx] = True
+    state = dict(adj=adj, pos=th.tensor(np.array(pos), dtype=th.float, device=device),
+                 batch=L(bt, th.long), parent_idx_1b=L(par1b, th.long),
+                 leaf_idx=leaf_idx, leaf_expansion=L(lexp, th.long), leaf_mask=leaf_mask)
+    return state, L(tsz, th.long), L(nrc, th.long)
+
+
+def rollout_from_prefix(method, model, graphs, D, psf, device, tmd=None):
+    """Scenario C: seed with GT depth<=D prefix, then run the real expand() rollout from there."""
+    st, target_size, nrc = build_prefix_state(graphs, D, psf, device)
+    adj, pos = st["adj"], st["pos"]; batch = st["batch"]
+    parent_idx_1b, leaf_idx = st["parent_idx_1b"], st["leaf_idx"]
+    leaf_expansion, leaf_mask = st["leaf_expansion"], st["leaf_mask"]
+    eff = min(int(target_size.max().item()), method.max_tree_size); max_steps = eff * 2
+    step, terminated = 0, False
+    while not terminated and step < max_steps and leaf_idx.numel() > 0:
+        (adj, pos, leaf_idx, leaf_expansion, parent_idx_1b, batch, leaf_mask, terminated) = method.expand(
+            adj, batch, target_size, model, pos=pos, leaf_idx=leaf_idx,
+            leaf_expansion=leaf_expansion, parent_idx_1b=parent_idx_1b, leaf_mask=leaf_mask,
+            tmd=tmd, step=step + D, num_root_children=nrc)
+        step += 1
+    row, col, _ = adj.coo()
+    out = []
+    for g in range(int(batch.max().item()) + 1):
+        node_ids = (batch == g).nonzero(as_tuple=False).flatten()
+        lm = {int(n): i for i, n in enumerate(node_ids.tolist())}
+        G = nx.Graph()
+        for n in node_ids.tolist():
+            G.add_node(lm[n], pos=pos[n].detach().cpu().numpy() * psf)
+        for r, c in zip(row.tolist(), col.tolist()):
+            if r in lm and c in lm and lm[r] <= lm[c]:
+                G.add_edge(lm[r], lm[c])
+        G.graph["root"] = 0  # prefix root has smallest global id -> local 0
+        out.append(G)
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt-dir", required=True)
@@ -148,6 +219,7 @@ def main():
     ap.add_argument("--steps", type=int, nargs="+", default=[8000, 9000, 16000, 60000])
     ap.add_argument("--n-graphs", type=int, default=400, help="GT subset size for both passes")
     ap.add_argument("--tf-batches", type=int, default=8, help="# reduction batches for teacher-forced")
+    ap.add_argument("--prefix-depth", type=int, default=2, help="scenario C: GT prefix depth D (rollout from D+1)")
     ap.add_argument("--batch-size", type=int, default=None)
     ap.add_argument("--device", default="cuda" if th.cuda.is_available() else "cpu")
     ap.add_argument("--out", default="tf_vs_fr.pkl")
@@ -224,9 +296,19 @@ def main():
         print(f"  [B free-running]    offset/GT by depth: " +
               "  ".join(f"d{d}={r:.2f}" for d, r in sorted(fr.items())) + f"  ({time.time()-t1:.0f}s)")
 
+        # (C) GT-prefix rollout: GT depth<=D given, model rolls out from D+1
+        t2 = time.time()
+        Dc = args.prefix_depth
+        pgc = rollout_from_prefix(method, model, sub, Dc, psf, args.device)
+        gc_dep, gc_len = edge_len_by_depth(pgc)
+        frc = ratio_by_depth(gc_dep, gc_len, gt_dep, gt_len)
+        print(f"  [C GT-prefix<=d{Dc}]  offset/GT by depth: " +
+              "  ".join(f"d{d}={r:.2f}" for d, r in sorted(frc.items())) + f"  ({time.time()-t2:.0f}s)")
+
         results["by_step"][step] = {
             "tf_overall": tf_overall, "tf_root": tf_root, "tf_interior": tf_int,
             "tf_by_partial_depth": tf_bydepth, "fr_offset_ratio_by_depth": fr,
+            "prefix_depth": Dc, "fr_prefix_offset_ratio_by_depth": frc,
             "tf_n_leaves": int(tf["c0"].size),
         }
         with open(args.out, "wb") as f:
