@@ -103,12 +103,21 @@ def compute_tf_distribution_metrics(
     bl_g = np.linalg.norm(c0_local, axis=1)
     out["branch_length_w1"] = _w1(bl_s, bl_g)
     out["branch_length_ks"] = _ks(bl_s, bl_g)
+    # Directional means (sampled vs GT). W1/KS are symmetric distances and cannot tell
+    # over- from under-production; the raw means can. (mean_samp - mean_gt) > 0 = over.
+    # Stored separately so the GT reference (e.g. the forward C_0 mean) stays visible.
+    out["branch_length_mean_samp"] = float(bl_s.mean())
+    out["branch_length_mean_gt"] = float(bl_g.mean())
 
-    # decomposed per-axis offset: signed component + magnitude
+    # decomposed per-axis offset: signed component + magnitude (distances + directional means)
     for a, name in enumerate(_AXES):
         out[f"{name}_signed_w1"] = _w1(cs_local[:, a], c0_local[:, a])
         out[f"{name}_signed_ks"] = _ks(cs_local[:, a], c0_local[:, a])
         out[f"{name}_mag_w1"] = _w1(np.abs(cs_local[:, a]), np.abs(c0_local[:, a]))
+        out[f"{name}_signed_mean_samp"] = float(cs_local[:, a].mean())
+        out[f"{name}_signed_mean_gt"] = float(c0_local[:, a].mean())
+        out[f"{name}_mag_mean_samp"] = float(np.abs(cs_local[:, a]).mean())
+        out[f"{name}_mag_mean_gt"] = float(np.abs(c0_local[:, a]).mean())
 
     # turning angle psi = angle between offset and forward axis = acos(C_fwd / |C|)
     with np.errstate(invalid="ignore", divide="ignore"):
@@ -294,6 +303,10 @@ def main():
     ap.add_argument("--batch-size", type=int, default=512)
     ap.add_argument("--device", default="cuda" if th.cuda.is_available() else "cpu")
     ap.add_argument("--out", default="tf_dist.pkl")
+    ap.add_argument("--num-steps", type=int, default=None,
+                    help="override diffusion.num_steps for sampling. =1 -> one Euler step from "
+                         "pure noise (the one-shot 'forward' analog, in the same KS units as the "
+                         "default full-sampling run). Default None keeps the config value.")
     args = ap.parse_args()
 
     th.set_float32_matmul_precision("high")
@@ -308,13 +321,20 @@ def main():
     model, method = build_model_diffusion_method(cfg)
     model = model.to(args.device); method = method.to(args.device)
 
+    base_ns = int(getattr(method.diffusion, "num_steps", 10))
+    eff_ns = base_ns if args.num_steps is None else int(args.num_steps)
+    method.diffusion.num_steps = eff_ns
+    if eff_ns != base_ns:
+        print(f"  num_steps override: {base_ns} -> {eff_ns}"
+              f"{'  (one-shot forward analog)' if eff_ns == 1 else ''}")
+
     ckdir = Path(args.ckpt_dir)
     if args.steps == ["all"]:
         steps = sorted(int(p.stem.split("_")[1]) for p in ckdir.glob("step_*.pt"))
     else:
         steps = [int(s) for s in args.steps]
 
-    results = {"uhat": uhat.tolist(), "n_graphs": n_used, "by_step": {}}
+    results = {"uhat": uhat.tolist(), "n_graphs": n_used, "num_steps": eff_ns, "by_step": {}}
     for step in steps:
         ck = ckdir / f"step_{step}.pt"
         if not ck.exists():

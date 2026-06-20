@@ -44,6 +44,13 @@ def test_distribution_metrics_keys_and_finite():
         assert math.isfinite(d[k]), f"{k} not finite"
     # forward was inflated -> forward W1 should be clearly > sideways W1 (which is unchanged)
     assert d["fwd_signed_w1"] > d["side_signed_w1"]
+    # directional means present, finite, and capture the over/under sign (symmetric W1 cannot)
+    for k in ("branch_length_mean_samp", "branch_length_mean_gt",
+              "fwd_mag_mean_samp", "fwd_mag_mean_gt", "fwd_signed_mean_samp",
+              "side_mag_mean_samp", "axial_mag_mean_gt"):
+        assert k in d and math.isfinite(d[k]), f"bad {k}"
+    # forward magnitude was inflated in the synthetic -> sampled mean > GT mean (over-production)
+    assert d["fwd_mag_mean_samp"] > d["fwd_mag_mean_gt"]
 
 
 def test_expansion_metrics():
