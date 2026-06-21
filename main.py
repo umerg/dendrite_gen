@@ -292,9 +292,13 @@ def main(cfg: DictConfig):
             diffusion = gg.diffusion.EDMDiffusionModel(
                 num_steps=diffusion_cfg.num_steps,
             )
-        elif diffusion_name == "flow":
+        elif diffusion_name in ("flow", "flow_v"):
             _prior_std_pos = getattr(diffusion_cfg, "prior_std_pos", None)
-            diffusion = gg.diffusion.FlowMatchingModel(
+            _flow_cls = (
+                gg.diffusion.VFlowMatchingModel if diffusion_name == "flow_v"
+                else gg.diffusion.FlowMatchingModel
+            )
+            diffusion = _flow_cls(
                 num_steps=diffusion_cfg.num_steps,
                 prior_std=getattr(diffusion_cfg, "prior_std", 1.0),
                 time_dist=getattr(diffusion_cfg, "time_dist", "uniform"),

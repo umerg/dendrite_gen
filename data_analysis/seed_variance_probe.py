@@ -73,9 +73,13 @@ def build_model_diffusion_method(cfg):
         diffusion = gg.diffusion.DenoisingDiffusionModel(num_steps=dcfg.num_steps)
     elif name == "edm":
         diffusion = gg.diffusion.EDMDiffusionModel(num_steps=dcfg.num_steps)
-    elif name == "flow":
+    elif name in ("flow", "flow_v"):
         psp = getattr(dcfg, "prior_std_pos", None)
-        diffusion = gg.diffusion.FlowMatchingModel(
+        flow_cls = (
+            gg.diffusion.VFlowMatchingModel if name == "flow_v"
+            else gg.diffusion.FlowMatchingModel
+        )
+        diffusion = flow_cls(
             num_steps=dcfg.num_steps,
             prior_std=getattr(dcfg, "prior_std", 1.0),
             time_dist=getattr(dcfg, "time_dist", "uniform"),

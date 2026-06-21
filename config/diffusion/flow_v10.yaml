@@ -1,0 +1,17 @@
+name: "flow_v"      # V-prediction (velocity) flow-matching: VFlowMatchingModel.
+                     # Identical to flow10 except the parameterization, so it is a clean
+                     # A/B against the data-prediction baseline. After it validates, sweep
+                     # num_steps (v-pred should improve/plateau, not U-turn) and layer on
+                     # sigma_min / time_dist=beta as desired.
+num_steps: 10        # straight paths need fewer steps than diffusion's 64
+prior_std: 1.0       # Gaussian prior scale; tune to local-frame C_0 magnitude
+prior_std_pos: [0.74, 0.61, 0.83]  # per-axis prior std [forward, sideways, axial] of C_0 in scaled space;
+                     # null -> isotropic prior_std. Dataset-specific (do NOT hardcode here).
+                     # Neuron values (÷45.1, ~800 graphs): [0.74, 0.61, 0.83] -- set via CLI
+                     # override 'diffusion.prior_std_pos=[0.74,0.61,0.83]' for neuron runs.
+                     # Tree values (÷0.5, ~1000 graphs, z-axis): [0.57, 0.51, 1.70] -- override
+                     # 'diffusion.prior_std_pos=[0.57,0.51,1.70]' for tree runs.
+time_dist: "uniform" # "uniform" | "beta"
+beta_a: 2.0
+beta_b: 1.0
+sigma_min: 0.0       # optional small on-path noise; 0 = pure linear OT path
