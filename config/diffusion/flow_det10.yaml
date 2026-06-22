@@ -1,0 +1,11 @@
+name: "flow"
+num_steps: 10        # straight paths need fewer steps than diffusion's 64
+prior_std: 1.0       # Gaussian prior scale; tune to local-frame C_0 magnitude
+prior_std_pos: [0.141, 0.598, 0.392]  # per-axis prior std [forward, sideways, axial] of C_0;
+                     # measured on deterministic_synth (2000 trees, all non-root leaves) via
+                     # the pre-flight check. forward/axial have a positive mean shift (growth),
+                     # like neurons; axial std is inflated by the 4 root children (~3.3 out).
+time_dist: "uniform" # "uniform" | "beta"
+beta_a: 2.0
+beta_b: 1.0
+sigma_min: 0.0       # optional small on-path noise; 0 = pure linear OT path

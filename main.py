@@ -242,6 +242,16 @@ def main(cfg: DictConfig):
             max_size=cfg.dataset.max_size,
             seed=2,
         )
+    elif cfg.dataset.name == "deterministic_synth":  # zero-conditional-entropy probe dataset
+        train_graphs = gg.data.generate_deterministic_trees(
+            num_graphs=cfg.dataset.train_size, seed=0,
+        )
+        validation_graphs = gg.data.generate_deterministic_trees(
+            num_graphs=cfg.dataset.val_size, seed=1,
+        )
+        test_graphs = gg.data.generate_deterministic_trees(
+            num_graphs=cfg.dataset.test_size, seed=2,
+        )
     else:
         raise ValueError(f"Unknown dataset name: {cfg.dataset.name}")
 
