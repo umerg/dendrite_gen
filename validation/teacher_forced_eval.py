@@ -164,14 +164,29 @@ def compute_tf_expansion_metrics(e_samp: np.ndarray, leaf_expansion: np.ndarray)
     return out
 
 
-def _metrics_from_pools(cap: dict, level_min: int = 30) -> dict:
-    """Assemble overall + per-reduction-level metric blocks from pooled captured arrays."""
+def _metrics_from_pools(cap: dict, level_min: int = 30, min_depth: int = 0) -> dict:
+    """Assemble overall + per-reduction-level + per-tree-depth metric blocks.
+
+    `level_min` is a per-bucket leaf-COUNT floor (a bucket is reported only if it has
+    >= level_min leaves) -- NOT a starting depth. `min_depth` (tree depth, from `ldepth`)
+    restricts the OVERALL `dist`/`exp` to leaves at depth >= min_depth, e.g. min_depth=2
+    drops the root children (the deterministic-interior view).
+    """
+    # Optional tree-depth restriction of the pooled (overall) metrics.
+    if min_depth > 0 and "ldepth" in cap:
+        keep = cap["ldepth"] >= min_depth
+        n = keep.shape[0]
+        cap = {k: (v[keep] if isinstance(v, np.ndarray) and v.shape[0] == n else v)
+               for k, v in cap.items()}
+
     res = {
         "n_leaves": int(cap["cs"].shape[0]),
+        "min_depth": int(min_depth),
         "dist": compute_tf_distribution_metrics(
             cap["cs"], cap["c0"], cap["fwd"], cap["side"], cap["uhat"], cap["lp"]),
         "exp": compute_tf_expansion_metrics(cap["es"], cap["lexp"]),
         "by_level": {},
+        "by_depth": {},
     }
     levels = cap["level"]
     for lv in np.unique(levels):
@@ -184,11 +199,25 @@ def _metrics_from_pools(cap: dict, level_min: int = 30) -> dict:
                 cap["cs"][m], cap["c0"][m], cap["fwd"][m], cap["side"][m], cap["uhat"], cap["lp"][m]),
             "exp": compute_tf_expansion_metrics(cap["es"][m], cap["lexp"][m]),
         }
+    # Per-tree-depth breakdown (the quality-vs-depth curve).
+    if "ldepth" in cap:
+        depths = cap["ldepth"]
+        for dv in np.unique(depths):
+            m = depths == dv
+            if int(m.sum()) < level_min:
+                continue
+            res["by_depth"][int(dv)] = {
+                "n": int(m.sum()),
+                "dist": compute_tf_distribution_metrics(
+                    cap["cs"][m], cap["c0"][m], cap["fwd"][m], cap["side"][m], cap["uhat"], cap["lp"][m]),
+                "exp": compute_tf_expansion_metrics(cap["es"][m], cap["lexp"][m]),
+            }
     return res
 
 
 # --------------------------------------------------------------------------- runner
-def evaluate_teacher_forced(method, model, batches, uhat, device="cpu", level_min: int = 30) -> dict:
+def evaluate_teacher_forced(method, model, batches, uhat, device="cpu", level_min: int = 30,
+                            min_depth: int = 0) -> dict:
     """Run teacher-forced sampling over GT reduction `batches`; return the metric suite.
 
     Pure given a built (method, model). Installs a temporary hook routing the training
@@ -212,6 +241,22 @@ def evaluate_teacher_forced(method, model, batches, uhat, device="cpu", level_mi
         lit = kw["leaf_idx_train"]
         leaf_graph = kw["batch"][lit]                     # [L] graph-in-batch per leaf
         levels = cur["red_level"][leaf_graph]
+        # True tree depth of each leaf, from parent_idx ([N], 0-based, -1 for roots).
+        # Fixpoint: depth[root]=0, depth[n]=depth[parent]+1. Lets us pool/filter by
+        # tree depth (e.g. min_depth=2 drops the root children = the is_root_child analog).
+        pidx = kw["parent_idx"]
+        node_depth = th.full((pidx.numel(),), -1, dtype=th.long, device=pidx.device)
+        node_depth[pidx < 0] = 0
+        pclip = pidx.clamp(min=0)
+        for _ in range(int(pidx.numel()) + 1):
+            unresolved = node_depth < 0
+            if not bool(unresolved.any()):
+                break
+            can = unresolved & (pidx >= 0) & (node_depth[pclip] >= 0)
+            if not bool(can.any()):
+                break
+            node_depth = th.where(can, node_depth[pclip] + 1, node_depth)
+        leaf_depth = node_depth[lit]
         # C_0, leaf_expansion, local_forward, local_sideways are already leaf-aligned ([L,...])
         stash.update(
             cs=C_samp.detach().cpu().numpy(),
@@ -222,12 +267,13 @@ def evaluate_teacher_forced(method, model, batches, uhat, device="cpu", level_mi
             fwd=kw["local_forward"].detach().cpu().numpy(),
             side=kw["local_sideways"].detach().cpu().numpy(),
             level=levels.detach().cpu().numpy(),
+            ldepth=leaf_depth.detach().cpu().numpy(),
         )
         z = kw["P_0"].new_zeros(())
         return z, z, {}
 
     method.diffusion.forward = hook
-    pools = {k: [] for k in ("cs", "es", "c0", "lexp", "lp", "fwd", "side", "level")}
+    pools = {k: [] for k in ("cs", "es", "c0", "lexp", "lp", "fwd", "side", "level", "ldepth")}
     try:
         with th.no_grad():
             for batch in batches:
@@ -251,19 +297,35 @@ def evaluate_teacher_forced(method, model, batches, uhat, device="cpu", level_mi
         return {"n_leaves": 0, "dist": {}, "exp": {}, "by_level": {}}
     cap = {k: np.concatenate(v) for k, v in pools.items()}
     cap["uhat"] = np.asarray(uhat, dtype=np.float64).reshape(3)
-    return _metrics_from_pools(cap, level_min=level_min)
+    return _metrics_from_pools(cap, level_min=level_min, min_depth=min_depth)
 
 
 # --------------------------------------------------------------------------- CLI sweep
-def _build_eval_batches(cfg, eval_dir, n_graphs, batch_size):
-    """Deterministic fixed GT reduction batches (full coverage) from the eval trees."""
+def _build_eval_batches(cfg, eval_dir, n_graphs, batch_size, gen_seed=1):
+    """Deterministic fixed GT reduction batches (full coverage) from the eval trees.
+
+    Eval trees come from SWC files in `eval_dir` for real datasets, OR are generated
+    in-memory for synthetic datasets (`cfg.dataset.load == False`). For the
+    deterministic_synth probe, `gen_seed=1` reproduces the exact training val set.
+    """
     import graph_generation as gg
     from torch_geometric.data import Batch
     from utils.data_loading import load_swc_graphs_from_dir, nx_graph_to_adj_pos
     from graph_generation.data.reduction_dataset import PrecomputedRedDataset
 
     psf = float(getattr(cfg.dataset, "pos_scale_factor", 1.0) or 1.0)
-    graphs = load_swc_graphs_from_dir(eval_dir)
+    if not getattr(cfg.dataset, "load", True):
+        # In-memory generated dataset (mirror main.py's dataset-selection branch).
+        if cfg.dataset.name == "deterministic_synth":
+            graphs = gg.data.generate_deterministic_trees(num_graphs=n_graphs, seed=gen_seed)
+        else:
+            raise ValueError(
+                f"No in-memory eval generator wired for dataset '{cfg.dataset.name}'. "
+                "Add a branch here or provide --eval-dir with SWC files.")
+    else:
+        if eval_dir is None:
+            raise ValueError("--eval-dir is required for SWC-loaded datasets (cfg.dataset.load=True).")
+        graphs = load_swc_graphs_from_dir(eval_dir)
     for G in graphs:
         if G.graph.get("root") is None or G.graph["root"] not in G.nodes:
             G.graph["root"] = next(iter(G.nodes))
@@ -295,7 +357,9 @@ def main():
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt-dir", required=True)
-    ap.add_argument("--eval-dir", required=True)
+    ap.add_argument("--eval-dir", default=None,
+                    help="dir of SWC eval trees. Required for SWC-loaded datasets; ignored for "
+                         "in-memory generated datasets (cfg.dataset.load=False, e.g. deterministic_synth).")
     ap.add_argument("--config-name", default="neuron_dataset_run_3")
     ap.add_argument("--config-dir", default=str(REPO / "config"))
     ap.add_argument("--steps", nargs="+", default=["all"], help="checkpoint steps, or 'all'")
@@ -307,6 +371,12 @@ def main():
                     help="override diffusion.num_steps for sampling. =1 -> one Euler step from "
                          "pure noise (the one-shot 'forward' analog, in the same KS units as the "
                          "default full-sampling run). Default None keeps the config value.")
+    ap.add_argument("--gen-seed", type=int, default=1,
+                    help="RNG seed for in-memory generated eval datasets (1 = the training val set).")
+    ap.add_argument("--min-depth", type=int, default=0,
+                    help="restrict OVERALL metrics to leaves at tree depth >= this. 2 drops the root "
+                         "children (the deterministic-interior view). 0 = no filter. (Distinct from "
+                         "level_min, which is a per-bucket leaf-count floor, not a start depth.)")
     args = ap.parse_args()
 
     th.set_float32_matmul_precision("high")
@@ -315,7 +385,8 @@ def main():
     uhat = np.asarray(getattr(cfg.model, "so2_axis", [0., 1., 0.]), dtype=float).reshape(3)
 
     print(f"device={args.device}  building fixed GT reduction batches ...")
-    batches, n_used = _build_eval_batches(cfg, args.eval_dir, args.n_graphs, args.batch_size)
+    batches, n_used = _build_eval_batches(cfg, args.eval_dir, args.n_graphs, args.batch_size,
+                                          gen_seed=args.gen_seed)
     print(f"  {n_used} eval graphs -> {len(batches)} batches")
 
     model, method = build_model_diffusion_method(cfg)
@@ -334,20 +405,23 @@ def main():
     else:
         steps = [int(s) for s in args.steps]
 
-    results = {"uhat": uhat.tolist(), "n_graphs": n_used, "num_steps": eff_ns, "by_step": {}}
+    results = {"uhat": uhat.tolist(), "n_graphs": n_used, "num_steps": eff_ns,
+               "min_depth": args.min_depth, "by_step": {}}
     for step in steps:
         ck = ckdir / f"step_{step}.pt"
         if not ck.exists():
             print(f"[skip] {ck} not found"); continue
         t0 = time.time()
         load_ckpt(model, str(ck), args.device)
-        res = evaluate_teacher_forced(method, model, batches, uhat, device=args.device)
+        res = evaluate_teacher_forced(method, model, batches, uhat, device=args.device,
+                                      min_depth=args.min_depth)
         results["by_step"][step] = res
         d = res["dist"]
         print(f"  step {step}: tf branch_len_w1={d.get('branch_length_w1', float('nan')):.3f} "
               f"bif_angle_w1={d.get('bifurcation_angle_w1', float('nan')):.3f} "
               f"exp_acc={res['exp'].get('acc', float('nan')):.3f} "
-              f"(n={res['n_leaves']}, {time.time()-t0:.0f}s)")
+              f"(n={res['n_leaves']}{f', depth>={args.min_depth}' if args.min_depth else ''}, "
+              f"{time.time()-t0:.0f}s)")
         with open(args.out, "wb") as f:
             pickle.dump(results, f)
     with open(args.out, "wb") as f:
