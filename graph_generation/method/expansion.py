@@ -16,6 +16,7 @@ def _t(device: th.device) -> float:
     return time.perf_counter()
 
 from .helpers import (
+    build_augmented_edge_index,
     build_directed_edge_index,
     compute_local_bases_for_leaves,
     decode_parent_indices,
@@ -34,6 +35,8 @@ class Expansion(Method):
 
     EDGE_PARENT_TO_CHILD = 0
     EDGE_CHILD_TO_PARENT = 1
+    EDGE_SIBLING = 2
+    EDGE_NEIGHBOUR = 3
 
     def __init__(
         self,
@@ -42,13 +45,37 @@ class Expansion(Method):
         expansion_loss_weight: float = 1.0,
         use_size_ratio: bool = True,
         max_tree_size: int = 500,
+        augment_edges: bool = False,
+        neighbour_k: int = 12,
+        neighbour_radius: float = 1.0e9,
     ):
         super().__init__(diffusion=diffusion)
         self.red_threshold = red_threshold
         self.expansion_loss_weight = float(expansion_loss_weight)
         self.use_size_ratio = use_size_ratio
         self.max_tree_size = max_tree_size
-    
+        self.augment_edges = bool(augment_edges)
+        self.neighbour_k = int(neighbour_k)
+        self.neighbour_radius = float(neighbour_radius)
+
+    def _build_edges(self, parent_idx: th.Tensor, pos: th.Tensor, leaf_idx: th.Tensor):
+        """Build (edge_index, edge_types): augmented (sibling+neighbour) if enabled, else directed."""
+        if self.augment_edges:
+            return build_augmented_edge_index(
+                parent_idx, pos, leaf_idx,
+                neighbour_k=self.neighbour_k,
+                neighbour_radius=self.neighbour_radius,
+                edge_parent_to_child=self.EDGE_PARENT_TO_CHILD,
+                edge_child_to_parent=self.EDGE_CHILD_TO_PARENT,
+                edge_sibling=self.EDGE_SIBLING,
+                edge_neighbour=self.EDGE_NEIGHBOUR,
+            )
+        return build_directed_edge_index(
+            parent_idx,
+            edge_parent_to_child=self.EDGE_PARENT_TO_CHILD,
+            edge_child_to_parent=self.EDGE_CHILD_TO_PARENT,
+        )
+
     def sample_graphs(self, target_size: th.Tensor, model: Module, tmd: th.Tensor | None = None,
                       num_root_children: th.Tensor | int | None = None):
         """Generate graphs via iterative diffusion-based leaf expansion."""
@@ -332,11 +359,8 @@ class Expansion(Method):
         )
 
         # --- Build edge index, local bases, and precompute geometry BEFORE feature assembly ---
-        edge_index, edge_types = build_directed_edge_index(
-            parent_idx_new_0b,
-            edge_parent_to_child=self.EDGE_PARENT_TO_CHILD,
-            edge_child_to_parent=self.EDGE_CHILD_TO_PARENT,
-        )
+        # leaf_idx_next = the leaves being diffused this step (neighbour anchors = their fixed parents)
+        edge_index, edge_types = self._build_edges(parent_idx_new_0b, pos_new, leaf_idx_next)
         if edge_types.numel():
             edge_attr = edge_types.unsqueeze(-1).to(pos_new.dtype)
         else:
@@ -355,6 +379,7 @@ class Expansion(Method):
         with th.no_grad():
             pre_geom_p0 = precompute_full_geometry(
                 pos_new, parent_idx_new_0b, edge_index, model.uhat,
+                edge_types=edge_types,
             )
 
         # Override leaf local bases in pre_geom_p0 with the frames from
@@ -499,11 +524,8 @@ class Expansion(Method):
 
         # --- graph and positions
         pos_gt = batch.pos                             # [N,3] (absolute, untouched)
-        edge_index, edge_types = build_directed_edge_index(
-            parent_idx,
-            edge_parent_to_child=self.EDGE_PARENT_TO_CHILD,
-            edge_child_to_parent=self.EDGE_CHILD_TO_PARENT,
-        )
+        # NOTE: edge_index is built below, once leaf_idx_train is known — augmented
+        # neighbour edges need the set of diffusing leaves (anchored on their parents).
 
         # --- tracking of leaves
         if not hasattr(batch, "leaf_idx"):
@@ -561,6 +583,11 @@ class Expansion(Method):
         #         unshifted,
         #     )
         
+        # --- build edges now that leaf_idx_train (the diffusing leaves) is finalized.
+        # Augmented builder anchors neighbours on the (clean) parents and searches over
+        # non-diffusing nodes only — it never reads a diffusing leaf's own P_0 position.
+        edge_index, edge_types = self._build_edges(parent_idx, pos_gt, leaf_idx_train)
+
         # --- relative position conformation matrix for new/train leaves
         leaf_rel_pos_global = leaf_rel_targets(pos_gt, leaf_idx_train, leaf_parent_idx)  # [L,3]
 
@@ -570,6 +597,7 @@ class Expansion(Method):
         with th.no_grad():
             pre_geom_p0 = precompute_full_geometry(
                 pos_gt, parent_idx, edge_index, uhat,
+                edge_types=edge_types,
                 debug=getattr(self, "debug", False),
             )
         # --- Convert targets to local frame for SO(2)-equivariant loss

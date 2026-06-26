@@ -87,7 +87,11 @@ def get_expansion_items(cfg: DictConfig, train_graphs, diffusion=None):
     edge_embedding_nums = [2]
     edge_embedding_dims = [4]
     edge_attr_dim = 1  # initial edge attribute dimension - label category
-    if cfg.method.name == "expansion_augmented":
+    if getattr(cfg.method, "augment_edges", False):
+        # parent->child(0), child->parent(1), sibling(2), neighbour(3)
+        edge_embedding_nums = [4]
+        print(f"Augmented edges ON: edge_embedding_nums={edge_embedding_nums}, dims={edge_embedding_dims}")
+    elif cfg.method.name == "expansion_augmented":
         edge_embedding_nums = [3]
         edge_embedding_dims = [4]
         print(f"Using augmented expansion with edge embeddings: nums {edge_embedding_nums}, dims {edge_embedding_dims}")
@@ -169,6 +173,9 @@ def get_expansion_items(cfg: DictConfig, train_graphs, diffusion=None):
             expansion_loss_weight=expansion_loss_weight,
             use_size_ratio=use_size_ratio,
             max_tree_size=getattr(cfg.method, "max_tree_size", 500),
+            augment_edges=getattr(cfg.method, "augment_edges", False),
+            neighbour_k=getattr(cfg.method, "neighbour_k", 12),
+            neighbour_radius=getattr(cfg.method, "neighbour_radius", 1.0e9),
         )
     elif method_name == "expansion":
         method = gg.method.Expansion_OneShot(

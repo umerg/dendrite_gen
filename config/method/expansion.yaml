@@ -8,3 +8,10 @@ use_radial_distance: False
 deterministic_expansion: True
 use_size_ratio: False
 max_tree_size: 300
+
+# Augmented edges variant (optional). When True, the edge graph gains sibling
+# edges (type 2) and parent-anchored neighbour edges (type 3, internal->leaf).
+# See AUGMENTED_EDGES_PARADIGM.md.
+augment_edges: False
+neighbour_k: 12            # max neighbour edges per diffusing leaf (k-cap)
+neighbour_radius: 1.0e9    # neighbour radius around the parent; tune to data scale

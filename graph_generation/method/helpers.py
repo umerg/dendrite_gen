@@ -42,6 +42,105 @@ def build_directed_edge_index(
     return edge_index, edge_types
 
 
+def build_augmented_edge_index(
+    parent_idx: th.Tensor,
+    pos: th.Tensor,
+    leaf_idx: th.Tensor | None,
+    *,
+    neighbour_k: int,
+    neighbour_radius: float,
+    edge_parent_to_child: int = 0,
+    edge_child_to_parent: int = 1,
+    edge_sibling: int = 2,
+    edge_neighbour: int = 3,
+) -> tuple[th.Tensor, th.Tensor]:
+    """Directed edges with categorical types: parent/child + sibling + neighbour.
+
+    Drop-in for ``build_directed_edge_index`` returning ``(edge_index, edge_types)``:
+
+    * type 0/1 — parent->child / child->parent (topological, as before).
+    * type 2   — sibling<->sibling (both directions), purely topological.
+    * type 3   — neighbour internal->leaf, *parent-anchored*: a diffusing leaf's
+      neighbours are its (fixed) parent's k-NN over non-diffusing nodes
+      (radius-then-cap). The leaf's own position is NEVER read, so the edge *set*
+      is identical in training and sampling. Directed internal->leaf only.
+
+    ``leaf_idx`` = indices of the leaves being diffused this step. Candidates for
+    neighbour edges are all nodes NOT in ``leaf_idx`` (clean/fixed positions).
+    """
+    device = parent_idx.device
+    dtype = parent_idx.dtype
+    N = parent_idx.numel()
+
+    src_list: list[int] = []
+    dst_list: list[int] = []
+    type_list: list[int] = []
+    parent_to_children: dict[int, list[int]] = {}
+
+    # --- parent/child edges + collect children per parent ---
+    par_of = parent_idx.tolist()
+    for child, parent in enumerate(par_of):
+        if parent >= 0:
+            src_list.append(parent); dst_list.append(child); type_list.append(edge_parent_to_child)
+            src_list.append(child); dst_list.append(parent); type_list.append(edge_child_to_parent)
+            parent_to_children.setdefault(parent, []).append(child)
+
+    # --- sibling edges: all ordered pairs (both directions, one type) ---
+    for sibs in parent_to_children.values():
+        if len(sibs) < 2:
+            continue
+        for i in range(len(sibs)):
+            for j in range(len(sibs)):
+                if i == j:
+                    continue
+                src_list.append(sibs[i]); dst_list.append(sibs[j]); type_list.append(edge_sibling)
+
+    # --- neighbour edges: internal -> leaf, parent-anchored, radius-then-cap ---
+    leaf_list = leaf_idx.tolist() if (leaf_idx is not None and leaf_idx.numel() > 0) else []
+    if leaf_list and neighbour_k and neighbour_k > 0:
+        diffusing = set(leaf_list)
+        cand = [n for n in range(N) if n not in diffusing]  # non-diffusing (fixed) nodes
+        if cand:
+            cand_t = th.tensor(cand, device=device, dtype=th.long)
+            cand_pos = pos[cand_t]  # [C, 3] — fixed positions only
+
+            # group diffusing leaves by their (fixed) parent
+            leaves_by_parent: dict[int, list[int]] = {}
+            for lf in leaf_list:
+                p = par_of[lf]
+                if p < 0:
+                    continue  # root leaf: no parent anchor -> no neighbours
+                leaves_by_parent.setdefault(p, []).append(lf)
+
+            for p, lvs in leaves_by_parent.items():
+                # distance from the (fixed) parent to every candidate
+                d = (cand_pos - pos[p].unsqueeze(0)).norm(dim=-1)  # [C]
+                within = (d <= neighbour_radius) & (cand_t != p)
+                idxs = within.nonzero(as_tuple=False).flatten()
+                if idxs.numel() == 0:
+                    continue
+                d_sel = d[idxs]
+                cand_sel = cand_t[idxs]
+                if cand_sel.numel() > neighbour_k:
+                    _, topi = th.topk(d_sel, neighbour_k, largest=False)
+                    cand_sel = cand_sel[topi]
+                neigh = cand_sel.tolist()
+                sib_set = set(parent_to_children.get(p, []))
+                for lf in lvs:
+                    for q in neigh:
+                        if q in sib_set:
+                            continue  # actual siblings are type-2 connected
+                        src_list.append(q); dst_list.append(lf); type_list.append(edge_neighbour)
+
+    if src_list:
+        edge_index = th.tensor([src_list, dst_list], device=device, dtype=dtype)
+        edge_types = th.tensor(type_list, device=device, dtype=dtype)
+    else:
+        edge_index = parent_idx.new_zeros((2, 0))
+        edge_types = parent_idx.new_zeros((0,))
+    return edge_index, edge_types
+
+
 def graph_target_sizes_from_batch(batch, device: th.device) -> Optional[th.Tensor]:
     """Extract per-graph total tree sizes from a batched PyG Data object."""
     target_attr = getattr(batch, "total_tree_size", None)
@@ -719,6 +818,57 @@ def assign_parent_scalar_to_edges(
     return scalar_edge
 
 
+def assign_augmented_edge_bearings(
+    edge_index: torch.Tensor,
+    edge_types: torch.Tensor,
+    rel_coors: torch.Tensor,
+    local_forward: torch.Tensor,
+    uhat: torch.Tensor,
+    cospsi_edge: torch.Tensor,
+    sinpsi_edge: torch.Tensor,
+    cos_theta_edge: torch.Tensor,
+    *,
+    eps: float = 1e-8,
+    aug_types: tuple[int, ...] = (2, 3),
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Fill in-plane bearing (cosφ, sinφ) + axial tilt (cosθ) for augmented edges.
+
+    Augmented edges (``edge_types`` in ``aug_types`` — siblings/neighbours) carry no
+    parent-centric branch angle, so ``assign_branch_angles_to_edges`` leaves their
+    rows at 0. Here we fill exactly those rows with the bearing of ``rel_coors``
+    measured in the **receiver** node's parent-relative frame ``local_forward[dst]``.
+    Parent/child rows are left untouched (no regression to the proven path).
+
+    For a parent->child edge this formula reproduces the existing ψ — it is a
+    generalisation of the branch-angle decomposition, not a replacement.
+    """
+    if edge_types is None or edge_index.size(1) == 0:
+        return cospsi_edge, sinpsi_edge, cos_theta_edge
+    src, dst = edge_index
+    mask = torch.zeros(edge_types.numel(), dtype=torch.bool, device=edge_index.device)
+    for t in aug_types:
+        mask |= (edge_types == t)
+    if not mask.any():
+        return cospsi_edge, sinpsi_edge, cos_theta_edge
+
+    sel = mask.nonzero(as_tuple=False).flatten()
+    rel = rel_coors[sel]                                      # [M, 3]
+    f = local_forward[dst[sel]]                              # [M, 3] receiver (dst) frame fwd
+    du = (rel * uhat).sum(dim=-1, keepdim=True)              # [M, 1] axial (global uhat)
+    rel_perp = rel - du * uhat                               # [M, 3]
+    ru = rel_perp / (rel_perp.norm(dim=-1, keepdim=True) + eps)
+    cosphi = (ru * f).sum(dim=-1, keepdim=True)             # [M, 1]
+    cross = torch.cross(f, ru, dim=-1)                       # [M, 3] (matches cross(v_in, v_out))
+    sinphi = (cross * uhat).sum(dim=-1, keepdim=True)        # [M, 1]
+    costheta = du / (rel.norm(dim=-1, keepdim=True) + eps)   # [M, 1]
+
+    cospsi_edge = cospsi_edge.clone()
+    sinpsi_edge = sinpsi_edge.clone()
+    cos_theta_edge = cos_theta_edge.clone()
+    cospsi_edge[sel] = cosphi
+    sinpsi_edge[sel] = sinphi
+    cos_theta_edge[sel] = costheta
+    return cospsi_edge, sinpsi_edge, cos_theta_edge
 
 
 def compute_geo_order(
@@ -1082,6 +1232,7 @@ def precompute_full_geometry(
     edge_index: th.Tensor,
     uhat: th.Tensor,
     *,
+    edge_types: th.Tensor | None = None,
     eps: float = 1e-8,
     tol: float = 1e-6,
     debug: bool = False,
@@ -1132,6 +1283,14 @@ def precompute_full_geometry(
         _directions=dirs,
     )
 
+    # 7. Augmented-edge bearings (sibling/neighbour): fill the angle slots that
+    #    assign_branch_angles_to_edges left at 0, in the receiver (dst) frame.
+    if edge_types is not None:
+        cospsi_edge, sinpsi_edge, cos_theta_edge = assign_augmented_edge_bearings(
+            edge_index, edge_types, rel_coors, local_bases['local_forward'], uhat,
+            cospsi_edge, sinpsi_edge, cos_theta_edge, eps=eps,
+        )
+
     return {
         # edge-level (used by SO2_EGNN layers)
         'rel_coors': rel_coors,
@@ -1141,6 +1300,8 @@ def precompute_full_geometry(
         'cospsi_edge': cospsi_edge,
         'sinpsi_edge': sinpsi_edge,
         'cos_theta_edge': cos_theta_edge,
+        # edge types (carried so patch_geometry can re-fill augmented bearings)
+        'edge_types': edge_types,
         # node-level
         'cospsi_node': cospsi_node,
         'sinpsi_node': sinpsi_node,
@@ -1246,6 +1407,17 @@ def patch_geometry_for_noised_leaves(
     cos_theta_edge = assign_parent_scalar_to_edges(
         edge_index, parent_idx, cos_theta_node,
     )
+
+    # Re-fill augmented-edge bearings using the PATCHED rel_coors and the LOCKED
+    # local_forward (P_0 frame). All v1 augmented edges touch a diffusing leaf, so
+    # they are 'affected' above and their rel_coors is fresh; this is the value the
+    # model actually consumes.
+    edge_types = pre_geom_p0.get('edge_types')
+    if edge_types is not None:
+        cospsi_edge, sinpsi_edge, cos_theta_edge = assign_augmented_edge_bearings(
+            edge_index, edge_types, rel_coors, pre_geom_p0['local_forward'], uhat,
+            cospsi_edge, sinpsi_edge, cos_theta_edge, eps=eps,
+        )
 
     return {
         'rel_coors': rel_coors,
