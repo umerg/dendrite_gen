@@ -155,7 +155,8 @@ class VFlowMatchingModel(Module):
 
         N = P_0.size(0)
         e_feat = P_0.new_zeros((N, 1))
-        e_feat[leaf_idx_train] = e_t
+        # Positions-only variant: condition on the CLEAN GT expansion (see flow.py:forward).
+        e_feat[leaf_idx_train] = e_0 if getattr(self, "predict_positions_only", False) else e_t
         t_node = t_graph[batch].view(N, 1)
         node_feats_t = th.cat([node_feats, e_feat, t_node], dim=-1)
 
@@ -229,9 +230,15 @@ class VFlowMatchingModel(Module):
         local_sideways: th.Tensor | None = None,
         uhat: th.Tensor | None = None,
         pre_geom_p0: dict | None = None,
+        leaf_expansion: th.Tensor | None = None,
     ) -> tuple[th.Tensor, th.Tensor]:
         """Integrate the predicted velocity field from noise (t=0) to data (t=1) via explicit
-        Euler steps. The network output is used directly as the velocity (no 1/(1-t) term)."""
+        Euler steps. The network output is used directly as the velocity (no 1/(1-t) term).
+
+        ``leaf_expansion`` (positions-only / given-topology variant): when provided, the
+        expansion channel is pinned to the clean GT ``e_0`` in conditioning at every step
+        (not diffused), matching the positions-only training forward; only positions roll out.
+        """
         device = P_0.device
         model_kwargs = model_kwargs or {}
         if tmd is not None:
@@ -261,6 +268,11 @@ class VFlowMatchingModel(Module):
         C = th.randn((L, 3), device=device) * self._pos_scale(device, P_0.dtype)
         e = th.randn((L, 1), device=device) * self.prior_std
 
+        # Given-topology: pin the expansion channel to the clean GT label (no diffusion of e).
+        e_clean = None
+        if leaf_expansion is not None:
+            e_clean = (2.0 * leaf_expansion.to(device=device, dtype=P_0.dtype).view(-1, 1) - 1.0)
+
         for step in range(steps):
             t_cur = float(grid[step].item())
             t_next = float(grid[step + 1].item())
@@ -274,7 +286,7 @@ class VFlowMatchingModel(Module):
                 P_cur[leaf_idx] = parent_pos + C
 
             e_feat = P_0.new_zeros((N, 1))
-            e_feat[leaf_idx] = e
+            e_feat[leaf_idx] = e_clean if e_clean is not None else e
             t_feat = P_0.new_full((N, 1), t_cur)
             node_feats_t = th.cat([node_feats, e_feat, t_feat], dim=-1)
             x_in = th.cat([P_cur, node_feats_t], dim=-1)
@@ -304,11 +316,12 @@ class VFlowMatchingModel(Module):
 
             # Model output IS the velocity: integrate it directly (no 1/(1-t) reconstruction).
             vel_C = rel_pred_all[leaf_idx]
-            vel_e = exp_pred_all[leaf_idx]
-            if vel_e.dim() == 1:
-                vel_e = vel_e.unsqueeze(-1)
             C = C + dt * vel_C
-            e = e + dt * vel_e
+            if e_clean is None:
+                vel_e = exp_pred_all[leaf_idx]
+                if vel_e.dim() == 1:
+                    vel_e = vel_e.unsqueeze(-1)
+                e = e + dt * vel_e
 
-        # After integration C (and e) is the final offset at t = 1.
-        return C, e
+        # After integration C is the final offset at t = 1; pinned clean e for given-topology.
+        return C, (e_clean if e_clean is not None else e)

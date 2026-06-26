@@ -169,6 +169,8 @@ def get_expansion_items(cfg: DictConfig, train_graphs, diffusion=None):
             expansion_loss_weight=expansion_loss_weight,
             use_size_ratio=use_size_ratio,
             max_tree_size=getattr(cfg.method, "max_tree_size", 500),
+            predict_positions_only=getattr(cfg.method, "predict_positions_only", False),
+            given_topology=getattr(cfg.method, "given_topology", False),
         )
     elif method_name == "expansion":
         method = gg.method.Expansion_OneShot(

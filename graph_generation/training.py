@@ -17,6 +17,9 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from utils.tmd import compute_tmd_mixed, compute_tmd_embedding
 from validation.dist_metrics import compute_distribution_metrics, build_gt_cache
 from validation.plot import plot_graph_grid_angles, DEFAULT_ANGLES
+# NOTE: validation.teacher_forced_eval is imported lazily inside the methods that use it
+# (_tf_batches_for / evaluate) to avoid a circular import — that module pulls in
+# graph_generation.method.helpers, which re-enters the graph_generation package during init.
 
 # Optional / guarded imports (Hydra, OmegaConf, wandb)
 try:  # Hydra runtime config access
@@ -106,6 +109,7 @@ class Trainer:
         # real-vs-real floor are model-independent, so computed once per eval set.
         self._eval_cache: dict[int, dict] = {}
         self._floor_cache: dict[int, dict] = {}
+        self._tf_batch_cache: dict[int, list] = {}  # GT reduction batches for TF validation
         # Prefer CUDA, fallback to CPU (MPS has stability issues with PyG)
         if not cfg.debugging:
             if th.cuda.is_available():
@@ -478,6 +482,28 @@ class Trainer:
             self._eval_cache[key] = cache
         return cache
 
+    def _tf_batches_for(self, eval_graphs: list[nx.Graph]) -> list:
+        """Build (once, then cache) GT reduction batches for teacher-forced validation.
+
+        Mirrors the training data pipeline: same `cfg.reduction` factory and the same position
+        scaling (1/pos_scale_factor), so each sample is what `get_loss` consumes in training.
+        """
+        from validation.teacher_forced_eval import build_reduction_batches_from_graphs
+        key = id(eval_graphs)
+        batches = self._tf_batch_cache.get(key)
+        if batches is None:
+            psf = float(self.pos_scale_factor) if self.pos_scale_factor is not None else 1.0
+            tf_bs = int(getattr(self.cfg.validation, "tf_batch_size", 512))
+            # Bound cost: the full ODE runs over every reduction level of every graph, so cap the
+            # number of graphs (deterministic prefix; eval order is fixed). None -> use all.
+            tf_max = getattr(self.cfg.validation, "tf_max_graphs", None)
+            graphs = eval_graphs[: int(tf_max)] if tf_max else eval_graphs
+            batches = build_reduction_batches_from_graphs(
+                [G.copy() for G in graphs], self.cfg, tf_bs, psf
+            )
+            self._tf_batch_cache[key] = batches
+        return batches
+
     def _floor_for(self, eval_graphs: list[nx.Graph], cache: dict, uhat_np: np.ndarray) -> dict:
         """Real-vs-real floor: a train subset (matched to N) vs the eval/GT set, cached once."""
         key = id(eval_graphs)
@@ -636,6 +662,28 @@ class Trainer:
                         results["dist"]["headline_excess_mmd_morpho"] = float(gen_mmd - floor_mmd)
             self.logger.info(
                 "[evaluate beta=%s] dist_metrics=%.1fs", beta, time() - _t0_dist
+            )
+
+        # Teacher-forced metrics: replay GT reduction sequences through the full ODE sampler and
+        # compare to GT (W1/KS distribution distances + per-axis final-sample position MSE). This
+        # is the direct "is geometry being learned given topology" signal; ~one ODE sample per
+        # small val batch. Logged under validation/ema_{beta}/teacher_forced/*.
+        if getattr(self.cfg.validation, "enable_teacher_forced", False):
+            from validation.teacher_forced_eval import evaluate_teacher_forced
+            _t0_tf = time()
+            tf_batches = self._tf_batches_for(eval_graphs)
+            was_training = model.training
+            model.eval()  # dropout off for stable metrics
+            try:
+                results["teacher_forced"] = evaluate_teacher_forced(
+                    self.method, model, tf_batches, uhat_np, device=self.device,
+                    level_min=int(getattr(self.cfg.validation, "tf_level_min", 1)),
+                )
+            finally:
+                if was_training:
+                    model.train()
+            self.logger.info(
+                "[evaluate beta=%s] teacher_forced=%.1fs", beta, time() - _t0_tf
             )
 
         # Metric computation gated

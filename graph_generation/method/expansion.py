@@ -42,12 +42,21 @@ class Expansion(Method):
         expansion_loss_weight: float = 1.0,
         use_size_ratio: bool = True,
         max_tree_size: int = 500,
+        predict_positions_only: bool = False,
+        given_topology: bool = False,
     ):
         super().__init__(diffusion=diffusion)
         self.red_threshold = red_threshold
         self.expansion_loss_weight = float(expansion_loss_weight)
         self.use_size_ratio = use_size_ratio
         self.max_tree_size = max_tree_size
+        # Variant 1 — positions-only training / given-topology sampling.
+        self.predict_positions_only = bool(predict_positions_only)
+        self.given_topology = bool(given_topology)
+        # Propagate the training flag onto the diffusion so its forward pass conditions
+        # on the clean GT expansion instead of the noised e_t (topology is given).
+        if diffusion is not None:
+            diffusion.predict_positions_only = self.predict_positions_only
     
     def sample_graphs(self, target_size: th.Tensor, model: Module, tmd: th.Tensor | None = None,
                       num_root_children: th.Tensor | int | None = None):
@@ -719,7 +728,12 @@ class Expansion(Method):
         #     _t_geo_lr_loss, _t_diff_loss,
         # )
 
-        loss = position_loss + self.expansion_loss_weight * expansion_loss
+        if self.predict_positions_only:
+            # Variant 1: geometry-only objective; expansion_loss is still computed by the
+            # diffusion forward and logged below as a free diagnostic, but excluded here.
+            loss = position_loss
+        else:
+            loss = position_loss + self.expansion_loss_weight * expansion_loss
         metrics = {
             "leaf_pos_loss": float(position_loss.item()),
             "leaf_expansion_loss": float(expansion_loss.item()),

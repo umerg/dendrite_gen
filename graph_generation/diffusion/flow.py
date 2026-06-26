@@ -147,7 +147,10 @@ class FlowMatchingModel(Module):
 
         N = P_0.size(0)
         e_feat = P_0.new_zeros((N, 1))
-        e_feat[leaf_idx_train] = e_t
+        # Positions-only variant: topology is given, so condition on the CLEAN GT
+        # expansion e_0 rather than the noised e_t. The sampler must match this
+        # (see `sample(leaf_expansion=...)`), else train/sample conditioning mismatch.
+        e_feat[leaf_idx_train] = e_0 if getattr(self, "predict_positions_only", False) else e_t
         t_node = t_graph[batch].view(N, 1)
         node_feats_t = th.cat([node_feats, e_feat, t_node], dim=-1)
 
@@ -216,8 +219,16 @@ class FlowMatchingModel(Module):
         local_sideways: th.Tensor | None = None,
         uhat: th.Tensor | None = None,
         pre_geom_p0: dict | None = None,
+        leaf_expansion: th.Tensor | None = None,
     ) -> tuple[th.Tensor, th.Tensor]:
-        """Integrate the probability-flow ODE from noise (t=0) to data (t=1) via Euler steps."""
+        """Integrate the probability-flow ODE from noise (t=0) to data (t=1) via Euler steps.
+
+        ``leaf_expansion`` (positions-only / given-topology variant): when provided, the
+        topology is given, so the expansion channel is NOT diffused. We pin the conditioning
+        feature to the clean GT ``e_0 = 2*leaf_expansion - 1`` at every step — matching how
+        the positions-only training forward conditions — and return that clean ``e`` instead
+        of an integrated one. Only positions roll out from noise.
+        """
         device = P_0.device
         model_kwargs = model_kwargs or {}
         if tmd is not None:
@@ -247,6 +258,11 @@ class FlowMatchingModel(Module):
         C = th.randn((L, 3), device=device) * self._pos_scale(device, P_0.dtype)
         e = th.randn((L, 1), device=device) * self.prior_std
 
+        # Given-topology: pin the expansion channel to the clean GT label (no diffusion of e).
+        e_clean = None
+        if leaf_expansion is not None:
+            e_clean = (2.0 * leaf_expansion.to(device=device, dtype=P_0.dtype).view(-1, 1) - 1.0)
+
         C1_pred = th.zeros_like(C)
         e1_pred = th.zeros_like(e)
 
@@ -263,7 +279,7 @@ class FlowMatchingModel(Module):
                 P_cur[leaf_idx] = parent_pos + C
 
             e_feat = P_0.new_zeros((N, 1))
-            e_feat[leaf_idx] = e
+            e_feat[leaf_idx] = e_clean if e_clean is not None else e
             t_feat = P_0.new_full((N, 1), t_cur)
             node_feats_t = th.cat([node_feats, e_feat, t_feat], dim=-1)
             x_in = th.cat([P_cur, node_feats_t], dim=-1)
@@ -300,9 +316,10 @@ class FlowMatchingModel(Module):
             # (1 - t_cur) == dt, so the Euler update lands exactly on the clean prediction.
             inv_one_minus_t = 1.0 / max(1.0 - t_cur, 1e-12)
             vel_C = (C1_pred - C) * inv_one_minus_t
-            vel_e = (e1_pred - e) * inv_one_minus_t
             C = C + dt * vel_C
-            e = e + dt * vel_e
+            if e_clean is None:
+                vel_e = (e1_pred - e) * inv_one_minus_t
+                e = e + dt * vel_e
 
-        # After integration C ≈ C1_pred (and e ≈ e1_pred); return the integrated state.
-        return C, e
+        # After integration C ≈ C1_pred. For given-topology, return the pinned clean e.
+        return C, (e_clean if e_clean is not None else e)

@@ -1,0 +1,87 @@
+defaults:
+  - _self_
+  - dataset: trees
+  - diffusion: flow10
+  - method: expansion_positions_only   # Variant 1: predict_positions_only + given_topology ON
+
+reduction:
+  type: "depth"
+  mode: "stochastic"
+  cherry_p: 1.0 # imp now with new leaves tracking?
+  ensure_progress: True
+  root: 0
+  contract_root: False
+  num_red_seqs: -1
+  min_red_frac: 0.0
+  max_red_frac: 0.5
+  red_threshold: 0
+
+training:
+  batch_size: 512
+  lr: 5e-4
+  num_steps: 60000 # ~200 epochs; considering 1 step = 1 batch
+  max_num_workers: 0
+  log_interval: 100
+  save_checkpoint: True
+  resume: False #"/itet-stor/guptau/net_scratch/dendrite_gen/outputs/2026-03-21/08-51-39/checkpoints/step_60000.pt" # False, True (latest checkpoint), step number, or path to .pt file
+  lr_scheduler: "cosine_annealing"              # Enable cosine annealing
+  scheduler_T_max: ${training.num_steps}  # Optional: full cosine cycle length
+  scheduler_eta_min: 1e-5          # Optional: minimum learning rate
+  grad_clip_norm: 1.0   # max global grad-norm; null disables clipping. Pre-clip norm is always logged as training/grad_norm
+
+validation:
+  batch_size: 64 # adjust according train/val split - currently only 50 samples in val set
+  interval: 1000 # can make 5k
+  first_step: 0
+  per_graph_size: False
+  enable_metrics: False
+  enable_plots: True            # 3D multi-azimuth views (orbiting uhat) of gen + GT
+  enable_dist_metrics: True     # Wasserstein-1 of gen-vs-GT stat distributions
+  ged_enabled: False             # avg tree-edit distance (capped by node/pair count)
+  ged_timeout: 5.0
+  plot_angles: [[20, 30], [20, 120], [20, 210]]   # (elev, azim) around uhat
+  enable_ks: True               # KS alongside W1 (continuous features)
+  enable_morphometrics: True    # path/radial/contraction/order/strahler/asymmetry/sholl
+  enable_light_joint: True      # morpho + Euclidean-TMD MMD/Density/Coverage every val
+  enable_floor: True            # real-vs-real reference lines + headline excess
+  tmd_eval_filtration: radial_root
+  tmd_eval_bins: 16
+  tmd_pca_ncomp: 32             # PCA dim for TMD persistence-image embedding (eval)
+  dc_nearest_k: 5               # k for Density/Coverage
+  # Variant 1 — teacher-forced metrics at the validation step (W1/KS dist + per-axis final-sample
+  # pos MSE). Default OFF elsewhere; ON here. The pos MSE rides inside the TF eval (no extra flag).
+  enable_teacher_forced: True
+  tf_level_min: 1               # per-bucket leaf-count floor for by_level/by_depth (val sets tiny)
+  tf_max_graphs: 64             # cap graphs used for TF eval (full ODE per level); null = all
+
+testing: False # if True, only evaluate on test set
+
+model:
+  name: egnn
+  num_layers: 12
+  feats_dim: 128
+  m_dim: 256
+  tmd_in_dim: 0
+  tmd_hidden_dim: 0
+  dropout: 0.1
+  norm_feats: True
+  global_linear_attn_every: 2
+  global_linear_attn_heads: 4
+  global_linear_attn_dim_head: 16
+  num_global_tokens: 8
+  offset_head_hidden: 256
+  use_global_fallback_frames: False
+  so2_axis: [0., 0., 1.]
+
+ema:
+  betas: [1]
+  gamma: 1.0
+  power: 1.0
+
+name: positions_only_trees
+debugging: False
+debugging_max_batches: 50
+debugging_dir: "positions_only_debug"
+
+wandb:
+  logging: True

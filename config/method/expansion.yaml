@@ -8,3 +8,7 @@ use_radial_distance: False
 deterministic_expansion: True
 use_size_ratio: False
 max_tree_size: 300
+
+# Variant 1 — positions-only / given-topology (default OFF = unchanged behaviour)
+predict_positions_only: False   # training: drop exp_loss, condition on clean GT expansion
+given_topology: False           # sampling: pin topology to GT instead of predicting it

@@ -1,0 +1,14 @@
+name: expansion
+leaf_noise_sigma: 0.05
+leaf_noise_clip: null
+sibling_loss_weight: 0.0
+use_sibling_matching: False
+use_geo_lr_mask: True
+use_radial_distance: False
+deterministic_expansion: True
+use_size_ratio: False
+max_tree_size: 300
+
+# Variant 1 — positions-only / given-topology (ON for this method config)
+predict_positions_only: True    # training: drop exp_loss, condition on clean GT expansion
+given_topology: True            # sampling: pin topology to GT instead of predicting it

@@ -115,6 +115,9 @@ def build_model_diffusion_method(cfg):
         expansion_loss_weight=getattr(cfg.method, "expansion_loss_weight", 1.0),
         use_size_ratio=getattr(cfg.method, "use_size_ratio", True),
         max_tree_size=getattr(cfg.method, "max_tree_size", 500),
+        # Variant 1: must mirror main.py so the TF/sampling path pins clean GT expansion.
+        predict_positions_only=getattr(cfg.method, "predict_positions_only", False),
+        given_topology=getattr(cfg.method, "given_topology", False),
     )
     return model, method
 
