@@ -570,35 +570,44 @@ class Trainer:
 
         results = {}
 
+        # Free-running generation is the dominant validation cost; for variants whose topology
+        # head is unsupervised (predict_positions_only) the generated trees are meaningless
+        # anyway. skip_free_running bypasses generation (and the dist metrics / plots / metric
+        # loop that consume it), leaving only the teacher-forced metrics below.
+        skip_free_running = bool(getattr(self.cfg.validation, "skip_free_running", False))
+
         # Generate graphs
         _t0_gen = time()
         pred_graphs = []
-        cursor = 0
-        for batch, nrc_batch in zip(batches, nrc_batches):
-            tmd_batch = None
-            if tmds is not None:
-                tmd_batch = th.from_numpy(tmds[cursor : cursor + len(batch)]).to(self.device)
-            pred_graphs_batch = self.method.sample_graphs(
-                target_size=th.tensor(batch, device=self.device),
-                model=model,
-                tmd=tmd_batch,
-                num_root_children=th.tensor(nrc_batch, device=self.device),
-            )  # returns list[nx.Graph] with geometric node attrs
-            pred_graphs += pred_graphs_batch
-            cursor += len(batch)
-        # Reorder back to original eval_graphs order
-        inv_perm = np.empty_like(pred_perm)
-        inv_perm[pred_perm] = np.arange(len(pred_perm))
-        results["pred_graphs"] = [pred_graphs[i] for i in inv_perm]
+        if not skip_free_running:
+            cursor = 0
+            for batch, nrc_batch in zip(batches, nrc_batches):
+                tmd_batch = None
+                if tmds is not None:
+                    tmd_batch = th.from_numpy(tmds[cursor : cursor + len(batch)]).to(self.device)
+                pred_graphs_batch = self.method.sample_graphs(
+                    target_size=th.tensor(batch, device=self.device),
+                    model=model,
+                    tmd=tmd_batch,
+                    num_root_children=th.tensor(nrc_batch, device=self.device),
+                )  # returns list[nx.Graph] with geometric node attrs
+                pred_graphs += pred_graphs_batch
+                cursor += len(batch)
+            # Reorder back to original eval_graphs order
+            inv_perm = np.empty_like(pred_perm)
+            inv_perm[pred_perm] = np.arange(len(pred_perm))
+            results["pred_graphs"] = [pred_graphs[i] for i in inv_perm]
 
-        # Rescale positions back to original coordinate space
-        if self.pos_scale_factor is not None:
-            for G in results["pred_graphs"]:
-                for n in G.nodes():
-                    G.nodes[n]['pos'] = G.nodes[n]['pos'] * self.pos_scale_factor
+            # Rescale positions back to original coordinate space
+            if self.pos_scale_factor is not None:
+                for G in results["pred_graphs"]:
+                    for n in G.nodes():
+                        G.nodes[n]['pos'] = G.nodes[n]['pos'] * self.pos_scale_factor
 
-        if self.device == "cuda":
-            th.cuda.empty_cache()
+            if self.device == "cuda":
+                th.cuda.empty_cache()
+        else:
+            results["pred_graphs"] = []
         _t_generation = time() - _t0_gen
 
         # Consistency assertions: all graphs must have 'pos' attribute per node
@@ -633,7 +642,7 @@ class Trainer:
 
         # Distribution-level comparison of generated vs GT statistics (Wasserstein-1
         # per stat + avg tree-edit distance). Logged as floats -> wandb scalars.
-        if getattr(self.cfg.validation, "enable_dist_metrics", True):
+        if getattr(self.cfg.validation, "enable_dist_metrics", True) and not skip_free_running:
             _t0_dist = time()
             gt_cache = self._gt_cache_for(eval_graphs, uhat_np)
             results["dist"] = compute_distribution_metrics(
@@ -689,7 +698,7 @@ class Trainer:
         # Metric computation gated
         enable_metrics = getattr(self.cfg.validation, 'enable_metrics', True)
         _t0_metrics = time()
-        if enable_metrics:
+        if enable_metrics and not skip_free_running:
             # Validate graphs (original metric loop)
             for metric in self.metrics:
                 results[str(metric)] = metric(
