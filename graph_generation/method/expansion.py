@@ -34,6 +34,8 @@ class Expansion(Method):
 
     EDGE_PARENT_TO_CHILD = 0
     EDGE_CHILD_TO_PARENT = 1
+    EDGE_SIBLING = 2
+    EDGE_PROXIMITY = 3
 
     def __init__(
         self,
@@ -42,13 +44,57 @@ class Expansion(Method):
         expansion_loss_weight: float = 1.0,
         use_size_ratio: bool = True,
         max_tree_size: int = 500,
+        augment_edges: str = "none",
+        proximity_knn: int = 6,
+        proximity_radius: float | None = None,
+        proximity_max_degree: int = 8,
     ):
         super().__init__(diffusion=diffusion)
         self.red_threshold = red_threshold
         self.expansion_loss_weight = float(expansion_loss_weight)
         self.use_size_ratio = use_size_ratio
         self.max_tree_size = max_tree_size
-    
+        if augment_edges not in ("none", "siblings", "siblings_proximity"):
+            raise ValueError(
+                f"augment_edges must be one of none|siblings|siblings_proximity, got '{augment_edges}'."
+            )
+        self.augment_edges = augment_edges
+        self.add_siblings = augment_edges in ("siblings", "siblings_proximity")
+        self.add_proximity = augment_edges == "siblings_proximity"
+        self.proximity_knn = proximity_knn
+        self.proximity_radius = proximity_radius
+        self.proximity_max_degree = proximity_max_degree
+
+    def _build_edges(self, parent_idx, pos, leaf_idx, batch):
+        """Build tree + (optional) typed augmented edge index.
+
+        Proximity neighbours use a *static parent anchor*: each leaf is anchored
+        at its (frozen) parent position so the proximity graph does not change as
+        leaf positions move during the flow. Called identically at training and
+        sampling to keep edges consistent between the two.
+        """
+        anchor_pos = None
+        if self.add_proximity:
+            anchor_pos = pos.clone()
+            if leaf_idx is not None and leaf_idx.numel() > 0:
+                lp = parent_idx[leaf_idx]
+                valid = lp >= 0
+                anchor_pos[leaf_idx[valid]] = pos[lp[valid]]
+        return build_directed_edge_index(
+            parent_idx,
+            edge_parent_to_child=self.EDGE_PARENT_TO_CHILD,
+            edge_child_to_parent=self.EDGE_CHILD_TO_PARENT,
+            add_siblings=self.add_siblings,
+            edge_sibling=self.EDGE_SIBLING,
+            add_proximity=self.add_proximity,
+            edge_proximity=self.EDGE_PROXIMITY,
+            anchor_pos=anchor_pos,
+            batch=batch,
+            proximity_knn=self.proximity_knn,
+            proximity_radius=self.proximity_radius,
+            proximity_max_degree=self.proximity_max_degree,
+        )
+
     def sample_graphs(self, target_size: th.Tensor, model: Module, tmd: th.Tensor | None = None,
                       num_root_children: th.Tensor | int | None = None):
         """Generate graphs via iterative diffusion-based leaf expansion."""
@@ -332,10 +378,8 @@ class Expansion(Method):
         )
 
         # --- Build edge index, local bases, and precompute geometry BEFORE feature assembly ---
-        edge_index, edge_types = build_directed_edge_index(
-            parent_idx_new_0b,
-            edge_parent_to_child=self.EDGE_PARENT_TO_CHILD,
-            edge_child_to_parent=self.EDGE_CHILD_TO_PARENT,
+        edge_index, edge_types = self._build_edges(
+            parent_idx_new_0b, pos_new, leaf_idx_next, batch_new,
         )
         if edge_types.numel():
             edge_attr = edge_types.unsqueeze(-1).to(pos_new.dtype)
@@ -499,10 +543,8 @@ class Expansion(Method):
 
         # --- graph and positions
         pos_gt = batch.pos                             # [N,3] (absolute, untouched)
-        edge_index, edge_types = build_directed_edge_index(
-            parent_idx,
-            edge_parent_to_child=self.EDGE_PARENT_TO_CHILD,
-            edge_child_to_parent=self.EDGE_CHILD_TO_PARENT,
+        edge_index, edge_types = self._build_edges(
+            parent_idx, pos_gt, getattr(batch, "leaf_idx", None), getattr(batch, "batch", None),
         )
 
         # --- tracking of leaves

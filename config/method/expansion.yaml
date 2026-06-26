@@ -8,3 +8,11 @@ use_radial_distance: False
 deterministic_expansion: True
 use_size_ratio: False
 max_tree_size: 300
+# augmented edges (default off): none | siblings | siblings_proximity
+augment_edges: none
+# proximity: set proximity_radius (>0, data-scale dependent) to connect each node
+# to ALL neighbours within that radius, capped at proximity_max_degree (nearest
+# kept). null => fall back to proximity_knn nearest neighbours.
+proximity_radius: null
+proximity_knn: 6
+proximity_max_degree: 8

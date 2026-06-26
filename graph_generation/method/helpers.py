@@ -15,14 +15,39 @@ def build_directed_edge_index(
     parent_idx: th.Tensor,
     edge_parent_to_child: int = 0,
     edge_child_to_parent: int = 1,
+    *,
+    add_siblings: bool = False,
+    edge_sibling: int = 2,
+    add_proximity: bool = False,
+    edge_proximity: int = 3,
+    anchor_pos: th.Tensor | None = None,
+    batch: th.Tensor | None = None,
+    proximity_knn: int = 6,
+    proximity_radius: float | None = None,
+    proximity_max_degree: int = 8,
 ) -> tuple[th.Tensor, th.Tensor]:
-    """Return (edge_index, edge_types) for explicit parent/child directions."""
+    """Return (edge_index, edge_types) for explicit parent/child directions.
+
+    With no keyword arguments this is identical to the tree-only builder. It can
+    additionally emit typed augmented edges:
+
+      * ``add_siblings``: full directed tournament over same-parent children
+        (type ``edge_sibling``). Topological — a function of ``parent_idx`` only.
+      * ``add_proximity``: static parent-anchored kNN neighbours (type
+        ``edge_proximity``). Each node is connected to its ``proximity_knn``
+        nearest nodes by ``anchor_pos`` (within ``proximity_radius`` if given),
+        per graph (``batch``), symmetrized and deduplicated against tree/sibling
+        edges (precedence tree > sibling > proximity). ``anchor_pos`` is supplied
+        by the caller (frozen positions, leaves anchored at their parents) so the
+        graph is static across the flow integration.
+    """
     device = parent_idx.device
     dtype = parent_idx.dtype
     src_list: list[int] = []
     dst_list: list[int] = []
     type_list: list[int] = []
 
+    children_of: dict[int, list[int]] = {}
     for child, parent in enumerate(parent_idx.tolist()):
         if parent < 0:
             continue
@@ -32,6 +57,40 @@ def build_directed_edge_index(
         src_list.append(child)
         dst_list.append(parent)
         type_list.append(edge_child_to_parent)
+        children_of.setdefault(parent, []).append(child)
+
+    # Existing (src, dst) pairs — augmented edges never duplicate these.
+    existing = set(zip(src_list, dst_list))
+
+    # --- Sibling edges: full directed tournament over same-parent children ---
+    if add_siblings:
+        for siblings in children_of.values():
+            if len(siblings) < 2:
+                continue
+            for a in siblings:
+                for b in siblings:
+                    if a == b or (a, b) in existing:
+                        continue
+                    src_list.append(a)
+                    dst_list.append(b)
+                    type_list.append(edge_sibling)
+                    existing.add((a, b))
+
+    # --- Proximity edges: static parent-anchored kNN over anchor positions ---
+    if add_proximity:
+        if anchor_pos is None:
+            raise ValueError("anchor_pos is required when add_proximity=True.")
+        prox_src, prox_dst = _build_proximity_pairs(
+            anchor_pos, batch,
+            knn=proximity_knn, radius=proximity_radius, max_degree=proximity_max_degree,
+        )
+        for a, b in zip(prox_src, prox_dst):
+            if a == b or (a, b) in existing:
+                continue
+            src_list.append(a)
+            dst_list.append(b)
+            type_list.append(edge_proximity)
+            existing.add((a, b))
 
     if src_list:
         edge_index = th.tensor([src_list, dst_list], device=device, dtype=dtype)
@@ -40,6 +99,76 @@ def build_directed_edge_index(
         edge_index = parent_idx.new_zeros((2, 0))
         edge_types = parent_idx.new_zeros((0,))
     return edge_index, edge_types
+
+
+def _build_proximity_pairs(
+    anchor_pos: th.Tensor,
+    batch: th.Tensor | None,
+    *,
+    knn: int = 6,
+    radius: float | None = None,
+    max_degree: int = 8,
+) -> tuple[list[int], list[int]]:
+    """Symmetric proximity edges over anchor positions, per graph.
+
+    Selection rule:
+      * ``radius`` set  -> connect each node to ALL nodes within ``radius``,
+        capped at the nearest ``max_degree`` (safety valve for the encoder's
+        O(deg^2) pairwise-angle pooling). Truncation (more than ``max_degree``
+        neighbours within ``radius``) is logged at DEBUG.
+      * ``radius`` None -> fall back to the nearest ``knn`` neighbours.
+
+    Returns ``(src_list, dst_list)`` of global node indices (both directions per
+    neighbour pair; self excluded). ``batch`` blocks each graph so no cross-graph
+    edges form; if None all nodes are treated as one graph. Built once per level.
+    """
+    device = anchor_pos.device
+    N = anchor_pos.size(0)
+    if N < 2:
+        return [], []
+    if batch is None:
+        batch = th.zeros(N, dtype=th.long, device=device)
+
+    src_list: list[int] = []
+    dst_list: list[int] = []
+    seen: set[tuple[int, int]] = set()
+    n_truncated = 0
+
+    for g in th.unique(batch).tolist():
+        nodes = (batch == g).nonzero(as_tuple=False).flatten()
+        n = int(nodes.size(0))
+        if n < 2:
+            continue
+        pos_g = anchor_pos[nodes]                                  # (n, 3)
+        dmat = th.cdist(pos_g, pos_g)                              # (n, n)
+        dmat = dmat.masked_fill(th.eye(n, dtype=th.bool, device=device), float('inf'))
+        if radius is not None:
+            # all within radius, capped at the nearest `max_degree`
+            k = min(int(max_degree), n - 1)
+            n_truncated += int(((dmat <= radius).sum(dim=1) > k).sum().item())
+        else:
+            k = min(int(knn), int(max_degree), n - 1)
+        if k <= 0:
+            continue
+        knn_d, knn_idx = th.topk(dmat, k, dim=-1, largest=False)   # (n, k)
+        nodes_list = nodes.tolist()
+        for i in range(n):
+            gi = nodes_list[i]
+            for j_local, dist in zip(knn_idx[i].tolist(), knn_d[i].tolist()):
+                if radius is not None and dist > radius:
+                    continue
+                gj = nodes_list[j_local]
+                for a, b in ((gi, gj), (gj, gi)):                  # symmetrize
+                    if (a, b) not in seen:
+                        seen.add((a, b))
+                        src_list.append(a)
+                        dst_list.append(b)
+    if n_truncated:
+        logger.debug(
+            "proximity: %d node(s) had > max_degree=%d neighbours within radius=%.3g; "
+            "kept the nearest %d.", n_truncated, max_degree, radius, max_degree,
+        )
+    return src_list, dst_list
 
 
 def graph_target_sizes_from_batch(batch, device: th.device) -> Optional[th.Tensor]:
@@ -721,6 +850,94 @@ def assign_parent_scalar_to_edges(
 
 
 
+def build_incident_edge_pairs(
+    edge_index: torch.Tensor,
+    num_nodes: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Ordered pairs of directed edges sharing a receiving node.
+
+    Each directed edge ``e = (src -> dst)`` is considered *incident* on its
+    destination ``dst``, with far endpoint ``far(e) = src``. For every node i and
+    every ordered pair ``(a, b)`` of distinct edges with ``dst == i``, one pair
+    row is emitted (both ``(a, b)`` and ``(b, a)``; ``a == b`` excluded).
+
+    This is the GemNet-T triplet index for SO(2) directional message passing: the
+    signed angle between edges ``a`` and ``b`` is the branch angle as seen from
+    the shared receiving node i. The index is purely topological (a function of
+    ``edge_index`` only), so it is built once per reduction level and reused
+    across layers / diffusion steps. Pairs are within-graph by construction
+    (under PyG batching every edge connects nodes of the same graph, so a shared
+    ``dst`` implies a shared graph).
+
+    Returns ``(pair_edge_a, pair_edge_b, pair_recv)`` long tensors of shape (P,),
+    where ``pair_edge_*`` index into ``[0, E)`` and ``pair_recv == dst[a] == dst[b]``;
+    ``P = sum_i deg_in(i) * (deg_in(i) - 1)``.
+    """
+    device = edge_index.device
+    dst = edge_index[1]
+    E = int(dst.size(0))
+    if E == 0:
+        z = torch.zeros(0, dtype=torch.long, device=device)
+        return z, z.clone(), z.clone()
+
+    # Group edge ordinals by receiving node so same-receiver edges are contiguous.
+    order = torch.argsort(dst, stable=True)                       # (E,)
+    counts = torch.bincount(dst, minlength=num_nodes)             # (num_nodes,)
+    block_start = torch.zeros(num_nodes, dtype=torch.long, device=device)
+    if num_nodes > 1:
+        block_start[1:] = torch.cumsum(counts, dim=0)[:-1]
+
+    a_blocks, b_blocks, recv_blocks = [], [], []
+    for d in torch.unique(counts).tolist():
+        if d < 2:
+            continue
+        nodes_d = (counts == d).nonzero(as_tuple=False).flatten()  # (M,)
+        M = int(nodes_d.size(0))
+        ar = torch.arange(d, device=device)
+        grid_i = ar.repeat_interleave(d)                           # (d*d,)
+        grid_j = ar.repeat(d)                                      # (d*d,)
+        off = grid_i != grid_j
+        li = grid_i[off]                                           # (d*(d-1),)
+        lj = grid_j[off]
+        starts = block_start[nodes_d].view(M, 1)                   # (M, 1)
+        pos_a = (starts + li.view(1, -1)).reshape(-1)
+        pos_b = (starts + lj.view(1, -1)).reshape(-1)
+        a_blocks.append(order[pos_a])
+        b_blocks.append(order[pos_b])
+        recv_blocks.append(nodes_d.view(M, 1).expand(-1, li.size(0)).reshape(-1))
+
+    if a_blocks:
+        return torch.cat(a_blocks), torch.cat(b_blocks), torch.cat(recv_blocks)
+    z = torch.zeros(0, dtype=torch.long, device=device)
+    return z, z.clone(), z.clone()
+
+
+def pair_signed_angles(
+    r_perp: torch.Tensor,
+    rho: torch.Tensor,
+    edge_a_idx: torch.Tensor,
+    edge_b_idx: torch.Tensor,
+    uhat: torch.Tensor,
+    eps: float = 1e-8,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Signed SO(2) angle between the perp-plane directions of two edges.
+
+    For edges a, b with perpendicular components ``r_perp`` and radii ``rho``::
+
+        cosφ = r̂⊥_a · r̂⊥_b
+        sinφ = (r̂⊥_a × r̂⊥_b) · uhat
+
+    Both are invariant under rotation about ``uhat`` and reflection-odd, so the
+    sign encodes handedness. Returns ``(cosφ, sinφ)`` of shape (P, 1) each.
+    """
+    ra = r_perp[edge_a_idx] / rho[edge_a_idx].clamp_min(eps)       # (P, 3)
+    rb = r_perp[edge_b_idx] / rho[edge_b_idx].clamp_min(eps)       # (P, 3)
+    cos_p = (ra * rb).sum(dim=-1, keepdim=True)                    # (P, 1)
+    cross = torch.cross(ra, rb, dim=-1)                            # (P, 3)
+    sin_p = (cross * uhat.view(1, -1)).sum(dim=-1, keepdim=True)   # (P, 1)
+    return cos_p, sin_p
+
+
 def compute_geo_order(
     pos: th.Tensor,
     parent_idx: th.Tensor,
@@ -1118,6 +1335,10 @@ def precompute_full_geometry(
     rho = r_perp.norm(dim=-1, keepdim=True).clamp_min(eps)   # (E, 1)
     du = du[:, None]                                         # (E, 1)
 
+    # 4b. Incident edge-pair index + signed pairwise angles (directional MP)
+    pair_edge_a, pair_edge_b, pair_recv = build_incident_edge_pairs(edge_index, pos.size(0))
+    pair_cos, pair_sin = pair_signed_angles(r_perp, rho, pair_edge_a, pair_edge_b, uhat, eps=eps)
+
     # 5. Assign node angles to edges
     cospsi_edge, sinpsi_edge = assign_branch_angles_to_edges(
         edge_index, parent_idx, cospsi_node, sinpsi_node,
@@ -1151,6 +1372,12 @@ def precompute_full_geometry(
         # local bases for SO(2)-equivariant loss
         'local_forward': local_bases['local_forward'],
         'local_sideways': local_bases['local_sideways'],
+        # incident edge-pair index + signed pairwise angles (directional MP)
+        'pair_edge_a': pair_edge_a,
+        'pair_edge_b': pair_edge_b,
+        'pair_recv': pair_recv,
+        'pair_cos': pair_cos,
+        'pair_sin': pair_sin,
     }
 
 
@@ -1247,6 +1474,31 @@ def patch_geometry_for_noised_leaves(
         edge_index, parent_idx, cos_theta_node,
     )
 
+    # --- 4. Patch pairwise angles for pairs whose edge_a or edge_b moved ---
+    pair_extra = {}
+    if 'pair_edge_a' in pre_geom_p0:
+        pair_edge_a = pre_geom_p0['pair_edge_a']
+        pair_edge_b = pre_geom_p0['pair_edge_b']
+        pair_cos = pre_geom_p0['pair_cos'].clone()
+        pair_sin = pre_geom_p0['pair_sin'].clone()
+        if pair_edge_a.numel() > 0:
+            pair_affected = affected[pair_edge_a] | affected[pair_edge_b]
+            if pair_affected.any():
+                cos_new, sin_new = pair_signed_angles(
+                    r_perp_edge, rho_edge,
+                    pair_edge_a[pair_affected], pair_edge_b[pair_affected],
+                    uhat, eps=eps,
+                )
+                pair_cos[pair_affected] = cos_new
+                pair_sin[pair_affected] = sin_new
+        pair_extra = {
+            'pair_edge_a': pair_edge_a,
+            'pair_edge_b': pair_edge_b,
+            'pair_recv': pre_geom_p0['pair_recv'],
+            'pair_cos': pair_cos,
+            'pair_sin': pair_sin,
+        }
+
     return {
         'rel_coors': rel_coors,
         'r_perp': r_perp_edge,
@@ -1258,6 +1510,7 @@ def patch_geometry_for_noised_leaves(
         'cospsi_node': cospsi_node,
         'sinpsi_node': sinpsi_node,
         'cos_theta_node': cos_theta_node,
+        **pair_extra,
     }
 
 

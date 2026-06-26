@@ -66,6 +66,11 @@ model:
   offset_head_hidden: 128
   use_global_fallback_frames: False
   so2_axis: [0., 1., 0.] # z-axis for trees, y-axis for neurons
+  # --- Variant 2: directional-angle encoder (defaults reproduce base behavior) ---
+  add_local_angles: True      # parent-relative (cosψ,sinψ,cosθ) edge features
+  directional_pairs: False    # GemNet-T signed pairwise-angle pooling
+  rbf_k: 0                    # RBF expansion of (ρ, du); 0 = raw scalars
+  rbf_gamma: 10.0
 
 ema: # can adjust for more stable training, but I haven't had the chance to experiment with it much - working though
   betas: [1]

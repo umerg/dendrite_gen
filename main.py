@@ -87,10 +87,15 @@ def get_expansion_items(cfg: DictConfig, train_graphs, diffusion=None):
     edge_embedding_nums = [2]
     edge_embedding_dims = [4]
     edge_attr_dim = 1  # initial edge attribute dimension - label category
-    if cfg.method.name == "expansion_augmented":
-        edge_embedding_nums = [3]
-        edge_embedding_dims = [4]
-        print(f"Using augmented expansion with edge embeddings: nums {edge_embedding_nums}, dims {edge_embedding_dims}")
+    augment_edges = getattr(cfg.method, "augment_edges", "none")
+    if augment_edges == "siblings_proximity":
+        edge_embedding_nums = [4]  # parent->child, child->parent, sibling, proximity
+    elif augment_edges == "siblings":
+        edge_embedding_nums = [3]  # parent->child, child->parent, sibling
+    elif cfg.method.name == "expansion_augmented":
+        edge_embedding_nums = [3]  # legacy one-shot augmented path
+    if augment_edges != "none":
+        print(f"Augmented edges='{augment_edges}': edge_embedding_nums={edge_embedding_nums}")
 
     # Model
     print(f"Initializing model: {cfg.model.name}...")
@@ -116,6 +121,10 @@ def get_expansion_items(cfg: DictConfig, train_graphs, diffusion=None):
             tmd_in_dim=tmd_in_dim,
             tmd_hidden_dim=tmd_hidden_dim,
             so2_axis=cfg.model.so2_axis,
+            add_local_angles=getattr(cfg.model, "add_local_angles", True),
+            directional_pairs=getattr(cfg.model, "directional_pairs", False),
+            rbf_k=getattr(cfg.model, "rbf_k", 0),
+            rbf_gamma=getattr(cfg.model, "rbf_gamma", 10.0),
         )
     elif cfg.model.name == "egnn_simple":
         model = gg.model.SO2_EGNN_Sparse_Network_Simple(
@@ -169,6 +178,10 @@ def get_expansion_items(cfg: DictConfig, train_graphs, diffusion=None):
             expansion_loss_weight=expansion_loss_weight,
             use_size_ratio=use_size_ratio,
             max_tree_size=getattr(cfg.method, "max_tree_size", 500),
+            augment_edges=augment_edges,
+            proximity_knn=getattr(cfg.method, "proximity_knn", 6),
+            proximity_radius=getattr(cfg.method, "proximity_radius", None),
+            proximity_max_degree=getattr(cfg.method, "proximity_max_degree", 8),
         )
     elif method_name == "expansion":
         method = gg.method.Expansion_OneShot(

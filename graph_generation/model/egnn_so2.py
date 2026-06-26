@@ -39,6 +39,8 @@ from graph_generation.method.helpers import (
     compute_branch_angles_parent_centric,
     assign_branch_angles_to_edges,
     assign_parent_scalar_to_edges,
+    build_incident_edge_pairs,
+    pair_signed_angles,
 )
 
 # global linear attention
@@ -257,6 +259,8 @@ class SO2_EGNN(MessagePassing):
         angle_weighted_mean: bool = True,
         rbf_k: int = 0,
         rbf_gamma: float = 10.0,
+        directional_pairs: bool = False,
+        rho_gate: float = 1e-4,
                  eps: float = 1e-8,
                  **kwargs
     ):
@@ -300,6 +304,11 @@ class SO2_EGNN(MessagePassing):
             self.rbf_du  = RBF(self.rbf_k, -du_max, du_max, self.rbf_gamma)
         self.eps = eps
 
+        # NEW: GemNet-T directional pairwise-angle pooling
+        self.directional_pairs = directional_pairs
+        self.rho_gate = rho_gate
+        self.edge_attr_dim = edge_attr_dim
+
         # base edge scalars: rho, du, optionally local angles (+ option fourier)
         base_scalar_dim = (rbf_k if rbf_k > 0 else 1) * 2  # rho, du
         if self.add_local_angles:
@@ -325,12 +334,29 @@ class SO2_EGNN(MessagePassing):
         self.node_norm = PygLayerNorm(feats_dim) if norm_feats else None
         self.coors_norm = CoorsNorm(scale_init = norm_coors_scale_init) if norm_coors else nn.Identity()
 
+        node_in_dim = feats_dim + m_dim + (m_dim if directional_pairs else 0)
         self.node_mlp = nn.Sequential(
-            nn.Linear(feats_dim + m_dim, feats_dim * 2),
+            nn.Linear(node_in_dim, feats_dim * 2),
             self.dropout,
             SiLU(),
             nn.Linear(feats_dim * 2, feats_dim),
         ) if update_feats else None
+
+        # NEW: pairwise-angle MLP for directional message passing. Per ordered
+        # incident-edge pair (a, b): signed angle (cosφ, sinφ), radial/axial
+        # scalars of both edges, both edge-type embeddings, and both far-node
+        # features. Outputs are sum-pooled into a per-node vector G_i.
+        self.mlp_pair = None
+        if directional_pairs:
+            drbf = self.rbf_k if self.rbf_k > 0 else 1
+            pair_in_dim = 2 + 4 * drbf + 2 * edge_attr_dim + 2 * feats_dim
+            self.mlp_pair = nn.Sequential(
+                nn.Linear(pair_in_dim, m_dim * 2),
+                self.dropout,
+                SiLU(),
+                nn.Linear(m_dim * 2, m_dim),
+                SiLU(),
+            )
 
         # COORS
         self.coors_mlp = nn.Sequential(
@@ -421,15 +447,73 @@ class SO2_EGNN(MessagePassing):
         else:
             edge_attr_feats = torch.cat(base_feats, dim=-1)
 
+        # --- Directional pairwise-angle pooling (GemNet-T style) ---
+        G_i = None
+        if self.directional_pairs:
+            G_i = self._compute_pair_pooling(
+                feats, edge_index, edge_attr, rho, du, r_perp, pre_geom,
+            )
+
         hidden_out, coors_out = self.propagate(edge_index, x=feats, edge_attr=edge_attr_feats,
                                                            coors=coors, rel_coors=rel_coors,
-                                                           batch=batch)
+                                                           batch=batch, G_i=G_i)
         return torch.cat([coors_out, hidden_out], dim=-1)
 
 
     def message(self, x_i, x_j, edge_attr) -> Tensor:
         m_ij = self.edge_mlp( torch.cat([x_i, x_j, edge_attr], dim=-1) )
         return m_ij
+
+    def _compute_pair_pooling(self, feats, edge_index, edge_attr, rho, du, r_perp, pre_geom):
+        """Pool signed pairwise inter-edge angles into a per-node vector (N, m_dim).
+
+        For each ordered pair (a, b) of edges sharing a receiving node, build
+        [cosφ, sinφ, rho_a, rho_b, du_a, du_b, type_a, type_b, h_far_a, h_far_b],
+        run ``mlp_pair``, zero out axis-parallel (rho≈0) pairs, and sum-pool by
+        receiver. Pair index/angles are reused from ``pre_geom`` when present
+        (static, patched per diffusion step) else computed inline.
+        """
+        N = feats.size(0)
+        if pre_geom is not None and 'pair_edge_a' in pre_geom:
+            pa = pre_geom['pair_edge_a']
+            pb = pre_geom['pair_edge_b']
+            recv = pre_geom['pair_recv']
+            cos_p = pre_geom['pair_cos']
+            sin_p = pre_geom['pair_sin']
+        else:
+            pa, pb, recv = build_incident_edge_pairs(edge_index, N)
+            cos_p, sin_p = pair_signed_angles(r_perp, rho, pa, pb, self.uhat, eps=self.eps)
+
+        if pa.numel() == 0:
+            return feats.new_zeros((N, self.m_dim))
+
+        if self.rbf_k > 0:
+            rho_a, rho_b = self.rbf_rho(rho[pa]), self.rbf_rho(rho[pb])
+            du_a, du_b = self.rbf_du(du[pa]), self.rbf_du(du[pb])
+        else:
+            rho_a, rho_b = rho[pa], rho[pb]
+            du_a, du_b = du[pa], du[pb]
+
+        parts = [cos_p, sin_p, rho_a, rho_b, du_a, du_b]
+        if self.edge_attr_dim > 0:
+            if edge_attr is not None:
+                type_a = edge_attr[pa, :self.edge_attr_dim]
+                type_b = edge_attr[pb, :self.edge_attr_dim]
+            else:
+                type_a = feats.new_zeros((pa.size(0), self.edge_attr_dim))
+                type_b = feats.new_zeros((pb.size(0), self.edge_attr_dim))
+            parts.extend([type_a, type_b])
+
+        src = edge_index[0]
+        parts.extend([feats[src[pa]], feats[src[pb]]])
+
+        g = self.mlp_pair(torch.cat(parts, dim=-1))                  # (P, m_dim)
+
+        # ρ≈0 gate: drop the directional contribution for axis-parallel pairs.
+        gate = ((rho[pa] > self.rho_gate) & (rho[pb] > self.rho_gate)).to(g.dtype)
+        g = g * gate
+
+        return scatter_add(g, recv, dim=0, dim_size=N)               # (N, m_dim)
 
     def propagate(self, edge_index: Adj, size: Size = None, **kwargs):
         """The initial call to start propagating messages.
@@ -476,7 +560,10 @@ class SO2_EGNN(MessagePassing):
             m_i = self.aggregate(m_ij, **aggr_kwargs)
 
             hidden_feats = self.node_norm(kwargs["x"], kwargs["batch"]) if self.node_norm else kwargs["x"]
-            hidden_out = self.node_mlp( torch.cat([hidden_feats, m_i], dim = -1) )
+            node_in = torch.cat([hidden_feats, m_i], dim = -1)
+            if self.directional_pairs:
+                node_in = torch.cat([node_in, kwargs["G_i"]], dim=-1)
+            hidden_out = self.node_mlp( node_in )
             hidden_out = kwargs["x"] + hidden_out
         else: 
             hidden_out = kwargs["x"]
@@ -563,6 +650,7 @@ class SO2_EGNN_Network(nn.Module):
                  angle_weighted_mean=True,
                  rbf_k=0,
                  rbf_gamma=10.0,
+                 directional_pairs=False,
                  eps=1e-8,
                  # offset head
                  LR_offset_head=False,
@@ -678,6 +766,7 @@ class SO2_EGNN_Network(nn.Module):
                 angle_weighted_mean = angle_weighted_mean,
                 rbf_k = rbf_k,
                 rbf_gamma = rbf_gamma,
+                directional_pairs = directional_pairs,
                 eps = eps,
             )
 
@@ -842,6 +931,10 @@ class SO2_EGNN_Network(nn.Module):
             edge_index, parent_idx, cos_theta_node
         )
 
+        # Incident edge-pair index + signed pairwise angles (directional MP)
+        pair_edge_a, pair_edge_b, pair_recv = build_incident_edge_pairs(edge_index, coors.size(0))
+        pair_cos, pair_sin = pair_signed_angles(r_perp, rho, pair_edge_a, pair_edge_b, self.uhat, eps=self.eps)
+
         return {
             'rel_coors': rel_coors,
             'r_perp': r_perp,
@@ -853,4 +946,9 @@ class SO2_EGNN_Network(nn.Module):
             'cospsi_node': cospsi_node,
             'sinpsi_node': sinpsi_node,
             'cos_theta_node': cos_theta_node,
+            'pair_edge_a': pair_edge_a,
+            'pair_edge_b': pair_edge_b,
+            'pair_recv': pair_recv,
+            'pair_cos': pair_cos,
+            'pair_sin': pair_sin,
         }
