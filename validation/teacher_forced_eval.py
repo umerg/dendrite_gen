@@ -182,13 +182,58 @@ def compute_tf_pos_mse(cs_local: np.ndarray, c0_local: np.ndarray) -> dict:
     return out
 
 
-def _metrics_from_pools(cap: dict, level_min: int = 30, min_depth: int = 0) -> dict:
-    """Assemble overall + per-reduction-level + per-tree-depth metric blocks.
+def _named_tf_stat(metric: str, cap: dict, m) -> float | None:
+    """Resolve a single named TF scalar over the boolean-masked leaf subset `m`.
+
+    `pos_mse_*` (e.g. `pos_mse_total`, `pos_mse_fwd`) -> compute_tf_pos_mse; any other name is
+    looked up as a key in compute_tf_distribution_metrics (e.g. `branch_length_w1`).
+    """
+    cs, c0 = cap["cs"][m], cap["c0"][m]
+    if metric.startswith("pos_mse_"):
+        return compute_tf_pos_mse(cs, c0).get(metric[len("pos_mse_"):])
+    d = compute_tf_distribution_metrics(cs, c0, cap["fwd"][m], cap["side"][m], cap["uhat"], cap["lp"][m])
+    return d.get(metric)
+
+
+def compute_tf_depth_series(cap: dict, metric: str = "pos_mse_total", level_min: int = 1) -> dict:
+    """One named TF stat as a {tree_depth: value} series (final-sample, pooled per tree depth).
+
+    The lightweight alternative to the full `by_depth` block: a single curve for the most
+    revealing depth-wise stat, instead of every metric at every depth. Buckets with fewer than
+    `level_min` leaves are skipped. Returns {} if `ldepth` is absent.
+    """
+    out: dict[int, float] = {}
+    if "ldepth" not in cap:
+        return out
+    depths = cap["ldepth"]
+    for dv in np.unique(depths):
+        m = depths == dv
+        if int(m.sum()) < level_min:
+            continue
+        val = _named_tf_stat(metric, cap, m)
+        if val is not None and math.isfinite(val):
+            out[int(dv)] = float(val)
+    return out
+
+
+def _metrics_from_pools(cap: dict, level_min: int = 30, min_depth: int = 0,
+                        include_expansion: bool = True, include_breakdowns: bool = True,
+                        depth_metric: str | None = None) -> dict:
+    """Assemble overall (+ optional per-reduction-level / per-tree-depth) metric blocks.
 
     `level_min` is a per-bucket leaf-COUNT floor (a bucket is reported only if it has
     >= level_min leaves) -- NOT a starting depth. `min_depth` (tree depth, from `ldepth`)
-    restricts the OVERALL `dist`/`exp` to leaves at depth >= min_depth, e.g. min_depth=2
+    restricts the OVERALL metrics to leaves at depth >= min_depth, e.g. min_depth=2
     drops the root children (the deterministic-interior view).
+
+    `include_expansion`: include the `exp` (expansion-classification) sub-block. Set False for
+    positions-only runs where the expansion head is unsupervised (the metric is meaningless).
+    `include_breakdowns`: emit the FULL `by_level` / `by_depth` blocks (every metric at every
+    bucket). Set False to log only the pooled overall block -- the per-bucket blocks multiply the
+    key count by (#levels + #depths), which floods the logger (e.g. ~1200 keys with level_min=1).
+    `depth_metric`: if set (e.g. "pos_mse_total"), emit a single lightweight `<name>_by_depth`
+    curve (one stat over tree depth) instead of the full breakdowns -- the headline depth signal
+    for ~(#depths) keys. Independent of `include_breakdowns`.
     """
     # Optional tree-depth restriction of the pooled (overall) metrics.
     if min_depth > 0 and "ldepth" in cap:
@@ -197,48 +242,47 @@ def _metrics_from_pools(cap: dict, level_min: int = 30, min_depth: int = 0) -> d
         cap = {k: (v[keep] if isinstance(v, np.ndarray) and v.shape[0] == n else v)
                for k, v in cap.items()}
 
-    res = {
-        "n_leaves": int(cap["cs"].shape[0]),
-        "min_depth": int(min_depth),
-        "dist": compute_tf_distribution_metrics(
-            cap["cs"], cap["c0"], cap["fwd"], cap["side"], cap["uhat"], cap["lp"]),
-        "exp": compute_tf_expansion_metrics(cap["es"], cap["lexp"]),
-        "pos_mse": compute_tf_pos_mse(cap["cs"], cap["c0"]),
-        "by_level": {},
-        "by_depth": {},
-    }
-    levels = cap["level"]
-    for lv in np.unique(levels):
-        m = levels == lv
-        if int(m.sum()) < level_min:
-            continue
-        res["by_level"][int(lv)] = {
-            "n": int(m.sum()),
+    def _block(m=None):
+        """One metric block over all leaves (m=None) or a boolean-masked subset."""
+        sel = (lambda a: a) if m is None else (lambda a: a[m])
+        b = {
             "dist": compute_tf_distribution_metrics(
-                cap["cs"][m], cap["c0"][m], cap["fwd"][m], cap["side"][m], cap["uhat"], cap["lp"][m]),
-            "exp": compute_tf_expansion_metrics(cap["es"][m], cap["lexp"][m]),
-            "pos_mse": compute_tf_pos_mse(cap["cs"][m], cap["c0"][m]),
+                sel(cap["cs"]), sel(cap["c0"]), sel(cap["fwd"]), sel(cap["side"]),
+                cap["uhat"], sel(cap["lp"])),
+            "pos_mse": compute_tf_pos_mse(sel(cap["cs"]), sel(cap["c0"])),
         }
-    # Per-tree-depth breakdown (the quality-vs-depth curve).
-    if "ldepth" in cap:
-        depths = cap["ldepth"]
-        for dv in np.unique(depths):
-            m = depths == dv
+        if include_expansion:
+            b["exp"] = compute_tf_expansion_metrics(sel(cap["es"]), sel(cap["lexp"]))
+        return b
+
+    res = {"n_leaves": int(cap["cs"].shape[0]), "min_depth": int(min_depth)}
+    res.update(_block(None))
+    if include_breakdowns:
+        res["by_level"] = {}
+        res["by_depth"] = {}
+        levels = cap["level"]
+        for lv in np.unique(levels):
+            m = levels == lv
             if int(m.sum()) < level_min:
                 continue
-            res["by_depth"][int(dv)] = {
-                "n": int(m.sum()),
-                "dist": compute_tf_distribution_metrics(
-                    cap["cs"][m], cap["c0"][m], cap["fwd"][m], cap["side"][m], cap["uhat"], cap["lp"][m]),
-                "exp": compute_tf_expansion_metrics(cap["es"][m], cap["lexp"][m]),
-                "pos_mse": compute_tf_pos_mse(cap["cs"][m], cap["c0"][m]),
-            }
+            res["by_level"][int(lv)] = {"n": int(m.sum()), **_block(m)}
+        if "ldepth" in cap:
+            depths = cap["ldepth"]
+            for dv in np.unique(depths):
+                m = depths == dv
+                if int(m.sum()) < level_min:
+                    continue
+                res["by_depth"][int(dv)] = {"n": int(m.sum()), **_block(m)}
+    if depth_metric:
+        # Single lightweight depth curve (the headline depth signal) without the full breakdown.
+        res[f"{depth_metric}_by_depth"] = compute_tf_depth_series(cap, depth_metric, level_min)
     return res
 
 
 # --------------------------------------------------------------------------- runner
 def evaluate_teacher_forced(method, model, batches, uhat, device="cpu", level_min: int = 30,
-                            min_depth: int = 0) -> dict:
+                            min_depth: int = 0, include_expansion: bool = True,
+                            include_breakdowns: bool = True, depth_metric: str | None = None) -> dict:
     """Run teacher-forced sampling over GT reduction `batches`; return the metric suite.
 
     Pure given a built (method, model). Installs a temporary hook routing the training
@@ -324,7 +368,10 @@ def evaluate_teacher_forced(method, model, batches, uhat, device="cpu", level_mi
         return {"n_leaves": 0, "dist": {}, "exp": {}, "by_level": {}}
     cap = {k: np.concatenate(v) for k, v in pools.items()}
     cap["uhat"] = np.asarray(uhat, dtype=np.float64).reshape(3)
-    return _metrics_from_pools(cap, level_min=level_min, min_depth=min_depth)
+    return _metrics_from_pools(cap, level_min=level_min, min_depth=min_depth,
+                               include_expansion=include_expansion,
+                               include_breakdowns=include_breakdowns,
+                               depth_metric=depth_metric)
 
 
 # --------------------------------------------------------------------------- CLI sweep

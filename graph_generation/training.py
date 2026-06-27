@@ -684,9 +684,17 @@ class Trainer:
             was_training = model.training
             model.eval()  # dropout off for stable metrics
             try:
+                # Pooled overall block (the tree-averaged TF metrics) + ONE depth curve.
+                # - expansion dropped when the head is unsupervised (positions-only): meaningless.
+                # - full by_level/by_depth breakdowns OFF (they multiply keys by #levels+#depths);
+                #   instead emit a single `tf_depth_metric` curve over tree depth.
+                _depth_metric = getattr(self.cfg.validation, "tf_depth_metric", "pos_mse_total")
                 results["teacher_forced"] = evaluate_teacher_forced(
                     self.method, model, tf_batches, uhat_np, device=self.device,
                     level_min=int(getattr(self.cfg.validation, "tf_level_min", 1)),
+                    include_expansion=not bool(getattr(self.method, "predict_positions_only", False)),
+                    include_breakdowns=False,
+                    depth_metric=(_depth_metric or None),
                 )
             finally:
                 if was_training:
