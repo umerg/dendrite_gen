@@ -165,9 +165,16 @@ def compute_tf_expansion_metrics(e_samp: np.ndarray, leaf_expansion: np.ndarray)
 
 
 def compute_tf_pos_mse(cs_local: np.ndarray, c0_local: np.ndarray) -> dict:
-    """Teacher-forced FINAL-sample position MSE (full-ODE sampled offset vs GT), per local-frame
-    axis. `cs_local`/`c0_local` are [L,3] offsets in (fwd, side, axial) order; returns per-axis
-    MSE + `total` (mean squared Euclidean error over leaves). Empty pools -> {}.
+    """Teacher-forced FINAL-sample position error (full-ODE sampled offset vs GT), per local-frame
+    axis. `cs_local`/`c0_local` are [L,3] offsets in (fwd, side, axial) order. Empty pools -> {}.
+
+    Returns, per leaf-pool:
+      {fwd,side,axial}  per-axis MSE (squared, units^2); these sum to `total` (Pythagoras: the
+                        squared 3D error decomposes additively over axes -> per-axis attribution).
+      total             mean squared 3D error  mean||cs-c0||^2  (units^2; = fwd+side+axial).
+      dist_mean         mean ACTUAL 3D distance mean||cs-c0||  (units; the interpretable length,
+                        <= sqrt(total); not recoverable from the per-axis MSEs alone).
+      dist_median       median 3D distance (tail-robust headline).
 
     Identity is preserved (each sampled leaf is teacher-forced against its own GT offset), so this
     is a true node-wise reconstruction error, not a distribution distance.
@@ -178,7 +185,11 @@ def compute_tf_pos_mse(cs_local: np.ndarray, c0_local: np.ndarray) -> dict:
     se = (cs_local - c0_local) ** 2
     for a, name in enumerate(_AXES):
         out[name] = float(se[:, a].mean())
-    out["total"] = float(se.sum(axis=1).mean())
+    sq = se.sum(axis=1)                 # per-node squared 3D error ||e||^2
+    out["total"] = float(sq.mean())
+    dist = np.sqrt(sq)                  # per-node actual 3D distance ||e||
+    out["dist_mean"] = float(dist.mean())
+    out["dist_median"] = float(np.median(dist))
     return out
 
 
