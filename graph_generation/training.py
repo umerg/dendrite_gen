@@ -222,6 +222,10 @@ class Trainer:
         self.logger.info(f"Training initialized on device: {self.device}")
         self.logger.info(f"Total model parameters: {num_parameters / 1e6:.6f} Million")
 
+        # Surface static run metadata (model size, dataset sizes, device) in the
+        # wandb Overview -> Config panel.
+        self._log_run_metadata(model, num_parameters)
+
     def save_checkpoint(self):
         checkpoint = {
             name: model.state_dict()
@@ -423,9 +427,23 @@ class Trainer:
                 # Metrics disabled: insert placeholder
                 val_results[f"ema_{beta}"]["metrics_disabled"] = True
 
-        self.logger.info("[validation step=%d] total=%.1fs", self.step, time() - _t_val_start)
+        _val_total = time() - _t_val_start
+        self.logger.info("[validation step=%d] total=%.1fs", self.step, _val_total)
+        # Aggregate sampling time across betas (per-beta timing already lives in val_results).
+        sampling_total = sum(
+            v.get("timing", {}).get("sampling_s", 0.0)
+            for v in val_results.values()
+            if isinstance(v, dict)
+        )
         # Log results (test_results empty if metrics disabled & no improvements tracked)
-        self.log({"validation": val_results, "test": test_results})
+        self.log({
+            "validation": val_results,
+            "test": test_results,
+            "timing": {
+                "validation_total_s": float(_val_total),
+                "sampling_total_s": float(sampling_total),
+            },
+        })
 
         # Strip Figure objects from results before pickling: PNGs are already
         # saved to eval_plots/ and their paths are stored in *_path keys. Keeping
@@ -607,6 +625,7 @@ class Trainer:
 
         # Distribution-level comparison of generated vs GT statistics (Wasserstein-1
         # per stat + avg tree-edit distance). Logged as floats -> wandb scalars.
+        _t_dist = None
         if getattr(self.cfg.validation, "enable_dist_metrics", True):
             _t0_dist = time()
             gt_cache = self._gt_cache_for(eval_graphs, uhat_np)
@@ -634,8 +653,9 @@ class Trainer:
                     floor_mmd = floor.get("mmd_morpho", float("nan"))
                     if np.isfinite(gen_mmd) and np.isfinite(floor_mmd):
                         results["dist"]["headline_excess_mmd_morpho"] = float(gen_mmd - floor_mmd)
+            _t_dist = time() - _t0_dist
             self.logger.info(
-                "[evaluate beta=%s] dist_metrics=%.1fs", beta, time() - _t0_dist
+                "[evaluate beta=%s] dist_metrics=%.1fs", beta, _t_dist
             )
 
         # Metric computation gated
@@ -664,6 +684,16 @@ class Trainer:
         else:
             results['metrics_disabled'] = True
         _t_metrics = time() - _t0_metrics
+
+        # Timing surfaced to wandb (floats -> flattened as timing/... under this beta).
+        n_eval = max(len(eval_graphs), 1)
+        results["timing"] = {
+            "sampling_s": float(_t_generation),
+            "sampling_per_graph_ms": float(_t_generation / n_eval * 1000.0),
+            "metric_loop_s": float(_t_metrics),
+        }
+        if _t_dist is not None:
+            results["timing"]["dist_metrics_s"] = float(_t_dist)
 
         self.logger.info(
             "[evaluate beta=%s n_graphs=%d] generation=%.1fs metrics=%.1fs",
@@ -720,25 +750,74 @@ class Trainer:
 
         return results
 
+    def _log_run_metadata(self, model, num_parameters):
+        """Push static run metadata (model size, dataset sizes, device) into the
+        wandb Overview -> Config panel. num_parameters is only known after
+        wandb.init, so we use config.update rather than the init config. No-op
+        (and best-effort) when wandb is disabled/unavailable."""
+        if self.wandb_run is None:
+            return
+        try:
+            param_bytes = sum(p.numel() * p.element_size() for p in model.parameters())
+            buffer_bytes = sum(b.numel() * b.element_size() for b in model.buffers())
+            self.wandb_run.config.update(
+                {
+                    "model_num_parameters": int(num_parameters),
+                    "model_num_parameters_millions": round(num_parameters / 1e6, 4),
+                    "model_size_mb": round((param_bytes + buffer_bytes) / 1e6, 3),
+                    "num_train_graphs": len(self.train_graphs),
+                    "num_val_graphs": len(self.validation_graphs),
+                    "num_test_graphs": len(self.test_graphs),
+                    "device": str(self.device),
+                },
+                allow_val_change=True,
+            )
+        except Exception as e:  # pragma: no cover - metadata is best-effort
+            print(f"[wandb config metadata skipped] {e}")
+
     def log(self, log_dict: dict, prefix: str = "", indent: int = 0):
-        """Logs an arbitrarily nested dict to the console and wandb."""
+        """Logs an arbitrarily nested dict to the console and wandb.
+
+        All wandb-bound leaves (float scalars + Figures) from a single log()
+        call are collected into one flat payload and flushed with a SINGLE
+        wandb.log(..., step=self.step). Batching (instead of one .log() per
+        leaf) keeps wandb's internal `_step` counter aligned with our training
+        step, so image/media panels — whose step slider ignores the custom
+        `train_step` metric and always uses `_step` — land at the true step
+        instead of a runaway internal counter.
+        """
+        wandb_enabled = (
+            getattr(self.cfg.wandb, 'logging', False)
+            and self.wandb_run is not None
+            and wandb is not None
+        )
+        payload: dict = {}
+        self._collect_log(log_dict, payload, wandb_enabled, prefix=prefix, indent=indent)
+        if wandb_enabled and payload:
+            payload["train_step"] = self.step
+            self.wandb_run.log(payload, step=self.step)
+
+    def _collect_log(self, log_dict: dict, payload: dict, wandb_enabled: bool,
+                     prefix: str = "", indent: int = 0):
+        """Recursively print a nested dict and collect wandb leaves into `payload`."""
         for key, value in log_dict.items():
             if isinstance(value, dict):
                 print(f"{'   ' * indent}{key}:")
-                self.log(value, prefix=f"{prefix}{key}/", indent=indent + 1)
+                self._collect_log(value, payload, wandb_enabled,
+                                  prefix=f"{prefix}{key}/", indent=indent + 1)
             elif isinstance(value, float):
                 log_msg = f"{'   ' * indent}{key}: {value}"
                 print(log_msg)
                 # Also log to file
                 if hasattr(self, 'logger'):
                     self.logger.info(f"{prefix}{key}: {value}")
-                if self.cfg.wandb.logging and self.wandb_run is not None:
-                    self.wandb_run.log({f"{prefix}{key}": value, "train_step": self.step})
+                if wandb_enabled:
+                    payload[f"{prefix}{key}"] = value
             elif isinstance(value, Figure):
-                # Wandb logging for figures currently disabled or wandb import commented out.
-                # Keeping placeholder for future reactivation.
-                if getattr(self.cfg.wandb, 'logging', False) and self.wandb_run is not None and wandb is not None:
+                if wandb_enabled:
                     try:
-                        self.wandb_run.log({f"{prefix}{key}": wandb.Image(value), "train_step": self.step})
+                        payload[f"{prefix}{key}"] = wandb.Image(
+                            value, caption=f"step {self.step}"
+                        )
                     except Exception as e:
                         print(f"[wandb logging skipped] {e}")
