@@ -7,6 +7,7 @@ import pytest
 from validation.teacher_forced_eval import (
     compute_tf_distribution_metrics,
     compute_tf_expansion_metrics,
+    compute_tf_pos_mse,
     _metrics_from_pools,
     _sibling_angles,
     _auc,
@@ -87,3 +88,40 @@ def test_empty_inputs():
     z3 = np.zeros((0, 3)); z1 = np.zeros((0, 1))
     assert compute_tf_distribution_metrics(z3, z3, z3, z3, np.array([0., 1., 0.]), np.zeros(0)) == {}
     assert compute_tf_expansion_metrics(z1, np.zeros(0)) == {}
+    assert compute_tf_pos_mse(z3, z3) == {}
+
+
+def test_pos_mse_node_wise():
+    s = _synthetic()  # forward offset inflated x1.3, sideways/axial unchanged
+    m = compute_tf_pos_mse(s["cs"], s["c0"])
+    for k in ("fwd", "side", "axial", "total", "dist_mean", "dist_median"):
+        assert k in m and math.isfinite(m[k]), f"bad {k}"
+    # per-axis MSEs sum to the total (mean squared 3D error)
+    assert m["total"] == pytest.approx(m["fwd"] + m["side"] + m["axial"], rel=1e-6)
+    # only forward was perturbed -> forward MSE dominates; side/axial ~ 0 (GT == sampled there)
+    assert m["fwd"] > m["side"]
+    assert m["side"] == pytest.approx(0.0, abs=1e-12)
+    assert m["dist_mean"] > 0.0 and m["dist_median"] > 0.0
+
+
+def test_skip_ks_keeps_w1():
+    s = _synthetic()
+    d = compute_tf_distribution_metrics(
+        s["cs"], s["c0"], s["fwd"], s["side"], s["uhat"], s["lp"], enable_ks=False)
+    # every KS twin dropped ...
+    assert not any(k.endswith("_ks") for k in d), f"KS keys leaked: {[k for k in d if k.endswith('_ks')]}"
+    # ... while the W1 distances (and directional means) remain
+    for k in ("branch_length_w1", "fwd_signed_w1", "fwd_mag_w1", "turning_angle_w1",
+              "axial_frac_w1", "bifurcation_angle_w1", "fwd_mag_mean_samp"):
+        assert k in d and math.isfinite(d[k]), f"missing {k}"
+
+
+def test_pooled_only_no_breakdowns():
+    s = _synthetic()
+    res = _metrics_from_pools(s, level_min=10, include_breakdowns=False, enable_ks=False)
+    # pooled blocks present, including the new node-wise pos_mse
+    assert res["dist"] and res["exp"] and res["pos_mse"]
+    assert "total" in res["pos_mse"]
+    # no per-level / per-depth breakdowns, no KS in the pooled dist block
+    assert res["by_level"] == {} and res["by_depth"] == {}
+    assert not any(k.endswith("_ks") for k in res["dist"])

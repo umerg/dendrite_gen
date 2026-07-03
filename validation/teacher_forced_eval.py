@@ -14,8 +14,11 @@ and route those same inputs into `diffusion.sample` (full ODE) instead of the tr
 forward — reusing the entire input construction. Only the new leaves start from noise; their
 parents/context are GT, so this is teacher-forced.
 
-This module is post-hoc (a CLI sweeps `step_*.pt`) and is NOT wired into `run_validation`;
-`evaluate_teacher_forced(method, model, batches, uhat)` is a pure function so it can be later.
+`evaluate_teacher_forced(method, model, batches, uhat)` is a pure function driven both by the
+post-hoc CLI here (sweeping `step_*.pt`) and live from `Trainer.evaluate` when
+`cfg.validation.eval_mode` selects `teacher_forced`/`both`. The live path passes `enable_ks=False`
+and `include_breakdowns=False` for a lean, pooled, W1-only payload; the CLI keeps the rich
+defaults (KS + per-level/per-depth breakdowns) for offline analysis.
 """
 from __future__ import annotations
 
@@ -93,8 +96,13 @@ def compute_tf_distribution_metrics(
     side: np.ndarray,      # [L,3] local sideways basis
     uhat: np.ndarray,      # [3]
     leaf_parent: np.ndarray,  # [L] global parent id (for sibling grouping)
+    enable_ks: bool = True,
 ) -> dict:
-    """Teacher-forced (sampled) vs GT distribution distances for the local morphometrics."""
+    """Teacher-forced (sampled) vs GT distribution distances for the local morphometrics.
+
+    `enable_ks=False` drops every KS twin and keeps only the W1 distances + directional means
+    (the live-validation payload); the default keeps KS for the post-hoc CLI.
+    """
     out: dict[str, float] = {}
     if cs_local.shape[0] == 0:
         return out
@@ -102,7 +110,8 @@ def compute_tf_distribution_metrics(
     bl_s = np.linalg.norm(cs_local, axis=1)
     bl_g = np.linalg.norm(c0_local, axis=1)
     out["branch_length_w1"] = _w1(bl_s, bl_g)
-    out["branch_length_ks"] = _ks(bl_s, bl_g)
+    if enable_ks:
+        out["branch_length_ks"] = _ks(bl_s, bl_g)
     # Directional means (sampled vs GT). W1/KS are symmetric distances and cannot tell
     # over- from under-production; the raw means can. (mean_samp - mean_gt) > 0 = over.
     # Stored separately so the GT reference (e.g. the forward C_0 mean) stays visible.
@@ -112,7 +121,8 @@ def compute_tf_distribution_metrics(
     # decomposed per-axis offset: signed component + magnitude (distances + directional means)
     for a, name in enumerate(_AXES):
         out[f"{name}_signed_w1"] = _w1(cs_local[:, a], c0_local[:, a])
-        out[f"{name}_signed_ks"] = _ks(cs_local[:, a], c0_local[:, a])
+        if enable_ks:
+            out[f"{name}_signed_ks"] = _ks(cs_local[:, a], c0_local[:, a])
         out[f"{name}_mag_w1"] = _w1(np.abs(cs_local[:, a]), np.abs(c0_local[:, a]))
         out[f"{name}_signed_mean_samp"] = float(cs_local[:, a].mean())
         out[f"{name}_signed_mean_gt"] = float(c0_local[:, a].mean())
@@ -126,7 +136,8 @@ def compute_tf_distribution_metrics(
         af_s = np.abs(cs_local[:, 2]) / np.where(bl_s > 0, bl_s, np.nan)
         af_g = np.abs(c0_local[:, 2]) / np.where(bl_g > 0, bl_g, np.nan)
     out["turning_angle_w1"] = _w1(psi_s, psi_g)
-    out["turning_angle_ks"] = _ks(psi_s, psi_g)
+    if enable_ks:
+        out["turning_angle_ks"] = _ks(psi_s, psi_g)
     out["axial_frac_w1"] = _w1(af_s, af_g)
 
     # bifurcation angle: needs global offsets, grouped by parent
@@ -135,7 +146,29 @@ def compute_tf_distribution_metrics(
     ba_s = _sibling_angles(gs, leaf_parent)
     ba_g = _sibling_angles(gg, leaf_parent)
     out["bifurcation_angle_w1"] = _w1(ba_s, ba_g)
-    out["bifurcation_angle_ks"] = _ks(ba_s, ba_g)
+    if enable_ks:
+        out["bifurcation_angle_ks"] = _ks(ba_s, ba_g)
+    return out
+
+
+def compute_tf_pos_mse(cs_local: np.ndarray, c0_local: np.ndarray) -> dict:
+    """Node-wise teacher-forced position error (sampled vs its own GT offset), local frame.
+
+    Each sampled leaf is aligned to its GT target, so unlike the distribution distances this is
+    a true per-node reconstruction error -- the closest analog of the training pos_loss and the
+    flow diagnostics pos_mse_* (graph_generation/diffusion/diagnostics.py). The per-axis MSEs sum
+    to `total` (= mean squared 3D error); `dist_*` are actual 3D distances.
+    """
+    out: dict[str, float] = {}
+    if cs_local.shape[0] == 0:
+        return out
+    d = cs_local - c0_local                       # [L,3]
+    for a, name in enumerate(_AXES):
+        out[name] = float(np.mean(d[:, a] ** 2))
+    out["total"] = float(np.mean(np.sum(d ** 2, axis=1)))
+    dist = np.linalg.norm(d, axis=1)
+    out["dist_mean"] = float(dist.mean())
+    out["dist_median"] = float(np.median(dist))
     return out
 
 
@@ -164,13 +197,16 @@ def compute_tf_expansion_metrics(e_samp: np.ndarray, leaf_expansion: np.ndarray)
     return out
 
 
-def _metrics_from_pools(cap: dict, level_min: int = 30, min_depth: int = 0) -> dict:
-    """Assemble overall + per-reduction-level + per-tree-depth metric blocks.
+def _metrics_from_pools(cap: dict, level_min: int = 30, min_depth: int = 0,
+                        include_breakdowns: bool = True, enable_ks: bool = True) -> dict:
+    """Assemble the overall (pooled) block and, if `include_breakdowns`, the per-reduction-level
+    and per-tree-depth blocks.
 
     `level_min` is a per-bucket leaf-COUNT floor (a bucket is reported only if it has
     >= level_min leaves) -- NOT a starting depth. `min_depth` (tree depth, from `ldepth`)
-    restricts the OVERALL `dist`/`exp` to leaves at depth >= min_depth, e.g. min_depth=2
-    drops the root children (the deterministic-interior view).
+    restricts the OVERALL `dist`/`exp`/`pos_mse` to leaves at depth >= min_depth, e.g. min_depth=2
+    drops the root children (the deterministic-interior view). `include_breakdowns=False` returns
+    only the pooled block (empty by_level/by_depth) -- the lean live-validation payload.
     """
     # Optional tree-depth restriction of the pooled (overall) metrics.
     if min_depth > 0 and "ldepth" in cap:
@@ -183,11 +219,15 @@ def _metrics_from_pools(cap: dict, level_min: int = 30, min_depth: int = 0) -> d
         "n_leaves": int(cap["cs"].shape[0]),
         "min_depth": int(min_depth),
         "dist": compute_tf_distribution_metrics(
-            cap["cs"], cap["c0"], cap["fwd"], cap["side"], cap["uhat"], cap["lp"]),
+            cap["cs"], cap["c0"], cap["fwd"], cap["side"], cap["uhat"], cap["lp"], enable_ks=enable_ks),
+        "pos_mse": compute_tf_pos_mse(cap["cs"], cap["c0"]),
         "exp": compute_tf_expansion_metrics(cap["es"], cap["lexp"]),
         "by_level": {},
         "by_depth": {},
     }
+    if not include_breakdowns:
+        return res
+
     levels = cap["level"]
     for lv in np.unique(levels):
         m = levels == lv
@@ -196,7 +236,9 @@ def _metrics_from_pools(cap: dict, level_min: int = 30, min_depth: int = 0) -> d
         res["by_level"][int(lv)] = {
             "n": int(m.sum()),
             "dist": compute_tf_distribution_metrics(
-                cap["cs"][m], cap["c0"][m], cap["fwd"][m], cap["side"][m], cap["uhat"], cap["lp"][m]),
+                cap["cs"][m], cap["c0"][m], cap["fwd"][m], cap["side"][m], cap["uhat"], cap["lp"][m],
+                enable_ks=enable_ks),
+            "pos_mse": compute_tf_pos_mse(cap["cs"][m], cap["c0"][m]),
             "exp": compute_tf_expansion_metrics(cap["es"][m], cap["lexp"][m]),
         }
     # Per-tree-depth breakdown (the quality-vs-depth curve).
@@ -209,7 +251,9 @@ def _metrics_from_pools(cap: dict, level_min: int = 30, min_depth: int = 0) -> d
             res["by_depth"][int(dv)] = {
                 "n": int(m.sum()),
                 "dist": compute_tf_distribution_metrics(
-                    cap["cs"][m], cap["c0"][m], cap["fwd"][m], cap["side"][m], cap["uhat"], cap["lp"][m]),
+                    cap["cs"][m], cap["c0"][m], cap["fwd"][m], cap["side"][m], cap["uhat"], cap["lp"][m],
+                    enable_ks=enable_ks),
+                "pos_mse": compute_tf_pos_mse(cap["cs"][m], cap["c0"][m]),
                 "exp": compute_tf_expansion_metrics(cap["es"][m], cap["lexp"][m]),
             }
     return res
@@ -217,12 +261,15 @@ def _metrics_from_pools(cap: dict, level_min: int = 30, min_depth: int = 0) -> d
 
 # --------------------------------------------------------------------------- runner
 def evaluate_teacher_forced(method, model, batches, uhat, device="cpu", level_min: int = 30,
-                            min_depth: int = 0) -> dict:
+                            min_depth: int = 0, include_breakdowns: bool = True,
+                            enable_ks: bool = True) -> dict:
     """Run teacher-forced sampling over GT reduction `batches`; return the metric suite.
 
     Pure given a built (method, model). Installs a temporary hook routing the training
     forward into `diffusion.sample` with GT context, captures per-leaf sampled offsets +
-    expansion + GT targets + reduction level, then computes the metrics.
+    expansion + GT targets + reduction level, then computes the metrics. `include_breakdowns`
+    /`enable_ks` are forwarded to `_metrics_from_pools` (both default True for the CLI; the
+    live-validation path passes False/False for a lean pooled W1-only payload).
     """
     stash = {}
     cur = {}
@@ -294,10 +341,44 @@ def evaluate_teacher_forced(method, model, batches, uhat, device="cpu", level_mi
         method.diffusion.forward = orig_fwd
 
     if not pools["cs"]:
-        return {"n_leaves": 0, "dist": {}, "exp": {}, "by_level": {}}
+        return {"n_leaves": 0, "dist": {}, "pos_mse": {}, "exp": {}, "by_level": {}, "by_depth": {}}
     cap = {k: np.concatenate(v) for k, v in pools.items()}
     cap["uhat"] = np.asarray(uhat, dtype=np.float64).reshape(3)
-    return _metrics_from_pools(cap, level_min=level_min, min_depth=min_depth)
+    return _metrics_from_pools(cap, level_min=level_min, min_depth=min_depth,
+                               include_breakdowns=include_breakdowns, enable_ks=enable_ks)
+
+
+# --------------------------------------------------------------------------- batch building
+def build_reduction_batches_from_graphs(graphs, reduction_cfg, batch_size, pos_scale_factor=1.0):
+    """Turn a list of nx graphs into fixed GT reduction batches (full coverage).
+
+    Shared by the post-hoc CLI (`_build_eval_batches`) and `Trainer._tf_batches_for`, so batch
+    construction is identical on both paths. Positions are divided by `pos_scale_factor` to match
+    the training coordinate space. Reduction stochasticity is realized once here; callers cache the
+    returned batches so the teacher-forced curve is comparable step-to-step.
+    """
+    import graph_generation as gg
+    from torch_geometric.data import Batch
+    from utils.data_loading import nx_graph_to_adj_pos
+    from graph_generation.data.reduction_dataset import PrecomputedRedDataset
+
+    for G in graphs:
+        if G.graph.get("root") is None or G.graph["root"] not in G.nodes:
+            G.graph["root"] = next(iter(G.nodes))
+    adjs, poses = [], []
+    for G in graphs:
+        A, P, _ = nx_graph_to_adj_pos(G)
+        adjs.append(A); poses.append(P / pos_scale_factor)
+    R = reduction_cfg
+    fk = dict(mode=R.mode, cherry_p=R.cherry_p, ensure_progress=R.ensure_progress,
+              root=getattr(R, "root", None), contract_root=getattr(R, "contract_root", None))
+    if hasattr(R, "weighted_reduction"):
+        fk["weighted_reduction"] = R.weighted_reduction
+    rf = (gg.depth_reduction.DepthReductionFactory(**fk) if R.type == "depth"
+          else gg.reduction.ReductionFactory(**fk))
+    ds = PrecomputedRedDataset(adjs, poses, rf, tmds=None)
+    samples = ds.samples
+    return [Batch.from_data_list(samples[i:i + batch_size]) for i in range(0, len(samples), batch_size)]
 
 
 # --------------------------------------------------------------------------- CLI sweep
@@ -309,9 +390,7 @@ def _build_eval_batches(cfg, eval_dir, n_graphs, batch_size, gen_seed=1):
     deterministic_synth probe, `gen_seed=1` reproduces the exact training val set.
     """
     import graph_generation as gg
-    from torch_geometric.data import Batch
-    from utils.data_loading import load_swc_graphs_from_dir, nx_graph_to_adj_pos
-    from graph_generation.data.reduction_dataset import PrecomputedRedDataset
+    from utils.data_loading import load_swc_graphs_from_dir
 
     psf = float(getattr(cfg.dataset, "pos_scale_factor", 1.0) or 1.0)
     if not getattr(cfg.dataset, "load", True):
@@ -326,24 +405,9 @@ def _build_eval_batches(cfg, eval_dir, n_graphs, batch_size, gen_seed=1):
         if eval_dir is None:
             raise ValueError("--eval-dir is required for SWC-loaded datasets (cfg.dataset.load=True).")
         graphs = load_swc_graphs_from_dir(eval_dir)
-    for G in graphs:
-        if G.graph.get("root") is None or G.graph["root"] not in G.nodes:
-            G.graph["root"] = next(iter(G.nodes))
     graphs = graphs[:n_graphs]
-    adjs, poses = [], []
-    for G in graphs:
-        A, P, _ = nx_graph_to_adj_pos(G)
-        adjs.append(A); poses.append(P / psf)
-    R = cfg.reduction
-    fk = dict(mode=R.mode, cherry_p=R.cherry_p, ensure_progress=R.ensure_progress,
-              root=getattr(R, "root", None), contract_root=getattr(R, "contract_root", None))
-    if hasattr(R, "weighted_reduction"):
-        fk["weighted_reduction"] = R.weighted_reduction
-    rf = (gg.depth_reduction.DepthReductionFactory(**fk) if R.type == "depth"
-          else gg.reduction.ReductionFactory(**fk))
-    ds = PrecomputedRedDataset(adjs, poses, rf, tmds=None)
-    samples = ds.samples
-    return [Batch.from_data_list(samples[i:i + batch_size]) for i in range(0, len(samples), batch_size)], len(graphs)
+    batches = build_reduction_batches_from_graphs(graphs, cfg.reduction, batch_size, pos_scale_factor=psf)
+    return batches, len(graphs)
 
 
 def main():
