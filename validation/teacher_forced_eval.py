@@ -3,10 +3,15 @@
 At each GT reduction level (teacher-forced = the partial tree is GT), run the FULL flow
 sampler to produce the next-step new-leaf offsets + expansion decisions, then pool the
 produced *local* morphometrics across all trees/levels and compare to the GT pools using
-the SAME W1/KS distances the free-running validation uses. Swept across checkpoints, this
-yields val curves that (a) correspond directly to the training task and (b) live in the
-same units as the free-running `*_w1`, so the teacher-forced ↔ free-running (exposure) gap
-reads off directly.
+the SAME W1/KS distance functions the free-running validation uses. Swept across
+checkpoints, these curves correspond directly to the training task and are comparable
+against each other across checkpoints.
+
+UNITS CAVEAT: these metrics are computed in the model's training coordinate space -- local
+parent-relative offsets with positions divided by `pos_scale_factor` -- i.e. the same space
+as the training pos_loss. The free-running validation metrics are computed in the ORIGINAL
+(unscaled) coordinate space. So for `pos_scale_factor != 1` the two families differ by that
+factor and must NOT be subtracted directly; only same-family curves are directly comparable.
 
 Design: `get_loss` already builds the correct teacher-forced inputs (GT positions, local
 frames, GT child-identity one-hot, pre_geom). We intercept its `self.diffusion(...)` call
@@ -208,6 +213,7 @@ def _metrics_from_pools(cap: dict, level_min: int = 30, min_depth: int = 0,
     drops the root children (the deterministic-interior view). `include_breakdowns=False` returns
     only the pooled block (empty by_level/by_depth) -- the lean live-validation payload.
     """
+    min_depth = int(min_depth or 0)  # tolerate a null/None config value ("no restriction")
     # Optional tree-depth restriction of the pooled (overall) metrics.
     if min_depth > 0 and "ldepth" in cap:
         keep = cap["ldepth"] >= min_depth

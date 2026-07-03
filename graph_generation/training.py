@@ -609,8 +609,10 @@ class Trainer:
         key = id(eval_graphs)
         batches = self._tf_batch_cache.get(key)
         if batches is None:
-            cap = int(getattr(self.cfg.validation, "tf_max_graphs", 64))
-            graphs = list(eval_graphs)[:cap] if cap and cap > 0 else list(eval_graphs)
+            cap = getattr(self.cfg.validation, "tf_max_graphs", 64)  # may be null -> no cap
+            graphs = list(eval_graphs)
+            if cap is not None and int(cap) > 0:
+                graphs = graphs[:int(cap)]
             bs = (
                 self.cfg.validation.batch_size
                 if self.cfg.validation.batch_size is not None
