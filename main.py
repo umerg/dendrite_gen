@@ -47,6 +47,11 @@ def get_expansion_items(cfg: DictConfig, train_graphs, diffusion=None):
     tmd_filtrations = list(getattr(cfg.model, "tmd_filtrations", ("path", "height", "rho")))
     tmd_bins = int(getattr(cfg.model, "tmd_bins", 16))
     uhat = np.asarray(getattr(cfg.model, "so2_axis", (0.0, 0.0, 1.0)), dtype=float).reshape(3)
+    # RBF edge-distance kernel knobs (default OFF; ranges are in pos_scale_factor-normalized units).
+    rbf_k = int(getattr(cfg.model, "rbf_k", 0))
+    rbf_gamma = float(getattr(cfg.model, "rbf_gamma", 10.0))
+    rbf_rho_max = float(getattr(cfg.model, "rbf_rho_max", 5.0))
+    rbf_du_max = float(getattr(cfg.model, "rbf_du_max", 3.0))
     print(f"Extracting adjacency and position matrices for {len(train_graphs)} training graphs...")
     adjs = []
     poses = []
@@ -113,6 +118,8 @@ def get_expansion_items(cfg: DictConfig, train_graphs, diffusion=None):
         )
     if tmd_hidden_dim > 0:
         print(f"TMD conditioning ON: filtrations={list(tmd_filtrations)}, bins={tmd_bins} -> tmd_in_dim={tmd_in_dim}")
+    if rbf_k > 0:
+        print(f"RBF edge features ON: k={rbf_k}, gamma={rbf_gamma}, rho in [0,{rbf_rho_max}], du in [+-{rbf_du_max}]")
     if cfg.model.name == "egnn":
         model = gg.model.SO2_EGNN_Network(
             n_layers=cfg.model.num_layers,
@@ -132,6 +139,10 @@ def get_expansion_items(cfg: DictConfig, train_graphs, diffusion=None):
             tmd_in_dim=tmd_in_dim,
             tmd_hidden_dim=tmd_hidden_dim,
             so2_axis=cfg.model.so2_axis,
+            rbf_k=rbf_k,
+            rbf_gamma=rbf_gamma,
+            rbf_rho_max=rbf_rho_max,
+            rbf_du_max=rbf_du_max,
         )
     elif cfg.model.name == "egnn_simple":
         model = gg.model.SO2_EGNN_Sparse_Network_Simple(

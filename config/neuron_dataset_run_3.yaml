@@ -74,6 +74,12 @@ model:
   offset_head_hidden: 256
   use_global_fallback_frames: False
   so2_axis: [0., 1., 0.] # z-axis for trees, y-axis for neurons
+  # RBF edge-distance kernel (default OFF). Set rbf_k>0 to expand rho/du into Gaussian
+  # channels instead of raw scalars. Ranges are in pos_scale_factor-normalized units.
+  rbf_k: 0              # >0 = rbf_k Gaussian channels per distance (recommended 16); 0 = raw scalar
+  rbf_gamma: 10.0       # Gaussian width (shared by rho & du)
+  rbf_rho_max: 4.0      # in-plane radius span [0, rho_max]; neuron C_0 rho p99=3.1 (scale 1/45.1, axis y)
+  rbf_du_max: 4.0       # axial span [-du_max, du_max]; neuron |du| p99=3.1
 
 ema: # can adjust for more stable training, but I haven't had the chance to experiment with it much - working though
   betas: [1]

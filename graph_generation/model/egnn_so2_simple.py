@@ -263,6 +263,8 @@ class SO2_EGNN_Sparse(MessagePassing):
         angle_weighted_mean: bool = True,
         rbf_k: int = 0,
         rbf_gamma: float = 10.0,
+        rbf_rho_max: float = 5.0,
+        rbf_du_max: float = 3.0,
                  eps: float = 1e-8,
                  **kwargs
     ):
@@ -300,10 +302,9 @@ class SO2_EGNN_Sparse(MessagePassing):
                     self.gamma = gamma
                 def forward(self, s):
                     return torch.exp(-self.gamma * (s - self.mu.view(1, -1))**2)
-            # TODO: thread these ranges from config/data stats
-            rho_max, du_max = 5.0, 3.0
-            self.rbf_rho = RBF(self.rbf_k, 0.0, rho_max, self.rbf_gamma)
-            self.rbf_du  = RBF(self.rbf_k, -du_max, du_max, self.rbf_gamma)
+            # Ranges are threaded from config/data stats (pos_scale_factor-normalized units).
+            self.rbf_rho = RBF(self.rbf_k, 0.0, rbf_rho_max, self.rbf_gamma)   # rho in [0, rho_max]
+            self.rbf_du  = RBF(self.rbf_k, -rbf_du_max, rbf_du_max, self.rbf_gamma)  # du in [-du_max, du_max]
         self.eps = eps
 
         # base edge scalars: rho, du, u_i, optionally cosψ/sinψ (+ option fourier)
@@ -565,6 +566,8 @@ class SO2_EGNN_Sparse_Network_Simple(nn.Module):
                  angle_weighted_mean=True,
                  rbf_k=0,
                  rbf_gamma=10.0,
+                 rbf_rho_max=5.0,
+                 rbf_du_max=3.0,
                  eps=1e-8,
                  # offset head
                  add_offset_head=True,
@@ -658,6 +661,8 @@ class SO2_EGNN_Sparse_Network_Simple(nn.Module):
                 angle_weighted_mean = angle_weighted_mean,
                 rbf_k = rbf_k,
                 rbf_gamma = rbf_gamma,
+                rbf_rho_max = rbf_rho_max,
+                rbf_du_max = rbf_du_max,
                 eps = eps,
             )
 

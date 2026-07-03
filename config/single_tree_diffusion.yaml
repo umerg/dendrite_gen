@@ -54,6 +54,12 @@ model:
   num_global_tokens: 4
   offset_head_hidden: 128
   use_global_fallback_frames: False
+  # RBF edge-distance kernel (default OFF). Set rbf_k>0 to expand rho/du into Gaussian
+  # channels instead of raw scalars. Ranges are in pos_scale_factor-normalized units.
+  rbf_k: 0              # >0 = rbf_k Gaussian channels per distance (recommended 16); 0 = raw scalar
+  rbf_gamma: 10.0       # Gaussian width (shared by rho & du)
+  rbf_rho_max: 7.0      # in-plane radius span [0, rho_max] (tree scale, axis z)
+  rbf_du_max: 5.0       # axial span [-du_max, du_max]
 
 ema:
   betas: [1]
