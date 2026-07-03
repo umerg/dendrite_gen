@@ -24,6 +24,7 @@ def run_tree_stats(
     out_root: Path,
     ncols: int = 3,
     max_pairs: int | None = None,
+    uhat=(0.0, 0.0, 1.0),
 ) -> None:
     """Render tree-level statistics figures into the tree_stats subfolder."""
     import pandas as pd
@@ -45,6 +46,7 @@ def run_tree_stats(
                 tree_name=gt_path.name,
                 source="gt",
                 pair_index=pair_idx,
+                uhat=uhat,
             )
         )
         scalar_frames.append(
@@ -53,6 +55,7 @@ def run_tree_stats(
                 tree_name=gt_path.name,
                 source="pred",
                 pair_index=pair_idx,
+                uhat=uhat,
             )
         )
 
@@ -85,6 +88,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=3,
         help="Number of columns for grid-style plots.",
     )
+    parser.add_argument(
+        "--so2-axis",
+        type=float,
+        nargs=3,
+        default=[0.0, 0.0, 1.0],
+        metavar=("X", "Y", "Z"),
+        help="Equivariance/growth axis for height & span_xy scalars (default z; use 0 1 0 for neurons).",
+    )
     return parser
 
 
@@ -92,7 +103,8 @@ def main() -> None:
     parser = build_arg_parser()
     args = parser.parse_args()
     context = load_plot_context(args)
-    run_tree_stats(context, out_root=args.out_dir, ncols=args.ncols, max_pairs=args.max_pairs)
+    run_tree_stats(context, out_root=args.out_dir, ncols=args.ncols, max_pairs=args.max_pairs,
+                   uhat=tuple(args.so2_axis))
 
 
 if __name__ == "__main__":

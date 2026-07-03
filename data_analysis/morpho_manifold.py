@@ -62,11 +62,15 @@ def load_sample(swc_dir: str, n_sample: int, seed: int = 0) -> list[nx.Graph]:
     return graphs
 
 
-def build_vectors(graphs, embedding: str, n_bins: int = 16):
-    """Return (X [n,D], feature_names, node_counts aligned with rows)."""
+def build_vectors(graphs, embedding: str, n_bins: int = 16, uhat=(0.0, 0.0, 1.0)):
+    """Return (X [n,D], feature_names, node_counts aligned with rows).
+
+    ``uhat`` is the equivariance/growth axis for the axis-dependent morpho features
+    (axial_extent / radial_span); pass the dataset's so2_axis (y for neurons).
+    """
     if embedding == "morpho":
         radii = _sholl_radii_from_graphs(graphs, 32)
-        X = np.stack([assemble_morpho_vector(G, uhat=(0, 0, 1), radii=radii) for G in graphs], axis=0)
+        X = np.stack([assemble_morpho_vector(G, uhat=uhat, radii=radii) for G in graphs], axis=0)
         return X, list(MORPHO_KEYS), np.array([g.number_of_nodes() for g in graphs])
     rows, ncounts = [], []
     for G in graphs:
@@ -193,14 +197,18 @@ def main():
     swc_dir = sys.argv[1] if len(sys.argv) > 1 else "/Users/umer/Documents/neurons_final/train"
     n_sample = int(sys.argv[2]) if len(sys.argv) > 2 else 4000
     embedding = sys.argv[3] if len(sys.argv) > 3 else "morpho"
+    # Equivariance/growth axis for the axis-dependent morpho features. This script targets
+    # neurons, so default to y ([0,1,0]); pass "z" as argv[4] for z-up synthetic trees.
+    axis_arg = sys.argv[4].lower() if len(sys.argv) > 4 else "y"
+    uhat = (0.0, 0.0, 1.0) if axis_arg == "z" else (0.0, 1.0, 0.0)
     out_dir = Path(__file__).resolve().parent / "morpho_manifold_out"
     out_dir.mkdir(exist_ok=True)
 
     graphs = load_sample(swc_dir, n_sample)
     split = Path(swc_dir).name
-    print(f"Loaded {len(graphs)} neurons from {swc_dir}  | embedding={embedding}")
+    print(f"Loaded {len(graphs)} neurons from {swc_dir}  | embedding={embedding} | uhat={uhat}")
 
-    X, names, ncounts = build_vectors(graphs, embedding)
+    X, names, ncounts = build_vectors(graphs, embedding, uhat=uhat)
     Xz, n_active, n_const = preprocess(X)
     print(f"  raw D={X.shape[1]}  active D={n_active}  (dropped {n_const} constant)")
 

@@ -317,8 +317,8 @@ def _global_hist_edges(
     return np.linspace(lo, hi, bins + 1, dtype=np.float64)
 
 
-def _compute_graph_stats(g: nx.Graph) -> dict:
-    """Compute structural/geometric stats for a single graph."""
+def _compute_graph_stats(g: nx.Graph, uhat=(0.0, 0.0, 1.0)) -> dict:
+    """Compute structural/geometric stats for a single graph (height/span about ``uhat``)."""
     len_vals = branch_length_values(g)
     ang_vals = (bifurcation_angle_values(g) if g.number_of_nodes()
                 else np.zeros((0,), dtype=np.float64))
@@ -329,8 +329,8 @@ def _compute_graph_stats(g: nx.Graph) -> dict:
     return {
         "len_vals": len_vals,
         "ang_vals": ang_vals,
-        "height": float(height_z_range(nodes)),
-        "span": float(span_xy_diameter(nodes)),
+        "height": float(height_z_range(nodes, uhat=uhat)),
+        "span": float(span_xy_diameter(nodes, uhat=uhat)),
         "bbox_diag": float(bbox_diag_length(nodes)),
     }
 
@@ -352,6 +352,7 @@ def run_metrics(
     plot_pairs: bool = False,
     hist_bins: int = 32,
     stats_only: bool = False,
+    uhat=(0.0, 0.0, 1.0),
 ) -> dict[str, Any]:
     gt_dir = Path(gt_dir)
     pred_pkl = Path(pred_pkl)
@@ -422,7 +423,7 @@ def run_metrics(
         gt_spans: list[float] = []
         gt_bboxes: list[float] = []
         for g in gt_graphs:
-            s = _compute_graph_stats(g)
+            s = _compute_graph_stats(g, uhat=uhat)
             gt_lengths.append(s["len_vals"])
             gt_angles.append(s["ang_vals"])
             gt_heights.append(s["height"])
@@ -435,7 +436,7 @@ def run_metrics(
         pred_spans: list[float] = []
         pred_bboxes: list[float] = []
         for g in pred_graphs:
-            s = _compute_graph_stats(g)
+            s = _compute_graph_stats(g, uhat=uhat)
             pred_lengths.append(s["len_vals"])
             pred_angles.append(s["ang_vals"])
             pred_heights.append(s["height"])
@@ -546,10 +547,10 @@ def run_metrics(
         gt_nodes = np.stack([_pos_to_xyz(gt.nodes[n].get("pos", np.zeros(3))) for n in gt.nodes()], axis=0) if gt.number_of_nodes() else np.zeros((0, 3), dtype=np.float64)
         pred_nodes = np.stack([_pos_to_xyz(pred.nodes[n].get("pos", np.zeros(3))) for n in pred.nodes()], axis=0) if pred.number_of_nodes() else np.zeros((0, 3), dtype=np.float64)
         f1_nodes = precision_recall_f1_radius(gt_nodes, pred_nodes, radius=f1_radius)
-        height_gt = height_z_range(gt_nodes)
-        height_pred = height_z_range(pred_nodes)
-        span_gt = span_xy_diameter(gt_nodes)
-        span_pred = span_xy_diameter(pred_nodes)
+        height_gt = height_z_range(gt_nodes, uhat=uhat)
+        height_pred = height_z_range(pred_nodes, uhat=uhat)
+        span_gt = span_xy_diameter(gt_nodes, uhat=uhat)
+        span_pred = span_xy_diameter(pred_nodes, uhat=uhat)
         bbox_diag_gt = bbox_diag_length(gt_nodes)
         bbox_diag_pred = bbox_diag_length(pred_nodes)
 
@@ -933,6 +934,7 @@ def run_chamfer(
     plot_pairs: bool = False,
     hist_bins: int = 32,
     stats_only: bool = False,
+    uhat=(0.0, 0.0, 1.0),
 ) -> dict[str, Any]:
     return run_metrics(
         gt_dir=gt_dir,
@@ -951,6 +953,7 @@ def run_chamfer(
         plot_pairs=plot_pairs,
         hist_bins=hist_bins,
         stats_only=stats_only,
+        uhat=uhat,
     )
 
 
@@ -993,6 +996,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-json", type=Path, default=None, help="Optional path to save JSON output.")
     parser.add_argument("--stats-only", action="store_true",
                         help="Only compute dataset-level summary stats and tornado histograms (no per-tree pairing).")
+    parser.add_argument("--so2-axis", type=float, nargs=3, default=[0.0, 0.0, 1.0],
+                        metavar=("X", "Y", "Z"),
+                        help="Equivariance/growth axis for height & span (default z; use 0 1 0 for neurons).")
     return parser
 
 
@@ -1015,6 +1021,7 @@ def main() -> None:
         plot_pairs=args.plot_pairs,
         hist_bins=args.hist_bins,
         stats_only=args.stats_only,
+        uhat=tuple(args.so2_axis),
     )
 
     if args.output_json is not None:

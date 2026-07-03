@@ -1,3 +1,7 @@
+# Variant of neuron_dataset_run_3 with:
+#   - AdamW (decoupled weight decay) instead of plain Adam, for training stability
+#   - teacher-forced eval enabled alongside free-running (validation.eval_mode: both)
+# Everything else is identical to neuron_dataset_run_3.yaml.
 defaults:
   - _self_
   - dataset: neurons # neurons.yaml
@@ -7,7 +11,7 @@ defaults:
 reduction:
   type: "depth"
   mode: "stochastic"
-  cherry_p: 1.0 
+  cherry_p: 1.0
   ensure_progress: True
   root: 0
   contract_root: False
@@ -19,16 +23,16 @@ reduction:
 training:
   batch_size: 512 # can adjust based on GPU memory, but does make steps slower on increasing and hence there is a tradoff on updates per unit time
   lr: 5e-4
-  optimizer: adam        # adam | adamw (adamw = decoupled weight decay)
-  weight_decay: 0.0      # >0 only meaningful with adamw
+  optimizer: adamw       # adam | adamw (adamw = decoupled weight decay)
+  weight_decay: 0.01     # AdamW decoupled weight decay; 0.01 = torch default. Tune (0 == plain Adam).
   num_steps: 60000
   max_num_workers: 0
   log_interval: 1000 # can make 5K as well
   save_checkpoint: True
   resume: False # False, True (latest checkpoint), step number, or path to .pt file
-  lr_scheduler: "cosine_annealing"              
-  scheduler_T_max: ${training.num_steps}  
-  scheduler_eta_min: 1e-5          
+  lr_scheduler: "cosine_annealing"
+  scheduler_T_max: ${training.num_steps}
+  scheduler_eta_min: 1e-5
   grad_clip_norm: 1.0   # max global grad-norm; null disables clipping. Pre-clip norm is always logged as training/grad_norm
 
 validation:
@@ -36,8 +40,9 @@ validation:
   interval: 1000 # can make 5k
   first_step: 0
   per_graph_size: False
-  eval_mode: rollout            # rollout | teacher_forced | both. teacher_forced = per-level TF eval only
-                                # (skips free-running generation); both runs both (expensive).
+  eval_mode: both               # rollout | teacher_forced | both. both = free-running metrics AND
+                                # per-level TF eval each validation (expensive). Use teacher_forced
+                                # to run ONLY the TF eval (skips free-running generation + its metrics/plots).
   tf_max_graphs: 64             # cap GT trees for TF eval (full ODE per reduction level per graph)
   tf_min_depth: 0               # restrict pooled TF metrics to leaves at tree depth >= this (2 drops root children)
   enable_metrics: False
@@ -80,7 +85,7 @@ ema: # can adjust for more stable training, but I haven't had the chance to expe
   gamma: 1.0
   power: 1.0
 
-name: flow_neuron_unconditional_big_flow10_firstdecent
+name: flow_neuron_unconditional_big_flow10_tf_adamw
 debugging: False
 debugging_max_batches: 50
 debugging_dir: "neurons_debug"

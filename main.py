@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader
 from torch_geometric.data import Batch
 
 from utils.data_loading import nx_graph_to_adj_pos, load_swc_graphs_from_dir
-from utils.tmd import compute_tmd_mixed
+from utils.tmd import compute_tmd_mixed, tmd_conditioning_dim
 
 import graph_generation as gg
 
@@ -42,6 +42,11 @@ def get_expansion_items(cfg: DictConfig, train_graphs, diffusion=None):
 
     red_factory = factory_cls(**factory_kwargs) # initialised cherry/depth reduction factory
     pos_scale_factor = getattr(cfg.dataset, "pos_scale_factor", None)
+    # TMD conditioning knobs (single source of truth; tmd_in_dim is derived at model init).
+    tmd_hidden_dim = getattr(cfg.model, "tmd_hidden_dim", 0)
+    tmd_filtrations = list(getattr(cfg.model, "tmd_filtrations", ("path", "height", "rho")))
+    tmd_bins = int(getattr(cfg.model, "tmd_bins", 16))
+    uhat = np.asarray(getattr(cfg.model, "so2_axis", (0.0, 0.0, 1.0)), dtype=float).reshape(3)
     print(f"Extracting adjacency and position matrices for {len(train_graphs)} training graphs...")
     adjs = []
     poses = []
@@ -52,7 +57,7 @@ def get_expansion_items(cfg: DictConfig, train_graphs, diffusion=None):
             P = P / float(pos_scale_factor)
         adjs.append(A)
         poses.append(P)
-        tmds.append(compute_tmd_mixed(G))
+        tmds.append(compute_tmd_mixed(G, filtrations=tmd_filtrations, n_bins=tmd_bins, uhat=uhat))
     if pos_scale_factor is not None:
         print(f"Positions scaled by 1/{pos_scale_factor} (offsets now ~unit scale).")
     print("Extraction done.")
@@ -95,9 +100,20 @@ def get_expansion_items(cfg: DictConfig, train_graphs, diffusion=None):
     # Model
     print(f"Initializing model: {cfg.model.name}...")
     # features = 2 if cfg.diffusion.name == "discrete" else 1
-    tmd_in_dim = getattr(cfg.model, "tmd_in_dim", 0)
-    tmd_hidden_dim = getattr(cfg.model, "tmd_hidden_dim", 0)
-    if cfg.model.name == "egnn": 
+    # tmd_in_dim is DERIVED from the conditioning filtration set x bins (never hand-set),
+    # so the embedding width and the model's input projection can never desync.
+    tmd_in_dim = tmd_conditioning_dim(tmd_filtrations, tmd_bins) if tmd_hidden_dim > 0 else 0
+    _stale_tmd_in_dim = getattr(cfg.model, "tmd_in_dim", None)
+    if tmd_hidden_dim > 0 and _stale_tmd_in_dim not in (None, 0) and int(_stale_tmd_in_dim) != tmd_in_dim:
+        raise ValueError(
+            f"cfg.model.tmd_in_dim={_stale_tmd_in_dim} disagrees with the derived conditioning "
+            f"dim {tmd_in_dim} (= {len(tmd_filtrations)} filtrations x {tmd_bins}^2). "
+            "tmd_in_dim is derived from tmd_filtrations/tmd_bins — remove it from the config "
+            "or fix tmd_filtrations/tmd_bins."
+        )
+    if tmd_hidden_dim > 0:
+        print(f"TMD conditioning ON: filtrations={list(tmd_filtrations)}, bins={tmd_bins} -> tmd_in_dim={tmd_in_dim}")
+    if cfg.model.name == "egnn":
         model = gg.model.SO2_EGNN_Network(
             n_layers=cfg.model.num_layers,
             feats_dim=cfg.model.feats_dim,

@@ -342,6 +342,7 @@ def compute_tmd_global_embedding_paper(
     simplify_to_critical_tree: bool = True,
     embedding: Literal["density", "pi", "density+pi"] = "pi",
     density_normalize: Literal["none", "max", "l1"] = "none",
+    uhat: Sequence[float] = (0.0, 0.0, 1.0),
 ) -> np.ndarray:
     """
     Compute a concatenated global embedding using the *paper-style* TMD barcode.
@@ -374,9 +375,9 @@ def compute_tmd_global_embedding_paper(
         if name == "path":
             f_full = filtration_path_length_from_root(G, weight_edges_by_euclidean=weight_edges_by_euclidean)
         elif name == "height":
-            f_full = filtration_height_z(G)
+            f_full = filtration_height_z(G, uhat=uhat)
         elif name == "rho":
-            f_full = filtration_radial_rho(G)
+            f_full = filtration_radial_rho(G, uhat=uhat)
         else:
             raise ValueError(f"Unknown filtration name: {name!r}")
 

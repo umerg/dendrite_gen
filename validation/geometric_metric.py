@@ -51,24 +51,43 @@ def precision_recall_f1_radius(
     return {"precision": precision, "recall": recall, "f1": f1}
 
 
-def height_z_range(pts: np.ndarray) -> float:
-    """Height as z-range (max z - min z)."""
+def _unit_axis(uhat) -> np.ndarray:
+    """Coerce ``uhat`` to a unit 3-vector."""
+    u = np.asarray(uhat, dtype=np.float64).reshape(3)
+    n = float(np.linalg.norm(u))
+    if n < 1e-12:
+        raise ValueError("uhat must be a non-zero 3-vector.")
+    return u / n
+
+
+def height_z_range(pts: np.ndarray, uhat=(0.0, 0.0, 1.0)) -> float:
+    """Height = extent (max - min) of the projection onto the equivariance axis ``uhat``.
+
+    Defaults to z (``uhat=(0,0,1)`` ⇒ z-range) for back-compat; pass the dataset's
+    ``so2_axis`` for neurons so "height" tracks the real axis (matches
+    ``dist_metrics`` ``axial_extent``).
+    """
     pts = np.asarray(pts, dtype=np.float64).reshape(-1, 3)
     if pts.size == 0:
         return float("nan")
-    z = pts[:, 2]
-    return float(z.max() - z.min())
+    s = pts @ _unit_axis(uhat)
+    return float(s.max() - s.min())
 
 
-def span_xy_diameter(pts: np.ndarray) -> float:
-    """Max pairwise distance in the XY plane."""
+def span_xy_diameter(pts: np.ndarray, uhat=(0.0, 0.0, 1.0)) -> float:
+    """Max pairwise distance in the plane perpendicular to the axis ``uhat``.
+
+    Defaults to the XY plane (``uhat=z``) for back-compat; pass ``so2_axis`` for
+    neurons (matches ``dist_metrics`` ``radial_span``).
+    """
     pts = np.asarray(pts, dtype=np.float64).reshape(-1, 3)
     if pts.size == 0:
         return float("nan")
     if pts.shape[0] < 2:
         return 0.0
-    xy = pts[:, :2]
-    diff = xy[:, None, :] - xy[None, :, :]
+    u = _unit_axis(uhat)
+    perp = pts - np.outer(pts @ u, u)
+    diff = perp[:, None, :] - perp[None, :, :]
     dist2 = np.sum(diff ** 2, axis=-1)
     return float(np.sqrt(np.max(dist2)))
 

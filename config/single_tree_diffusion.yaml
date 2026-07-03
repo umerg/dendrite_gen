@@ -42,8 +42,9 @@ model:
   name: egnn
   num_layers: 6
   feats_dim: 64
-  tmd_in_dim: 768
-  tmd_hidden_dim: 32
+  tmd_hidden_dim: 32           # >0 enables TMD conditioning; tmd_in_dim is auto-derived (n_filtrations * tmd_bins**2)
+  tmd_filtrations: [path, height, rho]   # trees are z-up (so2_axis=z): height=z, rho=perp-to-z
+  tmd_bins: 16
   m_dim: 64
   dropout: 0.1
   norm_feats: True

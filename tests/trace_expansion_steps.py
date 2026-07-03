@@ -12,7 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from utils.data_loading import load_swc_graph
-from utils.tmd import compute_tmd_mixed
+from utils.tmd import compute_tmd_mixed, tmd_conditioning_dim
 
 
 def build_model_and_method(checkpoint_path: str, device: str = "cpu"):
@@ -25,6 +25,12 @@ def build_model_and_method(checkpoint_path: str, device: str = "cpu"):
         version_base=None,
     )
     cfg = compose(config_name="small_trees_run")
+
+    # TMD conditioning knobs (tmd_in_dim is derived, matching main.py).
+    tmd_hidden_dim = getattr(cfg.model, "tmd_hidden_dim", 0)
+    tmd_filtrations = list(getattr(cfg.model, "tmd_filtrations", ("path", "height", "rho")))
+    tmd_bins = int(getattr(cfg.model, "tmd_bins", 16))
+    tmd_in_dim = tmd_conditioning_dim(tmd_filtrations, tmd_bins) if tmd_hidden_dim > 0 else 0
 
     # Build model
     from graph_generation.model.egnn_so2 import SO2_EGNN_Network
@@ -43,8 +49,9 @@ def build_model_and_method(checkpoint_path: str, device: str = "cpu"):
         global_linear_attn_dim_head=cfg.model.global_linear_attn_dim_head,
         num_global_tokens=cfg.model.num_global_tokens,
         offset_head_hidden=cfg.model.offset_head_hidden,
-        tmd_in_dim=cfg.model.tmd_in_dim,
-        tmd_hidden_dim=cfg.model.tmd_hidden_dim,
+        tmd_in_dim=tmd_in_dim,
+        tmd_hidden_dim=tmd_hidden_dim,
+        so2_axis=cfg.model.so2_axis,
     )
 
     # Build method + diffusion
@@ -135,7 +142,10 @@ def main():
 
         target = th.tensor([n], device=device)
         nrc = th.tensor([k], device=device)
-        tmd = th.tensor(compute_tmd_mixed(G), dtype=th.float32).unsqueeze(0).to(device)
+        _uhat = model.uhat.detach().cpu().numpy().reshape(-1) if getattr(model, "uhat", None) is not None else np.array([0., 0., 1.])
+        _fils = list(getattr(cfg.model, "tmd_filtrations", ("path", "height", "rho")))
+        _bins = int(getattr(cfg.model, "tmd_bins", 16))
+        tmd = th.tensor(compute_tmd_mixed(G, filtrations=_fils, n_bins=_bins, uhat=_uhat), dtype=th.float32).unsqueeze(0).to(device)
 
         expand_log.clear()
         # Temporarily limit max_steps to avoid runaway expansion on CPU

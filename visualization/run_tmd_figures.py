@@ -32,6 +32,7 @@ def _compute_pair_tmd_diagrams(
     *,
     filtrations: tuple[str, ...],
     normalize_mode: str,
+    uhat=(0.0, 0.0, 1.0),
 ) -> tuple[dict[str, object], dict[str, object]]:
     from dendrite_gen.utils.tmd import compute_tmd_barcode_diagram
 
@@ -44,6 +45,7 @@ def _compute_pair_tmd_diagrams(
             normalize_mode=normalize_mode,
             weight_edges_by_euclidean=True,
             simplify_to_critical_tree=True,
+            uhat=uhat,
         )
         _, pred_diag = compute_tmd_barcode_diagram(
             pred_graph,
@@ -51,6 +53,7 @@ def _compute_pair_tmd_diagrams(
             normalize_mode=normalize_mode,
             weight_edges_by_euclidean=True,
             simplify_to_critical_tree=True,
+            uhat=uhat,
         )
         gt_diagrams[filtration] = gt_diag
         pred_diagrams[filtration] = pred_diag
@@ -78,8 +81,13 @@ def run_tmd_figures(
     embedding_combine_filtrations: bool = False,
     embedding_color_attributes: tuple[str, ...] = DEFAULT_EMBEDDING_COLOR_ATTRIBUTES,
     pair_distance_attributes: tuple[str, ...] | None = None,
+    uhat=(0.0, 0.0, 1.0),
 ) -> None:
-    """Render TMD persistence-diagram grids and a full-dataset embedding."""
+    """Render TMD persistence-diagram grids and a full-dataset embedding.
+
+    ``uhat`` is the equivariance/growth axis for the axis-dependent ``height``/``rho``
+    filtrations and the height/span tree scalars (default z; pass ``0 1 0`` for neurons).
+    """
     from .stats.tree_stats import graph_tree_scalar_stats
     from .tmd.embedding import (
         TmdDiagramRecord,
@@ -126,6 +134,7 @@ def run_tmd_figures(
             pred_graph,
             filtrations=filtrations,
             normalize_mode=normalize_mode,
+            uhat=uhat,
         )
 
         out_path = out_dir / f"{gt_path.stem}_tmd_grid.png"
@@ -159,6 +168,7 @@ def run_tmd_figures(
             pred_graph,
             filtrations=filtrations,
             normalize_mode=normalize_mode,
+            uhat=uhat,
         )
 
         embedding_inputs.append(
@@ -167,7 +177,7 @@ def run_tmd_figures(
                 pair_index=pair_idx,
                 tree_name=gt_path.name,
                 diagrams=gt_diagrams,
-                attributes=graph_tree_scalar_stats(gt_graph),
+                attributes=graph_tree_scalar_stats(gt_graph, uhat=uhat),
             )
         )
         embedding_inputs.append(
@@ -176,7 +186,7 @@ def run_tmd_figures(
                 pair_index=pair_idx,
                 tree_name=gt_path.name,
                 diagrams=pred_diagrams,
-                attributes=graph_tree_scalar_stats(pred_graph),
+                attributes=graph_tree_scalar_stats(pred_graph, uhat=uhat),
             )
         )
 
@@ -398,6 +408,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "embedding color attributes."
         ),
     )
+    parser.add_argument(
+        "--so2-axis",
+        type=float,
+        nargs=3,
+        default=[0.0, 0.0, 1.0],
+        metavar=("X", "Y", "Z"),
+        help="Equivariance/growth axis for height & rho filtrations (default z; use 0 1 0 for neurons).",
+    )
     return parser
 
 
@@ -429,6 +447,7 @@ def main() -> None:
             if args.diagram_distance_attributes is None
             else tuple(args.diagram_distance_attributes)
         ),
+        uhat=tuple(args.so2_axis),
     )
 
 

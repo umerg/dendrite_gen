@@ -43,8 +43,9 @@ model:
   num_layers: 6
   feats_dim: 64
   m_dim: 64
-  tmd_in_dim: 192
-  tmd_hidden_dim: 32
+  tmd_hidden_dim: 32           # >0 enables TMD conditioning; tmd_in_dim is auto-derived (n_filtrations * tmd_bins**2)
+  tmd_filtrations: [path, height, rho]   # trees are z-up (so2_axis=z): height=z, rho=perp-to-z
+  tmd_bins: 8                  # 3 filtrations * 8**2 = 192 (preserves this config's original width)
   dropout: 0.1
   norm_feats: True
   global_linear_attn_every: 2

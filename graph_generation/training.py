@@ -644,8 +644,19 @@ class Trainer:
         tmd_hidden_dim = getattr(model, "tmd_hidden_dim", 0)
         tmds = None
         if tmd_hidden_dim > 0:
+            # Match the training-side conditioning exactly: same filtrations, bins, and axis.
+            uhat_np = (
+                model.uhat.detach().cpu().numpy().reshape(-1)
+                if getattr(model, "uhat", None) is not None
+                else np.array([0.0, 0.0, 1.0])
+            )
+            tmd_filtrations = list(getattr(self.cfg.model, "tmd_filtrations", ("path", "height", "rho")))
+            tmd_bins = int(getattr(self.cfg.model, "tmd_bins", 16))
             tmds = np.stack(
-                [compute_tmd_mixed(g) for g in eval_graphs],
+                [
+                    compute_tmd_mixed(g, filtrations=tmd_filtrations, n_bins=tmd_bins, uhat=uhat_np)
+                    for g in eval_graphs
+                ],
                 axis=0,
             )[pred_perm]
         bs = (

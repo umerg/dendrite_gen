@@ -90,6 +90,7 @@ def compute_tmd_barcode_diagram(
     normalize_mode: Literal["minmax", "max", "none"] = "minmax",
     weight_edges_by_euclidean: bool = True,
     simplify_to_critical_tree: bool = True,
+    uhat: Sequence[float] = (0.0, 0.0, 1.0),
 ) -> tuple[np.ndarray, PersistenceDiagram0D]:
     """
     Compute a paper-style TMD barcode and its canonicalized persistence diagram.
@@ -109,9 +110,9 @@ def compute_tmd_barcode_diagram(
             G, weight_edges_by_euclidean=weight_edges_by_euclidean
         )
     elif filtration == "height":
-        f_full = filtration_height_z(G)
+        f_full = filtration_height_z(G, uhat=uhat)
     elif filtration == "rho":
-        f_full = filtration_radial_rho(G)
+        f_full = filtration_radial_rho(G, uhat=uhat)
     elif filtration == "radial_root":
         f_full = filtration_radial_root(G)
     else:
@@ -185,6 +186,7 @@ def compute_tmd_mixed(
     weighting: Literal["none", "persistence"] = "persistence",
     weight_edges_by_euclidean: bool = True,
     simplify_to_critical_tree: bool = True,
+    uhat: Sequence[float] = (0.0, 0.0, 1.0),
 ) -> np.ndarray:
     """
     Compute a concatenated global embedding using mixed methods per filtration.
@@ -220,9 +222,9 @@ def compute_tmd_mixed(
                 G, weight_edges_by_euclidean=weight_edges_by_euclidean
             )
         elif name == "height":
-            f_full = filtration_height_z(G)
+            f_full = filtration_height_z(G, uhat=uhat)
         elif name == "rho":
-            f_full = filtration_radial_rho(G)
+            f_full = filtration_radial_rho(G, uhat=uhat)
         elif name == "radial_root":
             f_full = filtration_radial_root(G)
         else:
@@ -256,12 +258,23 @@ def compute_tmd_mixed(
     return np.concatenate(emb_list, axis=0).astype(np.float32)
 
 
+def tmd_conditioning_dim(filtrations: Sequence[FiltrationName], n_bins: int) -> int:
+    """Length of the conditioning vector produced by ``compute_tmd_mixed``.
+
+    Single source of truth for ``model.tmd_in_dim``: each filtration contributes an
+    ``n_bins x n_bins`` persistence image, concatenated. Keeping this derived (rather
+    than hand-set in configs) prevents the embedding width and ``tmd_in_dim`` desyncing.
+    """
+    return int(len(tuple(filtrations)) * int(n_bins) * int(n_bins))
+
+
 def compute_tmd_embedding(
     G: nx.Graph,
     *,
     filtration: FiltrationName = "radial_root",
     n_bins: int = 16,
     sigma: float = 0.05,
+    uhat: Sequence[float] = (0.0, 0.0, 1.0),
 ) -> np.ndarray:
     """
     Single-filtration TMD persistence-image embedding for evaluation.
@@ -274,4 +287,4 @@ def compute_tmd_embedding(
     3-filtration 768-d vector) and, by using a filtration outside the model's
     conditioning set, avoids merely scoring reproduction of the conditioning input.
     """
-    return compute_tmd_mixed(G, filtrations=(filtration,), n_bins=n_bins, sigma=sigma)
+    return compute_tmd_mixed(G, filtrations=(filtration,), n_bins=n_bins, sigma=sigma, uhat=uhat)

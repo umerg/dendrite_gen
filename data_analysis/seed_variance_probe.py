@@ -246,7 +246,13 @@ def main():
     tmds = None
     if getattr(model, "tmd_hidden_dim", 0) > 0:
         print("precomputing conditioning TMDs (compute_tmd_mixed) ...")
-        tmds = np.stack([compute_tmd_mixed(g) for g in eval_graphs], axis=0)
+        cond_filtrations = list(getattr(cfg.model, "tmd_filtrations", ("path", "height", "rho")))
+        cond_bins = int(getattr(cfg.model, "tmd_bins", 16))
+        tmds = np.stack(
+            [compute_tmd_mixed(g, filtrations=cond_filtrations, n_bins=cond_bins, uhat=uhat_np)
+             for g in eval_graphs],
+            axis=0,
+        )
 
     # GT cache + embed fn (fixed across all runs)
     print("building GT cache (compute_tmd_embedding over eval set) ...")
