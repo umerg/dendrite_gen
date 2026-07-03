@@ -17,6 +17,9 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from utils.tmd import compute_tmd_mixed, compute_tmd_embedding
 from validation.dist_metrics import compute_distribution_metrics, build_gt_cache
 from validation.plot import plot_graph_grid_angles, DEFAULT_ANGLES
+# NOTE: validation.teacher_forced_eval is imported lazily inside evaluate()/_tf_batches_for()
+# to avoid a circular import (it imports graph_generation.method.helpers, and this module is
+# itself imported by graph_generation/__init__).
 
 # Optional / guarded imports (Hydra, OmegaConf, wandb)
 try:  # Hydra runtime config access
@@ -124,6 +127,9 @@ class Trainer:
         # real-vs-real floor are model-independent, so computed once per eval set.
         self._eval_cache: dict[int, dict] = {}
         self._floor_cache: dict[int, dict] = {}
+        # Fixed GT reduction batches for teacher-forced eval, built once per eval set and
+        # reused every validation so the TF curve is comparable step-to-step.
+        self._tf_batch_cache: dict[int, list] = {}
         # Prefer CUDA, fallback to CPU (MPS has stability issues with PyG)
         if not cfg.debugging:
             if th.cuda.is_available():
@@ -419,12 +425,15 @@ class Trainer:
         test_results = {}
         enable_metrics = getattr(self.cfg.validation, 'enable_metrics', True)
         enable_plots = getattr(self.cfg.validation, 'enable_plots', True)
+        # The best-checkpoint / test-trigger logic reads free-running metrics; in
+        # teacher_forced-only mode there is no free-running generation, so skip it.
+        run_free = getattr(self.cfg.validation, "eval_mode", "rollout") in ("rollout", "both")
 
         for beta in self.cfg.ema.betas:
             # Always generate graphs (needed for plots & potential metrics later)
             val_results[f"ema_{beta}"] = self.evaluate(self.validation_graphs, beta)
 
-            if enable_metrics:
+            if enable_metrics and run_free:
                 # --- METRIC VALIDATION SCORE BLOCK (original logic) ---
                 unique_novel_valid_keys = [
                     str(m) for m in self.metrics if "UniqueNovelValid" in str(m)
@@ -548,7 +557,76 @@ class Trainer:
 
     @th.no_grad()
     def evaluate(self, eval_graphs: list[nx.Graph], beta):
-        """Evaluate model for given beta on given graphs."""
+        """Run the selected validation eval(s) for `beta` and return one merged results dict.
+
+        `cfg.validation.eval_mode` selects which sampler(s) run:
+          - "rollout"        : free-running generation + its dist/graph metrics + plots (default);
+          - "teacher_forced" : only the per-level teacher-forced eval (skips free-running);
+          - "both"           : both, for the TF<->free-running exposure-gap comparison.
+        """
+        model = self.ema_models[beta]
+        eval_mode = getattr(self.cfg.validation, "eval_mode", "rollout")
+        run_free = eval_mode in ("rollout", "both")
+        run_tf = eval_mode in ("teacher_forced", "both")
+
+        if run_free:
+            results = self._evaluate_rollout(eval_graphs, beta)
+        else:
+            # No free-running generation: keep the keys the downstream (plots/pickling) code expects.
+            results = {
+                "pred_graphs": [], "timing": {}, "metrics_disabled": True,
+                "examples": None, "examples_path": None,
+                "examples_compare": None, "examples_compare_path": None,
+            }
+
+        if run_tf:
+            from validation.teacher_forced_eval import evaluate_teacher_forced
+            uhat_np = (
+                model.uhat.detach().cpu().numpy().reshape(-1)
+                if getattr(model, "uhat", None) is not None
+                else np.array([0.0, 0.0, 1.0])
+            )
+            _t0_tf = time()
+            tf_batches = self._tf_batches_for(eval_graphs)
+            results["teacher_forced"] = evaluate_teacher_forced(
+                self.method, model, tf_batches, uhat_np, device=self.device,
+                min_depth=getattr(self.cfg.validation, "tf_min_depth", 0),
+                include_breakdowns=False,   # pooled-only for the live wandb path
+                enable_ks=False,            # W1 only, per config preference
+            )
+            results.setdefault("timing", {})["teacher_forced_s"] = float(time() - _t0_tf)
+
+        return results
+
+    def _tf_batches_for(self, eval_graphs: list[nx.Graph]) -> list:
+        """Fixed GT reduction batches for teacher-forced eval, built once then cached.
+
+        Capped at `cfg.validation.tf_max_graphs` (the full ODE runs per reduction level per graph,
+        so this bounds cost). Cached by `id(eval_graphs)` -- like `_gt_cache_for` -- so every
+        validation reuses the identical batches and the TF curve is comparable across steps.
+        """
+        from validation.teacher_forced_eval import build_reduction_batches_from_graphs
+        key = id(eval_graphs)
+        batches = self._tf_batch_cache.get(key)
+        if batches is None:
+            cap = getattr(self.cfg.validation, "tf_max_graphs", 64)  # may be null -> no cap
+            graphs = list(eval_graphs)
+            if cap is not None and int(cap) > 0:
+                graphs = graphs[:int(cap)]
+            bs = (
+                self.cfg.validation.batch_size
+                if self.cfg.validation.batch_size is not None
+                else self.cfg.training.batch_size
+            )
+            psf = self.pos_scale_factor if self.pos_scale_factor is not None else 1.0
+            batches = build_reduction_batches_from_graphs(
+                graphs, self.cfg.reduction, bs, pos_scale_factor=float(psf))
+            self._tf_batch_cache[key] = batches
+        return batches
+
+    @th.no_grad()
+    def _evaluate_rollout(self, eval_graphs: list[nx.Graph], beta):
+        """Free-running generation + its distribution/graph metrics + 3D plots (the "rollout" eval)."""
         model = self.ema_models[beta]
 
         # Shuffle prediction order to make size distribution more uniform
