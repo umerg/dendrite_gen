@@ -242,6 +242,16 @@ def main(cfg: DictConfig):
             max_size=cfg.dataset.max_size,
             seed=2,
         )
+    elif cfg.dataset.name == "deterministic_synth":  # zero-conditional-entropy probe dataset
+        train_graphs = gg.data.generate_deterministic_trees(
+            num_graphs=cfg.dataset.train_size, seed=0,
+        )
+        validation_graphs = gg.data.generate_deterministic_trees(
+            num_graphs=cfg.dataset.val_size, seed=1,
+        )
+        test_graphs = gg.data.generate_deterministic_trees(
+            num_graphs=cfg.dataset.test_size, seed=2,
+        )
     else:
         raise ValueError(f"Unknown dataset name: {cfg.dataset.name}")
 
@@ -292,9 +302,13 @@ def main(cfg: DictConfig):
             diffusion = gg.diffusion.EDMDiffusionModel(
                 num_steps=diffusion_cfg.num_steps,
             )
-        elif diffusion_name == "flow":
+        elif diffusion_name in ("flow", "flow_v"):
             _prior_std_pos = getattr(diffusion_cfg, "prior_std_pos", None)
-            diffusion = gg.diffusion.FlowMatchingModel(
+            _flow_cls = (
+                gg.diffusion.VFlowMatchingModel if diffusion_name == "flow_v"
+                else gg.diffusion.FlowMatchingModel
+            )
+            diffusion = _flow_cls(
                 num_steps=diffusion_cfg.num_steps,
                 prior_std=getattr(diffusion_cfg, "prior_std", 1.0),
                 time_dist=getattr(diffusion_cfg, "time_dist", "uniform"),

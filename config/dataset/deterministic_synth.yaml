@@ -1,0 +1,10 @@
+name: deterministic_synth
+load: false
+# Deterministic, zero-conditional-entropy synthetic trees. Topology + geometry
+# are deterministic functions of observable context (see
+# graph_generation/data/data.py:generate_deterministic_trees). Rule knobs live
+# in the generator defaults; tune there after the pre-flight depth/size check.
+train_size: 2000
+val_size: 200
+test_size: 200
+pos_scale_factor: null   # offsets are already ~unit scale (branch lengths ~O(1))

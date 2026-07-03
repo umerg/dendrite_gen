@@ -14,20 +14,28 @@ from graph_generation.diffusion.diagnostics import compute_flow_diagnostics
 logger = logging.getLogger(__name__)
 
 
-class FlowMatchingModel(Module):
-    """Conditional flow-matching alternative to DenoisingDiffusionModel.
+class VFlowMatchingModel(Module):
+    """V-prediction (velocity) flow-matching variant of ``FlowMatchingModel``.
 
-    Transports a Gaussian prior (t=0) to data (t=1) along the linear / optimal-transport
-    path ``x_t = (1 - t) * x_noise + t * x_data``. The network keeps the same
-    data (x_1) prediction parameterization as the diffusion model — it predicts the clean
-    targets ``C_0`` (local-frame child offset) and ``e_0`` (expansion decision in [-1, 1]) —
-    so this is a drop-in replacement: model architecture, the ``model(...)`` call, the
-    ``rel_pred``/``expansion_pred`` outputs, and all of ``expansion.py`` are unchanged. The
-    only model-facing difference is that the second conditioning feature carries the flow
-    time ``t`` instead of ``log sigma``.
+    Same linear / optimal-transport path ``x_t = (1 - t) * x_noise + t * x_data`` and the
+    same network/IO as the data-prediction ``FlowMatchingModel`` — but the network regresses
+    the **velocity** of the path, ``v = x_data - x_noise`` (constant along the linear path),
+    instead of the clean target ``x_1``. Sampling then integrates the predicted velocity
+    field with plain explicit Euler, ``x <- x + dt * v_pred`` — there is **no**
+    ``1 / (1 - t)`` reconstruction, so the terminal (t -> 1) amplification of the
+    data-prediction sampler is removed by construction. If ``v_pred`` is exact, Euler lands
+    on ``x_1`` for any ``num_steps`` (constant velocity is integrated exactly).
 
-    Sampling integrates the probability-flow ODE with explicit Euler steps, backing out the
-    velocity from the data prediction: ``v = (x_hat_1 - x_t) / (1 - t)``.
+    Model-facing interface is identical to ``FlowMatchingModel`` (the network outputs
+    ``rel_pred``/``expansion_pred`` and the second conditioning feature carries the flow time
+    ``t``). The only differences are the training target and the sampling update; downstream
+    (``expansion.py`` position reconstruction, the eval suite) is parameterization-agnostic
+    because the integrated state ``C`` is still the final offset at ``t = 1``.
+
+    Diagnostics are kept in clean-offset space for apples-to-apples comparison with the
+    data-prediction run: the implied clean prediction ``C1_implied = C_t + (1 - t) * v_pred``
+    is reconstructed and fed to ``compute_flow_diagnostics`` (exact reconstruction when
+    ``sigma_min == 0`` and ``v_pred`` is exact).
     """
 
     cond_dim = 2  # e_t feature + time feature per node
@@ -94,7 +102,7 @@ class FlowMatchingModel(Module):
         local_sideways: th.Tensor | None = None,
         uhat: th.Tensor | None = None,
     ) -> tuple[th.Tensor, th.Tensor, dict]:
-        """Compute flow-matching (data-prediction) losses for positional + expansion targets.
+        """Compute flow-matching (velocity-prediction) losses for positional + expansion targets.
 
         Returns ``(exp_loss, pos_loss, diag)`` where ``diag`` is a flat dict of stratified
         training diagnostics (see ``compute_flow_diagnostics``); empty when there are no leaves.
@@ -171,19 +179,22 @@ class FlowMatchingModel(Module):
         rel_pred_all = out["rel_pred"]
         exp_pred_all = out["expansion_pred"]
 
-        C_pred = rel_pred_all[leaf_idx_train]
-        e_pred = exp_pred_all[leaf_idx_train]
-        if e_pred.dim() == 1:
-            e_pred = e_pred.unsqueeze(-1)
+        # Model output is now the VELOCITY (not the clean offset).
+        v_pred = rel_pred_all[leaf_idx_train]
+        ev_pred = exp_pred_all[leaf_idx_train]
+        if ev_pred.dim() == 1:
+            ev_pred = ev_pred.unsqueeze(-1)
 
-        # Data-prediction loss: regress the clean targets directly.
-        pos_loss = F.mse_loss(C_pred, C_0)
-        exp_loss = F.mse_loss(e_pred, e_0)
+        # V-prediction loss: regress the velocity of the linear/OT path, v = x_data - x_noise.
+        v_target_C = C_0 - C_noise
+        v_target_e = e_0 - e_noise
+        pos_loss = F.mse_loss(v_pred, v_target_C)
+        exp_loss = F.mse_loss(ev_pred, v_target_e)
 
-        # Stratified, teacher-forced training diagnostics (cheap, no-grad). These share
-        # the exact targets/frames the loss is computed against and are returned as a
-        # third element; `expansion.get_loss` unpacks them tolerantly so the other
-        # diffusion variants (2-tuple return) are unaffected.
+        # Stratified, teacher-forced training diagnostics (cheap, no-grad). Kept in CLEAN-OFFSET
+        # space for apples-to-apples comparison with the data-prediction run: reconstruct the
+        # implied clean prediction C1 = C_t + (1 - t) * v_pred and feed compute_flow_diagnostics
+        # the same arguments as the data-prediction model. (Exact recon when sigma_min == 0.)
         with th.no_grad():
             if self.prior_std_pos is not None:
                 prior_var = tuple(s * s for s in self.prior_std_pos)
@@ -191,8 +202,10 @@ class FlowMatchingModel(Module):
                 prior_var = (self.prior_std ** 2,) * 3
             # A leaf is a root-child iff its parent is the root (parent_idx == -1).
             is_root_child = parent_idx[leaf_parent_idx] < 0
+            C1_implied = C_t + (1.0 - t_leaf) * v_pred
+            e1_implied = e_t + (1.0 - t_leaf) * ev_pred
             diag = compute_flow_diagnostics(
-                C_pred=C_pred, C_0=C_0, e_pred=e_pred, e_0=e_0,
+                C_pred=C1_implied, C_0=C_0, e_pred=e1_implied, e_0=e_0,
                 t_leaf=t_leaf, is_root_child=is_root_child, prior_var=prior_var,
             )
         return exp_loss, pos_loss, diag
@@ -217,7 +230,8 @@ class FlowMatchingModel(Module):
         uhat: th.Tensor | None = None,
         pre_geom_p0: dict | None = None,
     ) -> tuple[th.Tensor, th.Tensor]:
-        """Integrate the probability-flow ODE from noise (t=0) to data (t=1) via Euler steps."""
+        """Integrate the predicted velocity field from noise (t=0) to data (t=1) via explicit
+        Euler steps. The network output is used directly as the velocity (no 1/(1-t) term)."""
         device = P_0.device
         model_kwargs = model_kwargs or {}
         if tmd is not None:
@@ -239,16 +253,13 @@ class FlowMatchingModel(Module):
         N = P_0.size(0)
         parent_pos = P_0[leaf_parent_idx]
 
-        # Time grid t = 0 .. 1 (the loop never evaluates t=1 itself).
+        # Time grid t = 0 .. 1.
         steps = max(int(self.num_steps), 1)
         grid = th.linspace(0.0, 1.0, steps=steps + 1, device=device)
 
         # Initialise from the Gaussian prior at t=0.
         C = th.randn((L, 3), device=device) * self._pos_scale(device, P_0.dtype)
         e = th.randn((L, 1), device=device) * self.prior_std
-
-        C1_pred = th.zeros_like(C)
-        e1_pred = th.zeros_like(e)
 
         for step in range(steps):
             t_cur = float(grid[step].item())
@@ -291,18 +302,13 @@ class FlowMatchingModel(Module):
             rel_pred_all = out["rel_pred"]
             exp_pred_all = out["expansion_pred"]
 
-            C1_pred = rel_pred_all[leaf_idx]
-            e1_pred = exp_pred_all[leaf_idx]
-            if e1_pred.dim() == 1:
-                e1_pred = e1_pred.unsqueeze(-1)
-
-            # Data-prediction velocity: v = (x_hat_1 - x_t) / (1 - t). The final step has
-            # (1 - t_cur) == dt, so the Euler update lands exactly on the clean prediction.
-            inv_one_minus_t = 1.0 / max(1.0 - t_cur, 1e-12)
-            vel_C = (C1_pred - C) * inv_one_minus_t
-            vel_e = (e1_pred - e) * inv_one_minus_t
+            # Model output IS the velocity: integrate it directly (no 1/(1-t) reconstruction).
+            vel_C = rel_pred_all[leaf_idx]
+            vel_e = exp_pred_all[leaf_idx]
+            if vel_e.dim() == 1:
+                vel_e = vel_e.unsqueeze(-1)
             C = C + dt * vel_C
             e = e + dt * vel_e
 
-        # After integration C ≈ C1_pred (and e ≈ e1_pred); return the integrated state.
+        # After integration C (and e) is the final offset at t = 1.
         return C, e

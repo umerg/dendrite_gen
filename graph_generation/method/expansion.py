@@ -687,7 +687,7 @@ class Expansion(Method):
         # )
 
         _t_diff_loss_0 = _t(pos_gt.device)
-        expansion_loss, position_loss = self.diffusion(
+        result = self.diffusion(
             node_feats=node_feats,
             edge_index=edge_index,
             batch=batch.batch,
@@ -705,6 +705,13 @@ class Expansion(Method):
             local_sideways=leaf_side,
             uhat=uhat,
         )
+        # Tolerant unpack: the flow-matching path returns a 3rd element (stratified
+        # training diagnostics); basic/edm return a 2-tuple and are left untouched.
+        if len(result) == 3:
+            expansion_loss, position_loss, diag = result
+        else:
+            expansion_loss, position_loss = result
+            diag = None
         _t_diff_loss = _t(pos_gt.device) - _t_diff_loss_0
         # logger.info(
         #     "[get_loss N=%d L=%d] geo_lr_mask=%.4fs diffusion_forward=%.4fs",
@@ -720,4 +727,8 @@ class Expansion(Method):
             "num_leaves": int(leaf_idx_train.numel()),
             "num_total_leaves": int(leaf_idx_all.numel()),
         }
+        # Nest flow-matching diagnostics under "diag" -> Trainer.log recurses to
+        # training/diag/*. Only added when present, so basic/edm logs are unchanged.
+        if diag:
+            metrics["diag"] = diag
         return loss, metrics
