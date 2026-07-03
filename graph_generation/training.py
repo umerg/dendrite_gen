@@ -11,7 +11,7 @@ import networkx as nx
 import numpy as np
 import torch as th
 from matplotlib.figure import Figure
-from torch.optim import Adam
+from torch.optim import Adam, AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from utils.tmd import compute_tmd_mixed, compute_tmd_embedding
@@ -79,6 +79,24 @@ def build_wandb_config(cfg):
     return {**base_cfg, **alias_cfg}
 
 
+def build_optimizer(parameters, cfg_training):
+    """Construct the optimizer from cfg.training.
+
+    Defaults preserve the legacy plain-Adam behavior (weight_decay=0), so
+    configs without these fields are unchanged. Adam and AdamW share an
+    identical state_dict layout, so checkpoint resume stays compatible even if
+    the optimizer type is switched.
+    """
+    name = str(getattr(cfg_training, "optimizer", "adam")).lower()
+    lr = cfg_training.lr
+    weight_decay = getattr(cfg_training, "weight_decay", 0.0)
+    if name == "adam":
+        return Adam(parameters, lr=lr, weight_decay=weight_decay)
+    if name == "adamw":
+        return AdamW(parameters, lr=lr, weight_decay=weight_decay)
+    raise ValueError(f"Unknown optimizer '{name}' (expected 'adam' or 'adamw')")
+
+
 class Trainer:
     def __init__(
         self,
@@ -117,7 +135,7 @@ class Trainer:
         print(f"Selected device: {self.device}")
         self.method = method.to(self.device)
         self.model = model.to(self.device)
-        self.optimizer = Adam(self.model.parameters(), cfg.training.lr)
+        self.optimizer = build_optimizer(self.model.parameters(), cfg.training)
 
         # Optional LR scheduler (Cosine Annealing over training horizon)
         self.scheduler = None
