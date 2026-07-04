@@ -23,24 +23,24 @@ reduction:
 training:
   batch_size: 512 # can adjust based on GPU memory, but does make steps slower on increasing and hence there is a tradoff on updates per unit time
   lr: 5e-4
-  optimizer: adamw       # adam | adamw (adamw = decoupled weight decay)
+  optimizer: adam      # adam | adamw (adamw = decoupled weight decay)
   weight_decay: 0.01     # AdamW decoupled weight decay; 0.01 = torch default. Tune (0 == plain Adam).
-  num_steps: 10000
+  num_steps: 60000
   max_num_workers: 0
-  log_interval: 10 # can make 5K as well
+  log_interval: 100 # can make 5K as well
   save_checkpoint: True
   resume: False # False, True (latest checkpoint), step number, or path to .pt file
   lr_scheduler: "cosine_annealing"
   scheduler_T_max: ${training.num_steps}
-  scheduler_eta_min: 1e-7
+  scheduler_eta_min: 1e-6
   grad_clip_norm: 1.0   # max global grad-norm; null disables clipping. Pre-clip norm is always logged as training/grad_norm
 
 validation:
   batch_size: 64 # adjust according train/val split - currently only 50 samples in val set
-  interval: 1000 # can make 5k
+  interval: 500 # can make 5k
   first_step: 0
   per_graph_size: False
-  eval_mode: both               # rollout | teacher_forced | both. both = free-running metrics AND
+  eval_mode: rollout               # rollout | teacher_forced | both. both = free-running metrics AND
                                 # per-level TF eval each validation (expensive). Use teacher_forced
                                 # to run ONLY the TF eval (skips free-running generation + its metrics/plots).
   tf_max_graphs: 64             # cap GT trees for TF eval (full ODE per reduction level per graph)
@@ -51,10 +51,10 @@ validation:
   ged_enabled: False             # avg tree-edit distance (capped by node/pair count)
   ged_timeout: 5.0
   plot_angles: [[20, 30], [20, 120], [20, 210]]   # (elev, azim) around uhat
-  enable_ks: True               # KS alongside W1 (continuous features)
+  enable_ks: False               # KS alongside W1 (continuous features)
   enable_morphometrics: True    # path/radial/contraction/order/strahler/asymmetry/sholl
   enable_light_joint: True      # morpho + Euclidean-TMD MMD/Density/Coverage every val
-  enable_floor: True            # real-vs-real reference lines + headline excess
+  enable_floor: False            # real-vs-real reference lines + headline excess
   tmd_eval_filtration: radial_root
   tmd_eval_bins: 16
   tmd_pca_ncomp: 64             # N~2000: 256-d is fine; PCA mostly de-noises
@@ -64,8 +64,8 @@ testing: False # if True, only evaluate on test set
 
 model:
   name: egnn
-  num_layers: 12
-  feats_dim: 128
+  num_layers: 16
+  feats_dim: 256
   m_dim: 256
   tmd_hidden_dim: 0            # >0 enables TMD conditioning; tmd_in_dim is auto-derived (n_filtrations * tmd_bins**2)
   tmd_filtrations: [path, height, radial_root]   # radial_root = Euclidean-from-soma (axis-agnostic); path/height key off so2_axis (y for neurons)
@@ -87,11 +87,11 @@ model:
   rbf_du_max: 4.0       # axial span [-du_max, du_max]; neuron |du| p99=3.1
 
 ema: # 0.999 EMA now that the update formula is fixed; warmup ramps and saturates at beta by ~step 1000 (gamma/power below)
-  betas: [0.999]
+  betas: [1, 0.99, 0.999]
   gamma: 1.0
-  power: 1.0
+  power: 0.8
 
-name: flow_neuron_unconditional_big_flow10_tf_adamw
+name: flowv_neuron_unconditional_ema
 debugging: False
 debugging_max_batches: 50
 debugging_dir: "neurons_debug"
