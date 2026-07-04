@@ -5,7 +5,7 @@
 defaults:
   - _self_
   - dataset: neurons # neurons.yaml
-  - diffusion: flow10 # basic.yaml
+  - diffusion: flow_v10 # basic.yaml
   - method: expansion # expansion.yaml
 
 reduction:
@@ -25,14 +25,14 @@ training:
   lr: 5e-4
   optimizer: adamw       # adam | adamw (adamw = decoupled weight decay)
   weight_decay: 0.01     # AdamW decoupled weight decay; 0.01 = torch default. Tune (0 == plain Adam).
-  num_steps: 60000
+  num_steps: 10000
   max_num_workers: 0
-  log_interval: 1000 # can make 5K as well
+  log_interval: 10 # can make 5K as well
   save_checkpoint: True
   resume: False # False, True (latest checkpoint), step number, or path to .pt file
   lr_scheduler: "cosine_annealing"
   scheduler_T_max: ${training.num_steps}
-  scheduler_eta_min: 1e-5
+  scheduler_eta_min: 1e-7
   grad_clip_norm: 1.0   # max global grad-norm; null disables clipping. Pre-clip norm is always logged as training/grad_norm
 
 validation:

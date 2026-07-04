@@ -1,4 +1,4 @@
-# Evaluation: paper protocol (deferred / offline)
+I mean earlier we did # Evaluation: paper protocol (deferred / offline)
 
 This document specifies the **one-shot, offline** evaluation to run on the *final*
 checkpoint for the paper. It is intentionally separate from the in-loop training
