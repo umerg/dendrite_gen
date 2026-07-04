@@ -86,8 +86,8 @@ model:
   rbf_rho_max: 4.0      # in-plane radius span [0, rho_max]; neuron C_0 rho p99=3.1 (scale 1/45.1, axis y)
   rbf_du_max: 4.0       # axial span [-du_max, du_max]; neuron |du| p99=3.1
 
-ema: # can adjust for more stable training, but I haven't had the chance to experiment with it much - working though
-  betas: [1]
+ema: # 0.999 EMA now that the update formula is fixed; warmup ramps and saturates at beta by ~step 1000 (gamma/power below)
+  betas: [0.999]
   gamma: 1.0
   power: 1.0
 

@@ -45,7 +45,7 @@ class EMA(Module):
             if name not in self.train_param_names:
                 continue
 
-            new_ema_param = decay * param.data + (1 - decay) * ema_param.data
+            new_ema_param = decay * ema_param.data + (1 - decay) * param.data
             ema_param.data.copy_(new_ema_param)
             assert ema_param.requires_grad == False
 
