@@ -59,6 +59,16 @@ validation:
   tmd_eval_bins: 16
   tmd_pca_ncomp: 64             # N~2000: 256-d is fine; PCA mostly de-noises
   dc_nearest_k: 5               # k for Density/Coverage
+  # Matched, TMD-conditioned pairwise fidelity: gen[i] vs its conditioning GT[i] (opt-in).
+  # Off here because this run is unconditional (tmd_hidden_dim: 0); set True once you enable
+  # TMD conditioning so the per-conditioning signal is meaningful.
+  enable_pairwise_metrics: False
+  tmd_cond_every: 5             # run every N-th validation (cost control); 1 = every validation
+  tmd_cond_max_pairs: 64        # cap matched pairs (PD Wasserstein dominates cost)
+  tmd_cond_pd_filtrations: [path, radial_root]  # per-pair persistence-diagram distance filtrations
+  tmd_cond_wasserstein: True    # PD Wasserstein (persim)
+  tmd_cond_bottleneck: False    # PD bottleneck (persim); off by default
+  tmd_cond_normalize: minmax    # filtration normalization for the paired diagrams
 
 testing: False # if True, only evaluate on test set
 
