@@ -125,3 +125,124 @@ def test_pooled_only_no_breakdowns():
     # no per-level / per-depth breakdowns, no KS in the pooled dist block
     assert res["by_level"] == {} and res["by_depth"] == {}
     assert not any(k.endswith("_ks") for k in res["dist"])
+
+
+# ---------------------------------------------------------------------------
+# End-to-end coverage of the monkeypatch-free teacher-forced path:
+#   Expansion._assemble_diffusion_inputs / teacher_forced_sample /
+#   teacher_forced_diagnostics + evaluate_teacher_forced over real GT batches.
+# These exercise the wiring that replaced the old `method.diffusion.forward`
+# monkeypatch (which had zero coverage).
+# ---------------------------------------------------------------------------
+import inspect
+import random
+import types
+
+import networkx as nx
+import torch as th
+
+import graph_generation as gg
+from graph_generation.diffusion.flow import FlowMatchingModel
+from graph_generation.method.helpers import select_training_leaf_indices
+from validation.teacher_forced_eval import (
+    build_reduction_batches_from_graphs,
+    evaluate_teacher_forced,
+)
+
+# The exact keyword set diffusion.forward consumes (mirrors expansion.get_loss's old call).
+_FORWARD_KWARGS = {
+    "node_feats", "edge_index", "batch", "edge_attr", "P_0", "C_0", "parent_idx",
+    "leaf_idx_train", "leaf_expansion", "leaf_parent_idx", "model", "tmd",
+    "pre_geom_p0", "local_forward", "local_sideways", "uhat",
+}
+
+
+def _tf_tree(n, seed):
+    rng = random.Random(seed); nrng = np.random.default_rng(seed)
+    G = nx.Graph(); G.add_node(0, pos=np.zeros(3, np.float32))
+    dirs = np.eye(3, dtype=np.float32); queue, nid = [0], 1
+    while queue and nid < n:
+        p = queue.pop(0)
+        for _ in range(rng.choice([1, 2])):
+            if nid >= n:
+                break
+            pos = (G.nodes[p]["pos"] + dirs[rng.randint(0, 2)] * rng.uniform(0.5, 2.0)
+                   + nrng.normal(0, 0.2, 3).astype(np.float32))
+            G.add_node(nid, pos=pos); G.add_edge(p, nid); queue.append(nid); nid += 1
+    return G
+
+
+def _build_flow_method_and_batches(seed=7):
+    th.manual_seed(seed); np.random.seed(seed); random.seed(seed)
+    graphs = [_tf_tree(random.randint(30, 60), s) for s in range(6)]
+    R = types.SimpleNamespace(type="depth", mode="deterministic", cherry_p=1.0,
+                              ensure_progress=True, root=0, contract_root=False)
+    batches = build_reduction_batches_from_graphs(graphs, R, batch_size=4, pos_scale_factor=1.0)
+    model = gg.model.SO2_EGNN_Network(
+        n_layers=2, feats_dim=16, pos_dim=3, m_dim=16, dropout=0.0, edge_attr_dim=1)
+    method = gg.method.Expansion(diffusion=FlowMatchingModel(num_steps=2), red_threshold=0)
+    return method, model, batches
+
+
+def _batch_with_leaves(batches):
+    for b in batches:
+        if select_training_leaf_indices(b).numel() > 0:
+            return b
+    raise AssertionError("no batch with training leaves")
+
+
+def test_assemble_inputs_match_forward_signature():
+    method, model, batches = _build_flow_method_and_batches()
+    inp = method._assemble_diffusion_inputs(batches[0], model)
+    assert set(inp) == _FORWARD_KWARGS
+    # The assembly must produce exactly the kwargs diffusion.forward consumes (minus the
+    # opt-in diagnostics flag) -- this is what lets get_loss/teacher_forced_sample share it.
+    fwd_params = set(inspect.signature(type(method.diffusion).forward).parameters)
+    fwd_params -= {"self", "return_diag_arrays"}
+    assert set(inp) == fwd_params
+
+
+def test_get_loss_finite_after_refactor():
+    method, model, batches = _build_flow_method_and_batches()
+    b = _batch_with_leaves(batches)
+    loss, metrics = method.get_loss(b, model)
+    assert math.isfinite(float(loss.item()))
+    assert metrics["num_leaves"] > 0 and metrics["num_total_leaves"] > 0
+
+
+def test_teacher_forced_sample_shapes():
+    method, model, batches = _build_flow_method_and_batches()
+    b = _batch_with_leaves(batches)
+    s = method.teacher_forced_sample(b, model)
+    L = int(s["leaf_idx_train"].numel())
+    assert L > 0
+    assert tuple(s["cs"].shape) == (L, 3)
+    assert s["es"].shape[0] == L
+    for k in ("c0", "fwd", "side"):
+        assert s[k].shape[0] == L
+
+
+def test_evaluate_teacher_forced_no_monkeypatch_residue():
+    method, model, batches = _build_flow_method_and_batches()
+    res = evaluate_teacher_forced(method, model, batches, uhat=[0.0, 0.0, 1.0], device="cpu")
+    assert res["n_leaves"] > 0
+    assert res["dist"] and res["pos_mse"] and res["exp"]
+    # The old implementation monkeypatched method.diffusion.forward; prove nothing lingers as
+    # an instance attribute, and that training still runs afterwards.
+    assert "forward" not in vars(method.diffusion)
+    b = _batch_with_leaves(batches)
+    loss, _ = method.get_loss(b, model)
+    assert math.isfinite(float(loss.item()))
+
+
+def test_teacher_forced_diagnostics_arrays():
+    method, model, batches = _build_flow_method_and_batches()
+    b = _batch_with_leaves(batches)
+    d = method.teacher_forced_diagnostics(b, model)
+    L = int(d["leaf_idx_train"].numel())
+    assert L > 0
+    for k in ("cp", "c0", "root", "t"):
+        assert d[k] is not None and d[k].shape[0] == L
+    # The default (no-flag) training forward must NOT leak the raw arrays into logged metrics.
+    _, metrics = method.get_loss(b, model)
+    assert "_arrays" not in metrics.get("diag", {})

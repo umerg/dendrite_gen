@@ -13,11 +13,12 @@ as the training pos_loss. The free-running validation metrics are computed in th
 (unscaled) coordinate space. So for `pos_scale_factor != 1` the two families differ by that
 factor and must NOT be subtracted directly; only same-family curves are directly comparable.
 
-Design: `get_loss` already builds the correct teacher-forced inputs (GT positions, local
-frames, GT child-identity one-hot, pre_geom). We intercept its `self.diffusion(...)` call
-and route those same inputs into `diffusion.sample` (full ODE) instead of the training
-forward — reusing the entire input construction. Only the new leaves start from noise; their
-parents/context are GT, so this is teacher-forced.
+Design: `Expansion._assemble_diffusion_inputs` builds the teacher-forced inputs (GT positions,
+local frames, GT child-identity one-hot, pre_geom) shared with the training forward.
+`Expansion.teacher_forced_sample` reuses that assembly but routes it into `diffusion.sample`
+(full ODE) instead of the training forward — so the entire input construction is shared with
+no runtime patching. Only the new leaves start from noise; their parents/context are GT, so
+this is teacher-forced.
 
 `evaluate_teacher_forced(method, model, batches, uhat)` is a pure function driven both by the
 post-hoc CLI here (sweeping `step_*.pt`) and live from `Trainer.evaluate` when
@@ -33,10 +34,6 @@ import torch as th
 from scipy.stats import rankdata
 
 from validation.dist_metrics import _w1, _ks  # identical units to the free-running metrics
-from graph_generation.method.helpers import (
-    decode_parent_indices,
-    select_training_leaf_indices,
-)
 
 _AXES = ("fwd", "side", "axial")
 
@@ -271,80 +268,59 @@ def evaluate_teacher_forced(method, model, batches, uhat, device="cpu", level_mi
                             enable_ks: bool = True) -> dict:
     """Run teacher-forced sampling over GT reduction `batches`; return the metric suite.
 
-    Pure given a built (method, model). Installs a temporary hook routing the training
-    forward into `diffusion.sample` with GT context, captures per-leaf sampled offsets +
-    expansion + GT targets + reduction level, then computes the metrics. `include_breakdowns`
-    /`enable_ks` are forwarded to `_metrics_from_pools` (both default True for the CLI; the
-    live-validation path passes False/False for a lean pooled W1-only payload).
+    Pure given a built (method, model). For each GT reduction batch,
+    `method.teacher_forced_sample` reuses the training-forward input assembly but routes it into
+    `diffusion.sample` (full ODE) with GT context -- only the new leaves start from noise. We pool
+    the per-leaf sampled offsets + expansion + GT targets + reduction level + tree depth, then
+    compute the metrics. `include_breakdowns`/`enable_ks` are forwarded to `_metrics_from_pools`
+    (both default True for the CLI; the live-validation path passes False/False for a lean pooled,
+    W1-only payload).
     """
-    stash = {}
-    cur = {}
-    orig_fwd = method.diffusion.forward
-    orig_sample = method.diffusion.sample
-
-    def hook(*a, **kw):
-        C_samp, e_samp = orig_sample(
-            node_feats=kw.get("node_feats"), edge_index=kw["edge_index"], batch=kw["batch"],
-            edge_attr=kw["edge_attr"], P_0=kw["P_0"], parent_idx=kw["parent_idx"],
-            leaf_idx=kw["leaf_idx_train"], leaf_parent_idx=kw["leaf_parent_idx"],
-            model=kw["model"], tmd=kw.get("tmd"),
-            local_forward=kw["local_forward"], local_sideways=kw["local_sideways"],
-            uhat=kw["uhat"], pre_geom_p0=kw["pre_geom_p0"],
-        )
-        lit = kw["leaf_idx_train"]
-        leaf_graph = kw["batch"][lit]                     # [L] graph-in-batch per leaf
-        levels = cur["red_level"][leaf_graph]
-        # True tree depth of each leaf, from parent_idx ([N], 0-based, -1 for roots).
-        # Fixpoint: depth[root]=0, depth[n]=depth[parent]+1. Lets us pool/filter by
-        # tree depth (e.g. min_depth=2 drops the root children = the is_root_child analog).
-        pidx = kw["parent_idx"]
-        node_depth = th.full((pidx.numel(),), -1, dtype=th.long, device=pidx.device)
-        node_depth[pidx < 0] = 0
-        pclip = pidx.clamp(min=0)
-        for _ in range(int(pidx.numel()) + 1):
-            unresolved = node_depth < 0
-            if not bool(unresolved.any()):
-                break
-            can = unresolved & (pidx >= 0) & (node_depth[pclip] >= 0)
-            if not bool(can.any()):
-                break
-            node_depth = th.where(can, node_depth[pclip] + 1, node_depth)
-        leaf_depth = node_depth[lit]
-        # C_0, leaf_expansion, local_forward, local_sideways are already leaf-aligned ([L,...])
-        stash.update(
-            cs=C_samp.detach().cpu().numpy(),
-            es=e_samp.detach().cpu().numpy(),
-            c0=kw["C_0"].detach().cpu().numpy(),
-            lexp=kw["leaf_expansion"].detach().cpu().numpy().reshape(-1),
-            lp=kw["leaf_parent_idx"].detach().cpu().numpy(),
-            fwd=kw["local_forward"].detach().cpu().numpy(),
-            side=kw["local_sideways"].detach().cpu().numpy(),
-            level=levels.detach().cpu().numpy(),
-            ldepth=leaf_depth.detach().cpu().numpy(),
-        )
-        z = kw["P_0"].new_zeros(())
-        return z, z, {}
-
-    method.diffusion.forward = hook
     pools = {k: [] for k in ("cs", "es", "c0", "lexp", "lp", "fwd", "side", "level", "ldepth")}
-    try:
-        with th.no_grad():
-            for batch in batches:
-                batch = batch.to(device)
-                num_graphs = int(batch.batch.max().item()) + 1
-                rl = batch.reduction_level
-                rl = rl.view(-1) if rl.dim() > 0 else rl.view(1)
-                if rl.numel() != num_graphs:  # robustness fallback
-                    rl = th.full((num_graphs,), int(rl.reshape(-1)[0].item()), device=batch.batch.device)
-                cur["red_level"] = rl
-                stash.clear()
-                method.get_loss(batch, model)
-                if "cs" not in stash:
-                    continue
-                for k in pools:
-                    pools[k].append(stash[k])
-    finally:
-        method.diffusion.forward = orig_fwd
+    with th.no_grad():
+        for batch in batches:
+            batch = batch.to(device)
+            num_graphs = int(batch.batch.max().item()) + 1
+            rl = batch.reduction_level
+            rl = rl.view(-1) if rl.dim() > 0 else rl.view(1)
+            if rl.numel() != num_graphs:  # robustness fallback
+                rl = th.full((num_graphs,), int(rl.reshape(-1)[0].item()), device=batch.batch.device)
+
+            s = method.teacher_forced_sample(batch, model)
+            lit = s["leaf_idx_train"]
+            if lit.numel() == 0:
+                continue
+            leaf_graph = s["batch"][lit]                       # [L] graph-in-batch per leaf
+            levels = rl[leaf_graph]
+
+            # True tree depth of each leaf, from parent_idx ([N], 0-based, -1 for roots).
+            # Fixpoint: depth[root]=0, depth[n]=depth[parent]+1. Lets us pool/filter by tree
+            # depth (e.g. min_depth=2 drops the root children = the is_root_child analog).
+            pidx = s["parent_idx"]
+            node_depth = th.full((pidx.numel(),), -1, dtype=th.long, device=pidx.device)
+            node_depth[pidx < 0] = 0
+            pclip = pidx.clamp(min=0)
+            for _ in range(int(pidx.numel()) + 1):
+                unresolved = node_depth < 0
+                if not bool(unresolved.any()):
+                    break
+                can = unresolved & (pidx >= 0) & (node_depth[pclip] >= 0)
+                if not bool(can.any()):
+                    break
+                node_depth = th.where(can, node_depth[pclip] + 1, node_depth)
+            leaf_depth = node_depth[lit]
+
+            # cs/es come from diffusion.sample; c0/lexp/fwd/side/lp are the leaf-aligned GT
+            # targets + frames the assembly produced ([L,...]).
+            pools["cs"].append(s["cs"].detach().cpu().numpy())
+            pools["es"].append(s["es"].detach().cpu().numpy())
+            pools["c0"].append(s["c0"].detach().cpu().numpy())
+            pools["lexp"].append(s["lexp"].detach().cpu().numpy().reshape(-1))
+            pools["lp"].append(s["lp"].detach().cpu().numpy())
+            pools["fwd"].append(s["fwd"].detach().cpu().numpy())
+            pools["side"].append(s["side"].detach().cpu().numpy())
+            pools["level"].append(levels.detach().cpu().numpy())
+            pools["ldepth"].append(leaf_depth.detach().cpu().numpy())
 
     if not pools["cs"]:
         return {"n_leaves": 0, "dist": {}, "pos_mse": {}, "exp": {}, "by_level": {}, "by_depth": {}}

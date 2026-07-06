@@ -41,7 +41,6 @@ from hydra import initialize_config_dir, compose
 from torch_geometric.data import Batch
 from utils.data_loading import load_swc_graphs_from_dir, nx_graph_to_adj_pos
 from graph_generation.data.reduction_dataset import PrecomputedRedDataset, RandRedDataset
-import graph_generation.diffusion.flow as flowmod
 import seed_variance_probe as P  # reuse build_model_diffusion_method + generate_eval_set
 
 
@@ -57,63 +56,32 @@ def node_depths_from_parent(parent_idx: th.Tensor) -> th.Tensor:
     return th.from_numpy(depth)
 
 
-def install_capture(method):
-    """Capture C_pred/C_0/is_root_child (via diag) and parent_idx/leaf_idx_train (via forward)."""
-    stash = {}
-    orig_fwd = method.diffusion.forward
-    def wrapped(*a, **k):
-        stash["kw"] = k
-        return orig_fwd(*a, **k)
-    method.diffusion.forward = wrapped
-
-    orig_diag = flowmod.compute_flow_diagnostics
-    def cap_diag(*, C_pred, C_0, e_pred, e_0, t_leaf, is_root_child, prior_var):
-        stash["C_pred"] = C_pred.detach()
-        stash["C_0"] = C_0.detach()
-        stash["t_leaf"] = t_leaf.detach()
-        stash["is_root_child"] = is_root_child.detach()
-        return orig_diag(C_pred=C_pred, C_0=C_0, e_pred=e_pred, e_0=e_0,
-                         t_leaf=t_leaf, is_root_child=is_root_child, prior_var=prior_var)
-    flowmod.compute_flow_diagnostics = cap_diag
-    def restore():
-        method.diffusion.forward = orig_fwd
-        flowmod.compute_flow_diagnostics = orig_diag
-    return stash, restore
-
-
 def teacher_forced(method, model, loader, device, n_batches, seed=0):
-    """Run real get_loss on GT reduction batches; collect per-leaf |C_pred|,|C_0|,is_root_child,depth."""
-    stash, restore = install_capture(method)
+    """Run the real training forward on GT reduction batches; collect per-leaf
+    |C_pred|, |C_0|, is_root_child, depth, t via `method.teacher_forced_diagnostics`
+    (flow-family diffusion). No monkeypatching — the diagnostics arrays are exposed by the
+    forward's `return_diag_arrays` flag."""
     rows = {"cp": [], "c0": [], "root": [], "depth": [], "t": []}
-    try:
-        th.manual_seed(seed)
-        it = iter(loader)
-        for b in range(n_batches):
-            try:
-                batch = next(it)
-            except StopIteration:
-                break
-            batch = batch.to(device)
-            with th.no_grad():
-                method.get_loss(batch, model)
-            if "C_pred" not in stash:
-                continue
-            cp = stash["C_pred"].norm(dim=-1).cpu().numpy()
-            c0 = stash["C_0"].norm(dim=-1).cpu().numpy()
-            root = stash["is_root_child"].cpu().numpy().astype(bool).reshape(-1)
-            t = stash["t_leaf"].cpu().numpy().reshape(-1)
-            kw = stash.get("kw", {})
-            if "parent_idx" in kw and "leaf_idx_train" in kw:
-                depth_all = node_depths_from_parent(kw["parent_idx"])
-                dep = depth_all[kw["leaf_idx_train"].cpu()].numpy()
-            else:
-                dep = np.full(len(cp), -1)
-            n = min(len(cp), len(c0), len(root), len(dep), len(t))
-            rows["cp"].append(cp[:n]); rows["c0"].append(c0[:n])
-            rows["root"].append(root[:n]); rows["depth"].append(dep[:n]); rows["t"].append(t[:n])
-            stash.clear()
-    finally:
-        restore()
+    th.manual_seed(seed)
+    it = iter(loader)
+    for b in range(n_batches):
+        try:
+            batch = next(it)
+        except StopIteration:
+            break
+        batch = batch.to(device)
+        d = method.teacher_forced_diagnostics(batch, model)
+        if d["cp"] is None or d["cp"].numel() == 0:
+            continue
+        cp = d["cp"].norm(dim=-1).cpu().numpy()
+        c0 = d["c0"].norm(dim=-1).cpu().numpy()
+        root = d["root"].cpu().numpy().astype(bool).reshape(-1)
+        t = d["t"].cpu().numpy().reshape(-1)
+        depth_all = node_depths_from_parent(d["parent_idx"])
+        dep = depth_all[d["leaf_idx_train"].cpu()].numpy()
+        n = min(len(cp), len(c0), len(root), len(dep), len(t))
+        rows["cp"].append(cp[:n]); rows["c0"].append(c0[:n])
+        rows["root"].append(root[:n]); rows["depth"].append(dep[:n]); rows["t"].append(t[:n])
     return {k: (np.concatenate(v) if v else np.array([])) for k, v in rows.items()}
 
 
