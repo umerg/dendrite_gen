@@ -47,6 +47,11 @@ def get_expansion_items(cfg: DictConfig, train_graphs, diffusion=None):
     tmd_filtrations = list(getattr(cfg.model, "tmd_filtrations", ("path", "height", "rho")))
     tmd_bins = int(getattr(cfg.model, "tmd_bins", 16))
     uhat = np.asarray(getattr(cfg.model, "so2_axis", (0.0, 0.0, 1.0)), dtype=float).reshape(3)
+    # Cell-type (class) conditioning knobs (a categorical per-graph label, orthogonal to
+    # the TMD structure conditioning). class_hidden_dim>0 turns it ON; num_classes is the
+    # one-hot width fed to the model's class_lin.
+    class_hidden_dim = getattr(cfg.model, "class_hidden_dim", 0)
+    num_classes = int(getattr(cfg.model, "num_classes", 0))
     # RBF edge-distance kernel knobs (default OFF; ranges are in pos_scale_factor-normalized units).
     rbf_k = int(getattr(cfg.model, "rbf_k", 0))
     rbf_gamma = float(getattr(cfg.model, "rbf_gamma", 10.0))
@@ -56,6 +61,7 @@ def get_expansion_items(cfg: DictConfig, train_graphs, diffusion=None):
     adjs = []
     poses = []
     tmds = []
+    classes = [] if class_hidden_dim > 0 else None
     for G in train_graphs:
         A, P, _ = nx_graph_to_adj_pos(G)
         if pos_scale_factor is not None:
@@ -63,20 +69,31 @@ def get_expansion_items(cfg: DictConfig, train_graphs, diffusion=None):
         adjs.append(A)
         poses.append(P)
         tmds.append(compute_tmd_mixed(G, filtrations=tmd_filtrations, n_bins=tmd_bins, uhat=uhat))
+        if classes is not None:
+            cc = G.graph.get("cell_class")
+            if cc is None:
+                raise ValueError(
+                    "class_hidden_dim>0 requires every training graph to carry a "
+                    "'cell_class' label, but a graph without one was found. Use the "
+                    "class-labelled neurons_conditional dataset."
+                )
+            classes.append(int(cc))
     if pos_scale_factor is not None:
         print(f"Positions scaled by 1/{pos_scale_factor} (offsets now ~unit scale).")
+    if classes is not None:
+        print(f"Cell-type conditioning ON: num_classes={num_classes}, class_hidden_dim={class_hidden_dim}")
     print("Extraction done.")
 
     print("Creating training reduction sequences...")
     # When depth reduction is deterministic, precompute all sequences once
     if reduction_type == "depth":
         train_dataset = gg.data.PrecomputedRedDataset(
-            adjs=adjs, poses=poses, tmds=tmds, red_factory=red_factory,
+            adjs=adjs, poses=poses, tmds=tmds, classes=classes, red_factory=red_factory,
         )
         num_workers = 0  # data is precomputed, no worker computation needed
     else:
         train_dataset = gg.data.InfiniteRandRedDataset(
-            adjs=adjs, poses=poses, tmds=tmds, red_factory=red_factory,
+            adjs=adjs, poses=poses, tmds=tmds, classes=classes, red_factory=red_factory,
         )
         is_mp = cfg.reduction.num_red_seqs < 0  # if infinite dataset
         num_workers = min(mp.cpu_count(), cfg.training.max_num_workers) * is_mp
@@ -116,6 +133,8 @@ def get_expansion_items(cfg: DictConfig, train_graphs, diffusion=None):
             "tmd_in_dim is derived from tmd_filtrations/tmd_bins — remove it from the config "
             "or fix tmd_filtrations/tmd_bins."
         )
+    if class_hidden_dim > 0 and num_classes <= 0:
+        raise ValueError("cfg.model.num_classes must be > 0 when class_hidden_dim > 0.")
     if tmd_hidden_dim > 0:
         print(f"TMD conditioning ON: filtrations={list(tmd_filtrations)}, bins={tmd_bins} -> tmd_in_dim={tmd_in_dim}")
     if rbf_k > 0:
@@ -138,6 +157,8 @@ def get_expansion_items(cfg: DictConfig, train_graphs, diffusion=None):
             offset_head_hidden=cfg.model.offset_head_hidden,
             tmd_in_dim=tmd_in_dim,
             tmd_hidden_dim=tmd_hidden_dim,
+            num_classes=num_classes,
+            class_hidden_dim=class_hidden_dim,
             so2_axis=cfg.model.so2_axis,
             rbf_k=rbf_k,
             rbf_gamma=rbf_gamma,

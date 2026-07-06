@@ -31,15 +31,17 @@ from pathlib import Path
 _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
+if str(_HERE.parent) not in sys.path:
+    sys.path.insert(0, str(_HERE.parent))
 from clean_trees import read_swc, clean_swc_tree, write_swc  # noqa: E402
+from utils.data_loading import CELL_CLASS_NAMES  # noqa: E402
 
 # Keep in lockstep with graph_generation/method/expansion.py::MAX_CHILDREN.
 MAX_CHILDREN = 16
 
-# Cortical-layer-ordered class ids for the 7 kept pyramidal types.
-CLASS_MAP = {
-    "23P": 0, "4P": 1, "5P-IT": 2, "5P-ET": 3, "5P-NP": 4, "6P-IT": 5, "6P-CT": 6,
-}
+# Cortical-layer-ordered class ids for the 7 kept pyramidal types. Derived from the
+# canonical CELL_CLASS_NAMES so the writer and the per-class metrics never desync.
+CLASS_MAP = {name: idx for idx, name in enumerate(CELL_CLASS_NAMES)}
 DROP_CLASSES = {"WM-P", "MC", "BPC"}
 
 ROOT_PARENT = -1  # root parent sentinel written in the SWC (matches neurons_final)

@@ -147,6 +147,7 @@ class EDMDiffusionModel(Module):
         leaf_parent_idx: th.Tensor,
         model: Module,
         tmd: th.Tensor | None = None,
+        cell_class: th.Tensor | None = None,
         model_kwargs: dict[str, Any] | None = None,
     ) -> tuple[th.Tensor, th.Tensor]:
         """
@@ -159,6 +160,8 @@ class EDMDiffusionModel(Module):
         model_kwargs = model_kwargs or {}
         if tmd is not None:
             model_kwargs = {**model_kwargs, "tmd": tmd}
+        if cell_class is not None:
+            model_kwargs = {**model_kwargs, "cell_class": cell_class}
 
         if node_feats is None:
             node_feats = P_0.new_zeros((P_0.size(0), 0))

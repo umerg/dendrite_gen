@@ -24,6 +24,10 @@ class ReducedGraphData(Data):
       - new_leaf_idx_from_next: LongTensor indices of nodes considered "new leaves" when expanding from next level
       - new_leaf_mask_from_next: BoolTensor mask aligned with nodes for the above
       - num_root_children: scalar int, branching factor of the root node (k)
+      - cell_class: per-graph int64 cell-type label, shape (1,). A graph-level field
+                    (constant across reduction levels) carried like `tmd`; it is
+                    intentionally NOT in the __inc__ offset tuple below, so PyG
+                    batching concatenates it to (B,) without node-index offsetting.
     """
     def __init__(self, **kwargs):
         super().__init__()

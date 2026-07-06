@@ -55,6 +55,7 @@ def _forward_to_sample_kwargs(inp: dict) -> dict:
         leaf_parent_idx=inp["leaf_parent_idx"],
         model=inp["model"],
         tmd=inp["tmd"],
+        cell_class=inp.get("cell_class"),
         local_forward=inp["local_forward"],
         local_sideways=inp["local_sideways"],
         uhat=inp["uhat"],
@@ -83,7 +84,8 @@ class Expansion(Method):
         self.max_tree_size = max_tree_size
     
     def sample_graphs(self, target_size: th.Tensor, model: Module, tmd: th.Tensor | None = None,
-                      num_root_children: th.Tensor | int | None = None):
+                      num_root_children: th.Tensor | int | None = None,
+                      cell_class: th.Tensor | None = None):
         """Generate graphs via iterative diffusion-based leaf expansion."""
         if self.diffusion is None:
             raise ValueError("Diffusion module is required for sampling.")
@@ -96,6 +98,8 @@ class Expansion(Method):
         num_graphs = int(target_size.numel())
         if tmd is not None:
             tmd = tmd.to(device=device)
+        if cell_class is not None:
+            cell_class = cell_class.to(device=device).long().reshape(-1)
 
         # Normalize num_root_children to a per-graph tensor
         if num_root_children is not None:
@@ -147,6 +151,7 @@ class Expansion(Method):
                 tmd=tmd,
                 step=step,
                 num_root_children=nrc,
+                cell_class=cell_class,
             )
             step += 1
 
@@ -183,6 +188,7 @@ class Expansion(Method):
         step: int = 0,
         map_threshold: float = 0.0,
         num_root_children: th.Tensor | None = None,
+        cell_class: th.Tensor | None = None,
     ):
         """Expand graphs by one generation step.
 
@@ -409,10 +415,14 @@ class Expansion(Method):
         # --- Assemble node features --- (MAX_CHILDREN is module-level)
         feats_total = getattr(model, "feats_dim", 0)
         tmd_hidden_dim = getattr(model, "tmd_hidden_dim", 0)
+        class_hidden_dim = getattr(model, "class_hidden_dim", 0)
         cond_dim = getattr(self.diffusion, "cond_dim", 0)
-        avail_feats_dim = feats_total - cond_dim - tmd_hidden_dim
-        if tmd_hidden_dim > 0 and avail_feats_dim < (MAX_CHILDREN + 4):
-            raise ValueError(f"feats_dim - tmd_hidden_dim - cond_dim must be >= {MAX_CHILDREN + 4} when using TMD.")
+        avail_feats_dim = feats_total - cond_dim - tmd_hidden_dim - class_hidden_dim
+        if (tmd_hidden_dim > 0 or class_hidden_dim > 0) and avail_feats_dim < (MAX_CHILDREN + 4):
+            raise ValueError(
+                f"feats_dim - cond_dim - tmd_hidden_dim - class_hidden_dim must be >= "
+                f"{MAX_CHILDREN + 4} when conditioning is enabled."
+            )
         if avail_feats_dim > 0:
             N = pos_new.size(0)
             features = []
@@ -457,7 +467,14 @@ class Expansion(Method):
             node_feats = pos_new.new_zeros((pos_new.size(0), 0))
 
         # --- Diffusion sampling with precomputed geometry ---
-        model_kwargs = {"tmd": tmd} if tmd is not None else None
+        # tmd/cell_class ride in model_kwargs; flow.sample forwards them via model(**model_kwargs).
+        model_kwargs = {}
+        if tmd is not None:
+            model_kwargs["tmd"] = tmd
+        if cell_class is not None:
+            model_kwargs["cell_class"] = cell_class
+        if not model_kwargs:
+            model_kwargs = None
         _t_diff_0 = _t(device)
         rel_pred, exp_pred = self.diffusion.sample(
             node_feats=node_feats,
@@ -629,13 +646,20 @@ class Expansion(Method):
         # --- prepare EGNN input (positions + minimal node features)
         feats_total = getattr(model, 'feats_dim', 0)
         tmd_hidden_dim = getattr(model, "tmd_hidden_dim", 0)
+        class_hidden_dim = getattr(model, "class_hidden_dim", 0)
         cond_dim = getattr(self.diffusion, "cond_dim", 0) if self.diffusion is not None else 0
-        avail_feats_dim = feats_total - cond_dim - tmd_hidden_dim
-        if tmd_hidden_dim > 0 and avail_feats_dim < (MAX_CHILDREN + 4):
-            raise ValueError(f"feats_dim - tmd_hidden_dim - cond_dim must be >= {MAX_CHILDREN + 4} when using TMD.")
+        avail_feats_dim = feats_total - cond_dim - tmd_hidden_dim - class_hidden_dim
+        if (tmd_hidden_dim > 0 or class_hidden_dim > 0) and avail_feats_dim < (MAX_CHILDREN + 4):
+            raise ValueError(
+                f"feats_dim - cond_dim - tmd_hidden_dim - class_hidden_dim must be >= "
+                f"{MAX_CHILDREN + 4} when conditioning is enabled."
+            )
         tmd = getattr(batch, "tmd", None)
         if tmd_hidden_dim > 0 and tmd is None:
             raise ValueError("Expected batch.tmd when tmd_hidden_dim > 0.")
+        cell_class = getattr(batch, "cell_class", None)
+        if class_hidden_dim > 0 and cell_class is None:
+            raise ValueError("Expected batch.cell_class when class_hidden_dim > 0.")
         
         # if tmd is not None:
         #     tmd_cpu = tmd.detach().cpu()
@@ -740,6 +764,7 @@ class Expansion(Method):
             leaf_parent_idx=leaf_parent_idx,
             model=model,
             tmd=tmd,
+            cell_class=cell_class,
             pre_geom_p0=pre_geom_p0,
             local_forward=leaf_fwd,
             local_sideways=leaf_side,

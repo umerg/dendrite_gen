@@ -539,7 +539,9 @@ class SO2_EGNN_Network(nn.Module):
                  m_dim = 16,
                  tmd_in_dim = 0,
                  tmd_hidden_dim = 0,
-                 fourier_features = 0, 
+                 num_classes = 0,
+                 class_hidden_dim = 0,
+                 fourier_features = 0,
                  soft_edge = 0,
                  embedding_nums=[], 
                  embedding_dims=[],
@@ -602,6 +604,8 @@ class SO2_EGNN_Network(nn.Module):
         self.m_dim            = m_dim
         self.tmd_in_dim       = int(tmd_in_dim)
         self.tmd_hidden_dim   = int(tmd_hidden_dim)
+        self.num_classes      = int(num_classes)
+        self.class_hidden_dim = int(class_hidden_dim)
         self.fourier_features = fourier_features
         self.soft_edge        = soft_edge
         self.norm_feats       = norm_feats
@@ -622,9 +626,14 @@ class SO2_EGNN_Network(nn.Module):
             raise ValueError("tmd_in_dim and tmd_hidden_dim must be >= 0.")
         if self.tmd_hidden_dim > 0 and self.tmd_in_dim == 0:
             raise ValueError("tmd_in_dim must be > 0 when tmd_hidden_dim > 0.")
-        if self.tmd_hidden_dim > self.feats_dim:
-            raise ValueError("tmd_hidden_dim cannot exceed feats_dim.")
-        
+        if self.class_hidden_dim < 0 or self.num_classes < 0:
+            raise ValueError("num_classes and class_hidden_dim must be >= 0.")
+        if self.class_hidden_dim > 0 and self.num_classes == 0:
+            raise ValueError("num_classes must be > 0 when class_hidden_dim > 0.")
+        # Both conditioners reserve part of feats_dim; their combined width must fit.
+        if self.tmd_hidden_dim + self.class_hidden_dim > self.feats_dim:
+            raise ValueError("tmd_hidden_dim + class_hidden_dim cannot exceed feats_dim.")
+
         self.tmd_mlp = None
         if self.tmd_hidden_dim > 0:
             self.tmd_mlp = nn.Sequential(
@@ -632,6 +641,12 @@ class SO2_EGNN_Network(nn.Module):
                 nn.SiLU(),
                 nn.Linear(self.tmd_hidden_dim, self.tmd_hidden_dim),
             )
+
+        # Cell-type conditioning: a one-hot(num_classes) fed through a single Linear
+        # (== a learned embedding, but the one-hot stays explicit in the assembly).
+        self.class_lin = None
+        if self.class_hidden_dim > 0:
+            self.class_lin = nn.Linear(self.num_classes, self.class_hidden_dim)
 
         # basis-coef head
         self.LR_offset_head = LR_offset_head
@@ -702,6 +717,7 @@ class SO2_EGNN_Network(nn.Module):
                 bsize=None, recalc_edge=None, verbose=0,
                 parent_idx: Optional[torch.Tensor] = None,
                 tmd: Optional[torch.Tensor] = None,
+                cell_class: Optional[torch.Tensor] = None,
                 pre_geom: Optional[dict] = None):
         """ Recalculate edge features every `self.recalc_edge` with the
             `recalc_edge` function if self.recalc_edge is set.
@@ -709,29 +725,46 @@ class SO2_EGNN_Network(nn.Module):
             * x: (N, pos_dim+feats_dim) will be unpacked into coors, feats.
         """
         x = embedd_token(x, self.embedding_dims, self.emb_layers) # identity if no embedding layers
-        if self.tmd_hidden_dim > 0:
-            if tmd is None:
-                raise ValueError("tmd must be provided when tmd_hidden_dim > 0.")
-            if tmd.dim() != 2:
-                raise ValueError("tmd must be a 2D tensor of shape (B, tmd_in_dim).")
-            if tmd.size(-1) != self.tmd_in_dim:
-                raise ValueError("tmd last dim must match tmd_in_dim.")
-            
-            tmd = tmd.to(device=x.device, dtype=x.dtype)
-            tmd_emb = self.tmd_mlp(tmd)
+        # Per-graph conditioners (TMD structure vector and/or cell-type label) each
+        # reserve a slice of feats_dim: embed per-graph -> broadcast by `batch` -> append
+        # AFTER the real node features (so the LR_offset_head's fixed-index read below is
+        # undisturbed). Fixed order: tmd, then class.
+        reserved = self.tmd_hidden_dim + self.class_hidden_dim
+        if reserved > 0:
             num_graphs = int(batch.max().item()) + 1
-            
-            if tmd_emb.size(0) != num_graphs:
-                raise ValueError("tmd batch size must be == number of graphs in batch.")
-            
+            cond_embs = []
+            if self.tmd_hidden_dim > 0:
+                if tmd is None:
+                    raise ValueError("tmd must be provided when tmd_hidden_dim > 0.")
+                if tmd.dim() != 2:
+                    raise ValueError("tmd must be a 2D tensor of shape (B, tmd_in_dim).")
+                if tmd.size(-1) != self.tmd_in_dim:
+                    raise ValueError("tmd last dim must match tmd_in_dim.")
+                tmd = tmd.to(device=x.device, dtype=x.dtype)
+                tmd_emb = self.tmd_mlp(tmd)
+                if tmd_emb.size(0) != num_graphs:
+                    raise ValueError("tmd batch size must be == number of graphs in batch.")
+                cond_embs.append(tmd_emb)
+            if self.class_hidden_dim > 0:
+                if cell_class is None:
+                    raise ValueError("cell_class must be provided when class_hidden_dim > 0.")
+                cell_class = cell_class.reshape(-1).to(device=x.device)
+                if cell_class.numel() != num_graphs:
+                    raise ValueError("cell_class must have one entry per graph in the batch.")
+                class_onehot = torch.nn.functional.one_hot(
+                    cell_class.long(), self.num_classes
+                ).to(dtype=x.dtype)
+                class_emb = self.class_lin(class_onehot)
+                cond_embs.append(class_emb)
+
             coors, feats = x[:, :self.pos_dim], x[:, self.pos_dim:]
-            expected_feats = self.feats_dim - self.tmd_hidden_dim
-            
+            expected_feats = self.feats_dim - reserved
             if feats.size(1) != expected_feats:
-                raise ValueError("Input feature dim does not match feats_dim - tmd_hidden_dim.")
-            
-            tmd_nodes = tmd_emb[batch]
-            feats = torch.cat([feats, tmd_nodes], dim=-1)
+                raise ValueError(
+                    "Input feature dim does not match feats_dim - tmd_hidden_dim - class_hidden_dim."
+                )
+            for emb in cond_embs:
+                feats = torch.cat([feats, emb[batch]], dim=-1)
             x = torch.cat([coors, feats], dim=-1)
 
         class_feature = None
