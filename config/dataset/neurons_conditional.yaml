@@ -1,0 +1,7 @@
+name: neurons_conditional_dataset
+# Cleaned, class-labelled neurons (soma-rooted, binarized, radii kept, cap=16),
+# produced by preprocessing/prepare_conditional_dataset.py. Local staging path is
+# /Users/umer/Documents/neurons_conditional; set data_dir to the rsync'd cluster copy.
+data_dir: /scratch/guptau/neurons_conditional
+load: True
+pos_scale_factor: 45.1

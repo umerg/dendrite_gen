@@ -1,5 +1,7 @@
 # K-Root Children Flow Trace: Training & Sampling
 
+> **Update 2026-07-06 — `MAX_CHILDREN` raised 10 → 16.** The root-children one-hot ordinal is now **16-wide** (a soma may have up to 16 primary dendrites; `expansion.py::MAX_CHILDREN = 16`, now a single module-level constant). The mechanism below is unchanged — only the width. The clamp is now `clamp(0, 15)`, and literal example vectors like `[1,0,0,0,0,0,0,0,0,0]` are illustrative at the old width 10; the real vector is 16-wide (zero-padded).
+
 A comprehensive, line-by-line trace of how root nodes with k>2 children are handled across the entire pipeline — from data construction through geometry computation, diffusion noising/denoising, and loss/position recovery. Covers the design invariants (SO(2) equivariance, locked frames, ordinal features), the SO(2)-invariant ordering and relative-frame approach, and all edge cases for k=1, k=2, and k>2.
 
 ---
@@ -72,7 +74,7 @@ The entire pipeline preserves SO(2) equivariance around `uhat` (default: z-axis 
 | **k source** | From GT/metadata (`num_root_children` field) | No prediction head needed; k is a structural property |
 | **Child_0 selection** | Lowest uhat component (tiebreak: largest perp distance) | SO(2)-invariant; backward-compatible with k=2 (lower Z = left = ordinal 0.0) |
 | **Remaining children** | Ordered clockwise relative to child_0's perp direction | SO(2)-equivariant (relative to geometric reference, not global axis) |
-| **Feature encoding** | 10D one-hot where child i lights up bit i (NOT `i/(k-1)` scalar, NOT angular `θ/2π`) | One-hot gives maximal separation between children regardless of k; does not leak GT angular information into features |
+| **Feature encoding** | 16D one-hot where child i lights up bit i (NOT `i/(k-1)` scalar, NOT angular `θ/2π`) | One-hot gives maximal separation between children regardless of k; does not leak GT angular information into features |
 | **Reference direction** | Root → child_0 in perp plane | SO(2)-equivariant (co-rotates with positions) |
 | **Frame stability** | Locked to P_0 positions during diffusion noising | Per-child frames must not drift with noise |
 | **Sampling frames** | One random `forward` per root, shared by ALL children | SO(2)-equivariant — absolute orientation is free; model learns angular placement from one-hot child identity |
@@ -91,15 +93,15 @@ After the SO(2) fix, `global_inplane_basis` is **never used for root child order
 | `compute_geo_angle_for_new_leaves` (non-root binary) | **KEPT** | Degenerate fallback for non-root binary parents with no grandparent |
 | `compute_geo_lr_mask`, `compute_root_child_angles`, `compute_geo_lr_mask_f2` | **DELETED** | Absorbed into `_compute_tree_directions` + `compute_geo_order` |
 
-### Ordinal Feature Table (10D One-Hot)
+### Ordinal Feature Table (16D One-Hot)
 
-| k | Child indices | One-hot encoding (MAX_CHILDREN=10) |
+| k | Child indices | One-hot encoding (MAX_CHILDREN=16) |
 |---|---------------|-------------------------------------|
 | 1 | [0] | `[1,0,0,0,0,0,0,0,0,0]` |
 | 2 | [0, 1] | `[1,0,...,0]`, `[0,1,0,...,0]` |
 | 3 | [0, 1, 2] | bits 0, 1, 2 |
 | 4 | [0, 1, 2, 3] | bits 0, 1, 2, 3 |
-| k | [0, ..., k-1] | bit i for child i (k ≤ 10) |
+| k | [0, ..., k-1] | bit i for child i (k ≤ 16) |
 
 Child index is **absolute, not normalized by k**: the 3rd child of k=5 and k=9 both encode as `[0,0,1,0,0,0,0,0,0,0]`. Binary interior children: left=bit 0, right=bit 1. Non-children (root, internal non-leaf) get all-zeros.
 
@@ -139,7 +141,7 @@ Expansion.get_loss(batch, model)
     |               +-- sideways = uhat × forward
     |
     +-- assemble node_feats [N, avail_feats_dim]
-    |       (is_leaf, geo_onehot [10D] ★, new_leaf_flag, size_ratio, padding)
+    |       (is_leaf, geo_onehot [16D] ★, new_leaf_flag, size_ratio, padding)
     |
     +-- Convert C_0 to local frame: global_to_local(C_0, leaf_fwd, leaf_side, uhat) -> leaf_rel_pos [L,3]
     |
@@ -185,7 +187,7 @@ Expansion.sample_graphs(target_size, model, tmd, num_root_children)
     |       |     +-- Non-root: grandparent→parent direction (standard)
     |       |
     |       +-- precompute_full_geometry(pos_new, ...) -> pre_geom_p0  (ONCE on P_0)
-    |       |     geo_feat_all = geo_ordinal (internal nodes) + geo_angle_new (new leaves) → 10D one-hot
+    |       |     geo_feat_all = geo_ordinal (internal nodes) + geo_angle_new (new leaves) → 16D one-hot
     |       |
     |       +-- Override pre_geom_p0['local_forward/sideways'][leaves] = leaf_fwd/side
     |       |     ★ Critical for root children at step 0: replaces deterministic fallback
@@ -283,7 +285,7 @@ for c in children.tolist():
     v_in[c] = fwd0_unit
 ```
 
-This means ALL root children of a given root share the same `forward` direction (after perp projection and normalization). The 10D one-hot ordinal feature is the only cue telling the model which child it is.
+This means ALL root children of a given root share the same `forward` direction (after perp projection and normalization). The 16D one-hot ordinal feature is the only cue telling the model which child it is.
 
 **`geo_delta_theta`** is still computed (for ordinal ordering and post-diffusion refinement) but is **NOT used for frame rotation**. All children share fwd0 as their frame.
 
@@ -312,7 +314,7 @@ for r, (sorted_idx, _fwd0, delta_angles, children) in root_ordering.items():
 **Critical design choices**:
 1. The ordinal encodes **rank in the geometric ordering**, NOT the actual angular position `θ/2π`. Using `θ/2π` would leak GT angular information into the feature.
 2. The ordinal is an **absolute child index** — the 3rd child (rank=2) of k=5 and k=9 both get `geo_ordinal=2.0` → one-hot `[0,0,1,0,...,0]`. This is NOT normalized by k.
-3. Converted to a **10D one-hot vector** in feature assembly (MAX_CHILDREN=10), giving maximal separation between any two children regardless of k.
+3. Converted to a **16D one-hot vector** in feature assembly (MAX_CHILDREN=16), giving maximal separation between any two children regardless of k.
 
 ### 2d: Binary Interior Children {#2d-binary-interior}
 
@@ -357,7 +359,7 @@ for c in children.tolist():
     v_in[c] = fwd0_unit  # SAME for all children of this root
 ```
 
-The 10D one-hot ordinal feature is the only thing that differentiates children for the model. During training, each child's target offset `C_0 = global_to_local(pos[child] - pos[root], fwd0, side0, uhat)` naturally has different forward/sideways components because children are at different angular positions. The model learns to predict these different offsets based on the one-hot child identity.
+The 16D one-hot ordinal feature is the only thing that differentiates children for the model. During training, each child's target offset `C_0 = global_to_local(pos[child] - pos[root], fwd0, side0, uhat)` naturally has different forward/sideways components because children are at different angular positions. The model learns to predict these different offsets based on the one-hot child identity.
 
 ### Interior nodes
 
@@ -422,7 +424,7 @@ def precompute_full_geometry(pos, parent_idx, edge_index, uhat, *, eps, tol, deb
 
 ```python
 # expansion.py — get_loss() feature assembly
-MAX_CHILDREN = 10
+MAX_CHILDREN = 16
 geo_ordinal = pre_geom_p0['geo_ordinal'].to(device=pos_gt.device, dtype=pos_gt.dtype)
 geo_idx = geo_ordinal.long().clamp(0, MAX_CHILDREN - 1)
 geo_onehot = pos_gt.new_zeros((N_nodes, MAX_CHILDREN))
@@ -437,14 +439,14 @@ feats_used += MAX_CHILDREN
 | Slots | Feature | Shape | Description |
 |-------|---------|-------|-------------|
 | 0 | `is_leaf` | [N, 1] | 1.0 if node is a leaf, 0.0 otherwise |
-| 1-10 | `geo_onehot` | [N, 10] | One-hot child index: bit i = 1.0 for child i. All-zeros for non-children (sentinel -1). |
+| 1-16 | `geo_onehot` | [N, 16] | One-hot child index: bit i = 1.0 for child i. All-zeros for non-children (sentinel -1). |
 | 11 | `new_leaf_flag` | [N, 1] | 1.0 if node is a "new leaf from next level" |
 | 12 | `size_ratio` | [N, 1] | `current_size / total_tree_size` |
 | 13+ | padding | [N, ...] | zeros |
 
 **Dimension budget**: `avail_feats_dim = feats_dim(64) - cond_dim(2) - tmd_hidden_dim(32) = 30`. Features use 13 slots, leaving 17 for padding.
 
-**Change from previous**: Slots 1-10 were previously a single scalar `geo_ordinal.clamp(min=0.0)` — a continuous value `i/(k-1)` in [0, 1]. For k=8 this gave only 0.143 separation between adjacent children, too weak for the model to distinguish them. The 10D one-hot gives maximal (orthogonal) separation regardless of k.
+**Change from previous**: Slots 1-16 were previously a single scalar `geo_ordinal.clamp(min=0.0)` — a continuous value `i/(k-1)` in [0, 1]. For k=8 this gave only 0.143 separation between adjacent children, too weak for the model to distinguish them. The 16D one-hot gives maximal (orthogonal) separation regardless of k.
 
 ### 5b: Local-Frame Target Conversion {#5b-local-frame-targets}
 
@@ -632,7 +634,7 @@ This gives each new child its spawn-order ordinal as a raw integer index:
 - k=3 children: 0, 1, 2
 - k=8 children: 0, 1, 2, 3, 4, 5, 6, 7
 
-These integer indices are later converted to 10D one-hot vectors in feature assembly. New leaves are at placeholder positions, so no real geometry is available. For internal nodes (from previous steps), the ordinal feature comes from `precompute_full_geometry`'s `geo_ordinal` which is computed from real positions (see Phase 8a).
+These integer indices are later converted to 16D one-hot vectors in feature assembly. New leaves are at placeholder positions, so no real geometry is available. For internal nodes (from previous steps), the ordinal feature comes from `precompute_full_geometry`'s `geo_ordinal` which is computed from real positions (see Phase 8a).
 
 ---
 
@@ -714,7 +716,7 @@ if child_ordinal is not None and sibling_count is not None:
         forward[group_indices] = fwd.unsqueeze(0)
 ```
 
-**For k=3 with random θ_0 = 0.7 rad**: ALL 3 children get `forward = cos(0.7)*e1 + sin(0.7)*e2`. The 10D one-hot ordinal (`[1,0,0,...,0]`, `[0,1,0,...,0]`, `[0,0,1,...,0]`) is the only cue telling the model which angular offset to predict for each child.
+**For k=3 with random θ_0 = 0.7 rad**: ALL 3 children get `forward = cos(0.7)*e1 + sin(0.7)*e2`. The 16D one-hot ordinal (`[1,0,0,...,0]`, `[0,1,0,...,0]`, `[0,0,1,...,0]`) is the only cue telling the model which angular offset to predict for each child.
 
 **SO(2) equivariance**: Since `θ_0` is random, the absolute orientation carries no information. The model learns angular placement from the one-hot child identity alone.
 
@@ -750,8 +752,8 @@ with th.no_grad():
 geo_feat_all = pre_geom_p0['geo_ordinal'].clamp(min=0.0).clone()
 geo_feat_all[leaf_idx_next] = geo_angle_new  # raw child index (0, 1, ..., k-1)
 
-# Feature assembly: convert to 10D one-hot
-MAX_CHILDREN = 10
+# Feature assembly: convert to 16D one-hot
+MAX_CHILDREN = 16
 geo_idx = geo_feat_all.long().clamp(0, MAX_CHILDREN - 1)
 geo_onehot = pos_new.new_zeros((N, MAX_CHILDREN))
 child_mask = pre_geom_p0['geo_ordinal'] >= 0
@@ -910,7 +912,7 @@ The one-hot ordinal feature told the model which angular offset to predict for e
 |--------|----------|----------|
 | **Frame source** | `_compute_tree_directions` → `compute_local_bases` | `compute_local_bases_for_leaves` with random θ_0 |
 | **All root children forward** | fwd0 (root→child_0 direction from GT, shared) | Random direction in perp plane (shared) |
-| **Feature** | 10D one-hot from integer `geo_ordinal` (from SO(2)-invariant GT ordering) | 10D one-hot: `geo_ordinal` for internal nodes (from `precompute_full_geometry`), raw spawn-order index for new leaves |
+| **Feature** | 16D one-hot from integer `geo_ordinal` (from SO(2)-invariant GT ordering) | 16D one-hot: `geo_ordinal` for internal nodes (from `precompute_full_geometry`), raw spawn-order index for new leaves |
 | **Noising** | C_0 + σ * ε in local frame | Start from pure noise σ_max * ε in local frame |
 | **Frame stability** | Locked to P_0 (via `patch_geometry_for_noised_leaves`) | Locked to P_0 (via `patch_geometry_for_noised_leaves`) |
 | **Geometry computation** | Precomputed once (`precompute_full_geometry`), patched per noise sample | Precomputed once (`precompute_full_geometry`), patched per diffusion step |
@@ -955,7 +957,7 @@ The one-hot ordinal feature told the model which angular offset to predict for e
 | **Ordering** | Lowest uhat component = child_0, remaining clockwise relative to child_0. `geo_ordinal = [0, 1, 2, ..., k-1]` (one-hot: bits 0 through k-1) |
 | **Training frame** | ALL children share `fwd = fwd0` (root→child_0 direction) |
 | **Sampling frame** | ALL children share same random forward |
-| **Feature** | 10D one-hot, bit i for child i — orthogonal separation regardless of k |
+| **Feature** | 16D one-hot, bit i for child i — orthogonal separation regardless of k |
 | **Spawn** | `spawn_counts_final = k * has_capacity` |
 
 ### Degenerate Cases
@@ -984,7 +986,7 @@ The one-hot ordinal feature told the model which angular offset to predict for e
 | `leaf_rel_pos` (C_0) | [L, 3] | float32 | `global_to_local(leaf_rel_pos_global)` |
 | `leaf_fwd` | [L, 3] | float32 | `local_forward[leaf_idx_train]` |
 | `leaf_side` | [L, 3] | float32 | `local_sideways[leaf_idx_train]` |
-| `geo_onehot` | [N, 10] | float32 | 10D one-hot from `geo_ordinal` integer index (MAX_CHILDREN=10) |
+| `geo_onehot` | [N, 16] | float32 | 16D one-hot from `geo_ordinal` integer index (MAX_CHILDREN=16) |
 | `num_root_children` | [G] | long | Batch (per-graph scalar) |
 
 ### Sampling Tensors
@@ -1026,7 +1028,7 @@ Expansion.get_loss()
   │     ├── assign_parent_scalar_to_edges()
   │     └── compute_local_bases(_directions=dirs)      (trivial: forward = v_in_unit)
   ├── global_to_local()                                (targets: global → local)
-  ├── [feature assembly with 10D one-hot from geo_ordinal]
+  ├── [feature assembly with 16D one-hot from geo_ordinal]
   └── DenoisingDiffusionModel.forward()
         ├── local_to_global()                          (C_t: local → global for P_t)
         ├── patch_geometry_for_noised_leaves()         (v_in_unit = local_forward, locked to P_0)
@@ -1054,8 +1056,8 @@ Expansion.sample_graphs(num_root_children=nrc)
           ├── override pre_geom_p0['local_forward/sideways'][leaves] = leaf_fwd/side
           │     └── critical for root children at step 0: replaces deterministic
           │       fallback with random shared frame from compute_local_bases_for_leaves
-          ├── geo_feat_all = geo_ordinal (internal) + geo_angle_new (new leaves) → 10D one-hot
-          ├── [feature assembly with 10D one-hot geo_onehot]
+          ├── geo_feat_all = geo_ordinal (internal) + geo_angle_new (new leaves) → 16D one-hot
+          ├── [feature assembly with 16D one-hot geo_onehot]
           ├── DenoisingDiffusionModel.sample(pre_geom_p0=...)
           │     ├── C = randn * sigma_max               (pure noise, local frame)
           │     └── for each step:
@@ -1075,7 +1077,7 @@ Expansion.sample_graphs(num_root_children=nrc)
 |----------|------|------|
 | `_compute_tree_directions` | helpers.py:111 | **Shared base**: tree topology, root ordering via `_order_root_children_by_uhat`, v_in/v_out, projections, normalization. Root children get shared fwd0 as v_in. |
 | `_order_root_children_by_uhat` | helpers.py:235 | SO(2)-invariant root child ordering: child_0 = lowest uhat component, clockwise sort |
-| `compute_geo_order` | helpers.py:724 | Unified integer ordinal: root children get rank (0, 1, ..., k-1) from root_ordering, binary interior get 0/1 from sinψ L/R. Converted to 10D one-hot in feature assembly. |
+| `compute_geo_order` | helpers.py:724 | Unified integer ordinal: root children get rank (0, 1, ..., k-1) from root_ordering, binary interior get 0/1 from sinψ L/R. Converted to 16D one-hot in feature assembly. |
 | `compute_branch_angles_parent_centric` | helpers.py:567 | cosψ, sinψ, cosθ from shared directions (or standalone) |
 | `compute_local_bases` | helpers.py:358 | forward/sideways from shared v_in_unit (or standalone) |
 | `compute_local_bases_for_leaves` | helpers.py:453 | Sampling: shared random frame for root children |
@@ -1083,8 +1085,8 @@ Expansion.sample_graphs(num_root_children=nrc)
 | `patch_geometry_for_noised_leaves` | helpers.py:1161 | Patches leaf geometry for diffusion; uses `local_forward` as locked v_in reference (both training and sampling) |
 | `compute_geo_angle_for_new_leaves` | helpers.py:964 | Post-diffusion ordinal refinement using `_order_root_children_by_uhat` (used in training via `get_loss`, no longer called in sampling) |
 | `Expansion.sample_graphs` | expansion.py:52 | Added `num_root_children` param; no `geo_angle` state (ordinals from `precompute_full_geometry`) |
-| `Expansion.expand` | expansion.py:138 | k-child spawn; precomputes geometry; 10D one-hot from `geo_ordinal` + spawn-order index; shared frame via `compute_local_bases_for_leaves` |
-| `Expansion.get_loss` | expansion.py:460 | 10D one-hot from integer `geo_ordinal` (child i → bit i) |
+| `Expansion.expand` | expansion.py:138 | k-child spawn; precomputes geometry; 16D one-hot from `geo_ordinal` + spawn-order index; shared frame via `compute_local_bases_for_leaves` |
+| `Expansion.get_loss` | expansion.py:460 | 16D one-hot from integer `geo_ordinal` (child i → bit i) |
 | `ReducedGraphData` | data.py:9 | Added `num_root_children` field |
 
 ### Deleted Functions

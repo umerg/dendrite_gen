@@ -20,7 +20,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from utils.data_loading import load_swc_graph
 
-MAX_CHILDREN = 10  # from graph_generation/method/expansion.py
+MAX_CHILDREN = 16  # from graph_generation/method/expansion.py (root-children one-hot width)
 
 
 def get_swc_files(dir_path: Path) -> list[Path]:

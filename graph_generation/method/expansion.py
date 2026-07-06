@@ -8,6 +8,13 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Width of the one-hot ordinal encoding a root (soma) child's index among its
+# siblings. This bounds the number of primary dendrites the model can represent:
+# a child with rank >= MAX_CHILDREN would collide onto the last bit. The dataset
+# is pre-filtered to drop somata whose degree exceeds this (see
+# preprocessing/prepare_conditional_dataset.py and data_analysis/prepare_neurons_final.py).
+MAX_CHILDREN = 16
+
 
 def _t(device: th.device) -> float:
     """Return current wall time, syncing CUDA if needed for accurate GPU timing."""
@@ -399,8 +406,7 @@ class Expansion(Method):
         geo_feat_all = pre_geom_p0['geo_ordinal'].clamp(min=0.0).clone()
         geo_feat_all[leaf_idx_next] = geo_angle_new  # raw child index (0, 1, ..., k-1)
 
-        # --- Assemble node features ---
-        MAX_CHILDREN = 10  # one-hot ordinal dimension
+        # --- Assemble node features --- (MAX_CHILDREN is module-level)
         feats_total = getattr(model, "feats_dim", 0)
         tmd_hidden_dim = getattr(model, "tmd_hidden_dim", 0)
         cond_dim = getattr(self.diffusion, "cond_dim", 0)
@@ -625,8 +631,8 @@ class Expansion(Method):
         tmd_hidden_dim = getattr(model, "tmd_hidden_dim", 0)
         cond_dim = getattr(self.diffusion, "cond_dim", 0) if self.diffusion is not None else 0
         avail_feats_dim = feats_total - cond_dim - tmd_hidden_dim
-        if tmd_hidden_dim > 0 and avail_feats_dim < 5:
-            raise ValueError("feats_dim - tmd_hidden_dim - cond_dim must be >= 5 when using TMD.")
+        if tmd_hidden_dim > 0 and avail_feats_dim < (MAX_CHILDREN + 4):
+            raise ValueError(f"feats_dim - tmd_hidden_dim - cond_dim must be >= {MAX_CHILDREN + 4} when using TMD.")
         tmd = getattr(batch, "tmd", None)
         if tmd_hidden_dim > 0 and tmd is None:
             raise ValueError("Expected batch.tmd when tmd_hidden_dim > 0.")
@@ -645,7 +651,7 @@ class Expansion(Method):
         #         uniq.tolist(),
         #     )
 
-        MAX_CHILDREN = 10  # one-hot ordinal dimension
+        # (MAX_CHILDREN is module-level; keep training/sampling one-hot width in lockstep)
         if avail_feats_dim > 0:
             N_nodes = pos_gt.size(0)
             is_leaf = pos_gt.new_zeros((N_nodes, 1))
