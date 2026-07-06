@@ -97,6 +97,7 @@ class VFlowMatchingModel(Module):
         leaf_parent_idx: th.Tensor,
         model: Module,
         tmd: th.Tensor | None = None,
+        cell_class: th.Tensor | None = None,
         pre_geom_p0: dict | None = None,
         local_forward: th.Tensor | None = None,
         local_sideways: th.Tensor | None = None,
@@ -175,6 +176,7 @@ class VFlowMatchingModel(Module):
             edge_attr=edge_attr,
             parent_idx=parent_idx,
             tmd=tmd,
+            cell_class=cell_class,
             pre_geom=pre_geom,
         )
         if device.type == 'cuda':
@@ -235,6 +237,7 @@ class VFlowMatchingModel(Module):
         model: Module,
         model_kwargs: dict | None = None,
         tmd: th.Tensor | None = None,
+        cell_class: th.Tensor | None = None,
         local_forward: th.Tensor | None = None,
         local_sideways: th.Tensor | None = None,
         uhat: th.Tensor | None = None,
@@ -246,6 +249,8 @@ class VFlowMatchingModel(Module):
         model_kwargs = model_kwargs or {}
         if tmd is not None:
             model_kwargs = {**model_kwargs, "tmd": tmd}
+        if cell_class is not None:
+            model_kwargs = {**model_kwargs, "cell_class": cell_class}
         if node_feats is None:
             node_feats = P_0.new_zeros((P_0.size(0), 0))
 

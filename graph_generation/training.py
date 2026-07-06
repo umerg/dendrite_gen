@@ -15,6 +15,7 @@ from torch.optim import Adam, AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from utils.tmd import compute_tmd_mixed, compute_tmd_embedding
+from utils.data_loading import CELL_CLASS_NAMES
 from validation.dist_metrics import compute_distribution_metrics, build_gt_cache
 from validation.plot import plot_graph_grid_angles, DEFAULT_ANGLES
 # NOTE: validation.teacher_forced_eval is imported lazily inside evaluate()/_tf_batches_for()
@@ -693,6 +694,18 @@ class Trainer:
                 ],
                 axis=0,
             )[pred_perm]
+
+        # Cell-type conditioning: copy each eval graph's own class onto its generated
+        # neuron (index-aligned to eval_graphs, same as size/tmd), so pred[i] <-> eval[i].
+        class_hidden_dim = getattr(model, "class_hidden_dim", 0)
+        class_all = None
+        if class_hidden_dim > 0:
+            raw_classes = [g.graph.get("cell_class") for g in eval_graphs]
+            if any(c is None for c in raw_classes):
+                raise ValueError(
+                    "class_hidden_dim>0 requires every eval graph to carry a 'cell_class' label."
+                )
+            class_all = np.array([int(c) for c in raw_classes], dtype=np.int64)[pred_perm]
         bs = (
             self.cfg.validation.batch_size
             if self.cfg.validation.batch_size is not None
@@ -711,11 +724,15 @@ class Trainer:
             tmd_batch = None
             if tmds is not None:
                 tmd_batch = th.from_numpy(tmds[cursor : cursor + len(batch)]).to(self.device)
+            cell_class_batch = None
+            if class_all is not None:
+                cell_class_batch = th.from_numpy(class_all[cursor : cursor + len(batch)]).to(self.device)
             pred_graphs_batch = self.method.sample_graphs(
                 target_size=th.tensor(batch, device=self.device),
                 model=model,
                 tmd=tmd_batch,
                 num_root_children=th.tensor(nrc_batch, device=self.device),
+                cell_class=cell_class_batch,
             )  # returns list[nx.Graph] with geometric node attrs
             pred_graphs += pred_graphs_batch
             cursor += len(batch)
@@ -798,6 +815,54 @@ class Trainer:
             self.logger.info(
                 "[evaluate beta=%s] dist_metrics=%.1fs", beta, _t_dist
             )
+
+            # Per-cell-class stratified distribution metrics (curated subset). Uses the
+            # same order-independent compute_distribution_metrics on each class's subset;
+            # pred_graphs[i] is aligned to eval_graphs[i], so subsetting by the eval graph's
+            # class matches generated-to-real. Tree-edit/KS are dropped (expensive/noisy on
+            # small subsets); PCA n_components and density/coverage k are clamped to class size.
+            if getattr(self.cfg.validation, "per_cell_class", False) and class_hidden_dim > 0:
+                min_count = int(getattr(self.cfg.validation, "per_cell_class_min_count", 20))
+                pred_all = results["pred_graphs"]
+                classes_present = sorted({
+                    g.graph.get("cell_class") for g in eval_graphs
+                    if g.graph.get("cell_class") is not None
+                })
+                for c in classes_present:
+                    idx = [i for i, g in enumerate(eval_graphs) if g.graph.get("cell_class") == c]
+                    cname = CELL_CLASS_NAMES[c] if 0 <= c < len(CELL_CLASS_NAMES) else f"id{c}"
+                    if len(idx) < min_count:
+                        self.logger.info(
+                            "[per_cell_class] skip %s (n=%d < min_count=%d)", cname, len(idx), min_count
+                        )
+                        continue
+                    eval_c = [eval_graphs[i] for i in idx]
+                    pred_c = [pred_all[i] for i in idx]
+                    ncomp = max(1, min(getattr(self.cfg.validation, "tmd_pca_ncomp", 32), len(eval_c) - 1))
+                    dc_k = max(1, min(getattr(self.cfg.validation, "dc_nearest_k", 5), len(eval_c) - 1))
+                    gt_cache_c = build_gt_cache(
+                        eval_c,
+                        uhat=tuple(np.asarray(uhat_np, dtype=float).reshape(3).tolist()),
+                        embed_fn=self._eval_embed_fn(),
+                        tmd_pca_ncomp=ncomp,
+                    )
+                    results[f"class_{cname}"] = compute_distribution_metrics(
+                        pred_c,
+                        eval_c,
+                        uhat=uhat_np,
+                        ged_enabled=False,          # skip tree-edit: expensive + noisy per class
+                        enable_ks=False,            # curated subset -> W1 + joint MMD/DC only
+                        enable_morphometrics=True,  # per-tree W1 (extents, Strahler, Sholl)
+                        enable_light_joint=True,    # joint MMD/density-coverage (morpho & TMD)
+                        gt_cache=gt_cache_c,
+                        embed_fn=self._eval_embed_fn(),
+                        dc_k=dc_k,
+                        tmd_pca_ncomp=ncomp,
+                    )
+                self.logger.info(
+                    "[evaluate beta=%s] per_cell_class metrics: %d classes",
+                    beta, sum(1 for k in results if k.startswith("class_")),
+                )
 
         # Timing surfaced to wandb (floats -> flattened as timing/... under this beta).
         n_eval = max(len(eval_graphs), 1)

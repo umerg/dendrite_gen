@@ -358,6 +358,11 @@ def build_reduction_batches_from_graphs(graphs, reduction_cfg, batch_size, pos_s
         fk["weighted_reduction"] = R.weighted_reduction
     rf = (gg.depth_reduction.DepthReductionFactory(**fk) if R.type == "depth"
           else gg.reduction.ReductionFactory(**fk))
+    # Conditioning (tmds/classes) is intentionally NOT threaded into TF eval: the TF metric
+    # path computes only POOLED metrics, so a conditioned model would silently report
+    # non-stratified TF numbers. Instead we fail fast -- _assemble_diffusion_inputs raises
+    # "Expected batch.{tmd,cell_class}" when the model expects conditioning. Thread these here
+    # (and stratify evaluate_teacher_forced) if/when per-class TF metrics are wanted.
     ds = PrecomputedRedDataset(adjs, poses, rf, tmds=None)
     samples = ds.samples
     return [Batch.from_data_list(samples[i:i + batch_size]) for i in range(0, len(samples), batch_size)]

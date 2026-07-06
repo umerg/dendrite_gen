@@ -152,7 +152,7 @@ from validation.teacher_forced_eval import (
 # The exact keyword set diffusion.forward consumes (mirrors expansion.get_loss's old call).
 _FORWARD_KWARGS = {
     "node_feats", "edge_index", "batch", "edge_attr", "P_0", "C_0", "parent_idx",
-    "leaf_idx_train", "leaf_expansion", "leaf_parent_idx", "model", "tmd",
+    "leaf_idx_train", "leaf_expansion", "leaf_parent_idx", "model", "tmd", "cell_class",
     "pre_geom_p0", "local_forward", "local_sideways", "uhat",
 }
 

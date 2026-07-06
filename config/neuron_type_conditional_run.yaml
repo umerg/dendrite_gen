@@ -1,0 +1,98 @@
+defaults:
+  - _self_
+  - dataset: neurons_conditional  # cleaned, class-labelled neurons (soma-rooted, binarized, cap=16)
+  - diffusion: flow10
+  - method: expansion
+
+reduction:
+  type: "depth"
+  mode: "stochastic"
+  cherry_p: 1.0
+  ensure_progress: True
+  root: 0
+  contract_root: False
+  num_red_seqs: -1
+  min_red_frac: 0.0
+  max_red_frac: 0.5
+  red_threshold: 0
+
+training:
+  batch_size: 512
+  lr: 5e-4
+  optimizer: adam
+  weight_decay: 0.0
+  num_steps: 60000
+  max_num_workers: 0
+  log_interval: 1000
+  save_checkpoint: True
+  resume: False
+  lr_scheduler: "cosine_annealing"
+  scheduler_T_max: ${training.num_steps}
+  scheduler_eta_min: 1e-5
+  grad_clip_norm: 1.0
+
+validation:
+  batch_size: 64
+  interval: 1000
+  first_step: 0
+  per_graph_size: False
+  eval_mode: rollout
+  tf_max_graphs: 64
+  tf_min_depth: 0
+  enable_metrics: False
+  enable_plots: True
+  enable_dist_metrics: True
+  ged_enabled: False
+  ged_timeout: 5.0
+  plot_angles: [[20, 30], [20, 120], [20, 210]]
+  enable_ks: True
+  enable_morphometrics: True
+  enable_light_joint: True
+  enable_floor: True
+  tmd_eval_filtration: radial_root
+  tmd_eval_bins: 16
+  tmd_pca_ncomp: 64
+  dc_nearest_k: 5
+  # Per-cell-class stratified distribution metrics (curated subset; tree-edit/KS skipped).
+  per_cell_class: True
+  per_cell_class_min_count: 20   # skip classes with fewer val graphs (degenerate PCA/kNN)
+
+testing: False
+
+model:
+  name: egnn
+  num_layers: 12
+  feats_dim: 128
+  m_dim: 256
+  tmd_hidden_dim: 0            # TMD structure conditioning OFF; type conditioning is orthogonal (composable later)
+  tmd_filtrations: [path, height, radial_root]
+  tmd_bins: 16
+  # Cell-type (class) conditioning: one-hot(num_classes) -> Linear(class_hidden_dim), always-on.
+  num_classes: 7              # 7 kept pyramidal types (utils.data_loading.CELL_CLASS_NAMES)
+  class_hidden_dim: 16        # >0 enables type conditioning; reserved slice of feats_dim
+  dropout: 0.1
+  norm_feats: True
+  global_linear_attn_every: 2
+  global_linear_attn_heads: 4
+  global_linear_attn_dim_head: 16
+  num_global_tokens: 8
+  offset_head_hidden: 256
+  use_global_fallback_frames: False
+  so2_axis: [0., 1., 0.]  # y-axis for neurons
+  rbf_k: 0
+  rbf_gamma: 10.0
+  rbf_rho_max: 4.0
+  rbf_du_max: 4.0
+
+ema:
+  betas: [1]
+  gamma: 1.0
+  power: 1.0
+
+name: flow_neuron_type_conditional_flow10
+debugging: False
+debugging_max_batches: 50
+debugging_dir: "neurons_debug"
+
+wandb:
+  logging: True

@@ -4,6 +4,14 @@ import networkx as nx
 from pathlib import Path
 
 
+# Canonical cortical-layer-ordered pyramidal cell classes. The integer id is the
+# list index; this is the single source of truth for the id<->name mapping shared
+# by the dataset writer (preprocessing/prepare_conditional_dataset.py) and the
+# per-class validation metrics (graph_generation/training.py). The dropped
+# test-only rare classes (WM-P, MC, BPC) are intentionally absent.
+CELL_CLASS_NAMES = ["23P", "4P", "5P-IT", "5P-ET", "5P-NP", "6P-IT", "6P-CT"]
+
+
 def load_swc_graph(path):
     """
     Load a single cleaned SWC file into an undirected NetworkX tree graph.
