@@ -101,11 +101,16 @@ class VFlowMatchingModel(Module):
         local_forward: th.Tensor | None = None,
         local_sideways: th.Tensor | None = None,
         uhat: th.Tensor | None = None,
+        return_diag_arrays: bool = False,
     ) -> tuple[th.Tensor, th.Tensor, dict]:
         """Compute flow-matching (velocity-prediction) losses for positional + expansion targets.
 
         Returns ``(exp_loss, pos_loss, diag)`` where ``diag`` is a flat dict of stratified
         training diagnostics (see ``compute_flow_diagnostics``); empty when there are no leaves.
+        When ``return_diag_arrays`` is set, ``diag['_arrays']`` additionally carries the raw
+        per-leaf tensors (implied clean prediction ``C1_implied``, target ``C_0``, flow time
+        ``t_leaf``, root-child mask) for teacher-forced diagnostics — off by default so the
+        training path and ``Trainer.log`` (which only flattens float leaves) are unchanged.
         """
         device = P_0.device
         num_leaves = leaf_idx_train.numel()
@@ -208,6 +213,11 @@ class VFlowMatchingModel(Module):
                 C_pred=C1_implied, C_0=C_0, e_pred=e1_implied, e_0=e_0,
                 t_leaf=t_leaf, is_root_child=is_root_child, prior_var=prior_var,
             )
+        if return_diag_arrays:
+            diag = {**diag, "_arrays": {
+                "C_pred": C1_implied.detach(), "C_0": C_0.detach(),
+                "t_leaf": t_leaf.detach(), "is_root_child": is_root_child.detach(),
+            }}
         return exp_loss, pos_loss, diag
 
     @th.no_grad()

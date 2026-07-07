@@ -130,6 +130,10 @@ class Trainer:
         # Fixed GT reduction batches for teacher-forced eval, built once per eval set and
         # reused every validation so the TF curve is comparable step-to-step.
         self._tf_batch_cache: dict[int, list] = {}
+        # Per-eval-set GT cache for the matched TMD-conditioned pairwise metrics (GT diagrams,
+        # geometric scalars, value arrays) -- fixed across steps, so built once. Keyed by
+        # (id(eval_graphs), filtrations, normalize_mode).
+        self._tmd_cond_gt_cache: dict[tuple, dict] = {}
         # Prefer CUDA, fallback to CPU (MPS has stability issues with PyG)
         if not cfg.debugging:
             if th.cuda.is_available():
@@ -596,7 +600,70 @@ class Trainer:
             )
             results.setdefault("timing", {})["teacher_forced_s"] = float(time() - _t0_tf)
 
+        # Matched, TMD-conditioned pairwise fidelity (opt-in via validation.enable_pairwise_metrics,
+        # gated to every-N-th validation for cost). Needs rollout's pred_graphs, which are already
+        # index-aligned to eval_graphs, so pred[i] is compared to its conditioning source gt[i].
+        pred_graphs = results.get("pred_graphs") or []
+        if run_free and pred_graphs and self._tmd_cond_due():
+            from validation.tmd_conditional_eval import compute_conditional_pairwise_metrics
+            uhat_np = (
+                model.uhat.detach().cpu().numpy().reshape(-1)
+                if getattr(model, "uhat", None) is not None
+                else np.array([0.0, 0.0, 1.0])
+            )
+            filts = tuple(getattr(self.cfg.validation, "tmd_cond_pd_filtrations", ("path", "radial_root")))
+            normalize_mode = getattr(self.cfg.validation, "tmd_cond_normalize", "minmax")
+            _t0_tc = time()
+            res = compute_conditional_pairwise_metrics(
+                pred_graphs, eval_graphs, uhat=uhat_np, pd_filtrations=filts,
+                max_pairs=getattr(self.cfg.validation, "tmd_cond_max_pairs", 64),
+                enable_wasserstein=bool(getattr(self.cfg.validation, "tmd_cond_wasserstein", True)),
+                enable_bottleneck=bool(getattr(self.cfg.validation, "tmd_cond_bottleneck", False)),
+                normalize_mode=normalize_mode,
+                gt_cache=self._tmd_cond_gt_cache_for(eval_graphs, filts, normalize_mode, uhat_np),
+            )
+            res["conditioned"] = float(getattr(model, "tmd_hidden_dim", 0) > 0)
+            results["tmd_cond"] = res
+            results.setdefault("timing", {})["tmd_cond_s"] = float(time() - _t0_tc)
+
         return results
+
+    def _tmd_cond_due(self) -> bool:
+        """Whether the matched pairwise block runs this validation.
+
+        Off unless ``validation.enable_pairwise_metrics`` (default False) -- unconditional runs
+        pay zero cost. When on, runs every ``validation.tmd_cond_every``-th validation (plus the
+        first, for a baseline). Gate is ``self.step``-based, NOT a counter: ``evaluate()`` is
+        called once per beta and again per beta for the test set on improvement, so ``self.step``
+        is the only stable clock across those calls within one validation.
+        """
+        if not getattr(self.cfg.validation, "enable_pairwise_metrics", False):
+            return False
+        every = int(getattr(self.cfg.validation, "tmd_cond_every", 5))
+        if every <= 1:
+            return True
+        interval = max(int(self.cfg.validation.interval), 1)
+        vc = self.step // interval
+        return vc <= 1 or vc % every == 0
+
+    def _tmd_cond_gt_cache_for(self, eval_graphs, filtrations, normalize_mode, uhat) -> dict:
+        """GT-side pairwise cache (diagrams/scalars/value arrays), built once per eval set.
+
+        Mirrors ``_tf_batches_for``: keyed by (id(eval_graphs), filtrations, normalize_mode) so the
+        fixed GT side is reused every validation and the pairwise curve is comparable step-to-step.
+        """
+        from validation.tmd_conditional_eval import build_gt_pairwise_cache
+        key = (id(eval_graphs), tuple(filtrations), normalize_mode)
+        cache = self._tmd_cond_gt_cache.get(key)
+        if cache is None:
+            cap = getattr(self.cfg.validation, "tmd_cond_max_pairs", 64)
+            graphs = list(eval_graphs)
+            if cap is not None and int(cap) > 0:
+                graphs = graphs[:int(cap)]
+            cache = build_gt_pairwise_cache(
+                graphs, uhat=uhat, pd_filtrations=filtrations, normalize_mode=normalize_mode)
+            self._tmd_cond_gt_cache[key] = cache
+        return cache
 
     def _tf_batches_for(self, eval_graphs: list[nx.Graph]) -> list:
         """Fixed GT reduction batches for teacher-forced eval, built once then cached.

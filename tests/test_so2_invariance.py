@@ -178,6 +178,40 @@ class TestComputeGeoOrder:
             th.testing.assert_close(ordinal_ref, ordinal_rot, atol=1e-5, rtol=1e-5)
             _angles_close_mod2pi(dt_ref, dt_rot)
 
+    @pytest.mark.parametrize("k", [11, 12, 13, 14, 15, 16])
+    def test_rotation_invariance_large_k(self, k):
+        """k=11..16 root children: geo_ordinal stays SO(2)-invariant across the widened
+        MAX_CHILDREN=16 one-hot range (guards ranks that previously clamped onto bit 9).
+
+        Children are placed at golden-angle azimuths (not evenly spaced) so no two sit
+        exactly opposite — evenly-spaced children would put one on the atan2 branch cut,
+        a measure-zero degeneracy that doesn't occur in real morphologies.
+        """
+        uhat = th.tensor([0.0, 0.0, 1.0])
+        golden = 2.39996322972865332  # radians; irrational fraction of 2π -> no azimuth ties
+        pos = [th.zeros(3)]
+        parent_idx = [-1]
+        for i in range(k):
+            azim = i * golden
+            r_perp = 1.0 + 0.13 * i
+            z = -0.5 + 0.37 * i  # strictly increasing, distinct uhat components
+            pos.append(th.tensor([r_perp * math.cos(azim), r_perp * math.sin(azim), z]))
+            parent_idx.append(0)
+        pos = th.stack(pos)
+        parent_idx = th.tensor(parent_idx, dtype=th.long)
+
+        ordinal_ref, dt_ref = compute_geo_order(pos, parent_idx, uhat)
+        # All k children get distinct ranks 0..k-1 (no collision/clamping in the ordinal).
+        root_ordinals = sorted(int(round(o)) for o in ordinal_ref[parent_idx == 0].tolist())
+        assert root_ordinals == list(range(k)), f"expected ranks 0..{k-1}, got {root_ordinals}"
+
+        for angle in [0.3, 1.5, math.pi, 5.0]:
+            R = _rotation_matrix_around_axis(uhat, angle)
+            pos_rot = (R @ pos.T).T
+            ordinal_rot, dt_rot = compute_geo_order(pos_rot, parent_idx, uhat)
+            th.testing.assert_close(ordinal_ref, ordinal_rot, atol=1e-5, rtol=1e-5)
+            _angles_close_mod2pi(dt_ref, dt_rot)
+
     def test_k2_matches_lr_convention(self):
         """For k=2, lowest uhat = child_0 = ordinal 0.0, highest = ordinal 1.0."""
         uhat = th.tensor([0.0, 0.0, 1.0])
