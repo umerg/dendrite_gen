@@ -1,13 +1,17 @@
+# Variant of neuron_dataset_run_3 with:
+#   - AdamW (decoupled weight decay) instead of plain Adam, for training stability
+#   - teacher-forced eval enabled alongside free-running (validation.eval_mode: both)
+# Everything else is identical to neuron_dataset_run_3.yaml.
 defaults:
   - _self_
   - dataset: neurons # neurons.yaml
-  - diffusion: flow10 # basic.yaml
+  - diffusion: flow_v10 # basic.yaml
   - method: expansion # expansion.yaml
 
 reduction:
   type: "depth"
   mode: "stochastic"
-  cherry_p: 1.0 
+  cherry_p: 1.0
   ensure_progress: True
   root: 0
   contract_root: False
@@ -18,26 +22,27 @@ reduction:
 
 training:
   batch_size: 512 # can adjust based on GPU memory, but does make steps slower on increasing and hence there is a tradoff on updates per unit time
-  lr: 5e-4
-  optimizer: adam        # adam | adamw (adamw = decoupled weight decay)
-  weight_decay: 0.0      # >0 only meaningful with adamw
-  num_steps: 60000
+  lr: 1e-4
+  optimizer: adam      # adam | adamw (adamw = decoupled weight decay)
+  weight_decay: 0.0     # AdamW decoupled weight decay; 0.01 = torch default. Tune (0 == plain Adam).
+  num_steps: 10000
   max_num_workers: 0
-  log_interval: 1000 # can make 5K as well
+  log_interval: 10 # can make 5K as well
   save_checkpoint: True
   resume: False # False, True (latest checkpoint), step number, or path to .pt file
-  lr_scheduler: "cosine_annealing"              
-  scheduler_T_max: ${training.num_steps}  
-  scheduler_eta_min: 1e-5          
+  lr_scheduler: "cosine_annealing"
+  scheduler_T_max: ${training.num_steps}
+  scheduler_eta_min: 1e-6
   grad_clip_norm: 1.0   # max global grad-norm; null disables clipping. Pre-clip norm is always logged as training/grad_norm
 
 validation:
   batch_size: 64 # adjust according train/val split - currently only 50 samples in val set
-  interval: 1000 # can make 5k
+  interval: 100 # can make 5k
   first_step: 0
   per_graph_size: False
-  eval_mode: rollout            # rollout | teacher_forced | both. teacher_forced = per-level TF eval only
-                                # (skips free-running generation); both runs both (expensive).
+  eval_mode: rollout               # rollout | teacher_forced | both. both = free-running metrics AND
+                                # per-level TF eval each validation (expensive). Use teacher_forced
+                                # to run ONLY the TF eval (skips free-running generation + its metrics/plots).
   tf_max_graphs: 64             # cap GT trees for TF eval (full ODE per reduction level per graph)
   tf_min_depth: 0               # restrict pooled TF metrics to leaves at tree depth >= this (2 drops root children)
   enable_metrics: False
@@ -46,10 +51,10 @@ validation:
   ged_enabled: False             # avg tree-edit distance (capped by node/pair count)
   ged_timeout: 5.0
   plot_angles: [[20, 30], [20, 120], [20, 210]]   # (elev, azim) around uhat
-  enable_ks: True               # KS alongside W1 (continuous features)
+  enable_ks: False               # KS alongside W1 (continuous features)
   enable_morphometrics: True    # path/radial/contraction/order/strahler/asymmetry/sholl
   enable_light_joint: True      # morpho + Euclidean-TMD MMD/Density/Coverage every val
-  enable_floor: True            # real-vs-real reference lines + headline excess
+  enable_floor: False            # real-vs-real reference lines + headline excess
   tmd_eval_filtration: radial_root
   tmd_eval_bins: 16
   tmd_pca_ncomp: 64             # N~2000: 256-d is fine; PCA mostly de-noises
@@ -59,10 +64,10 @@ testing: False # if True, only evaluate on test set
 
 model:
   name: egnn
-  num_layers: 12
-  feats_dim: 128
+  num_layers: 16
+  feats_dim: 256
   m_dim: 256
-  tmd_hidden_dim: 0            # >0 enables TMD conditioning; tmd_in_dim is auto-derived (n_filtrations * tmd_bins**2)
+  tmd_hidden_dim: 128            # >0 enables TMD conditioning; tmd_in_dim is auto-derived (n_filtrations * tmd_bins**2)
   tmd_filtrations: [path, height, radial_root]   # radial_root = Euclidean-from-soma (axis-agnostic); path/height key off so2_axis (y for neurons)
   tmd_bins: 16                 # persistence-image grid per filtration
   dropout: 0.1
@@ -81,12 +86,12 @@ model:
   rbf_rho_max: 4.0      # in-plane radius span [0, rho_max]; neuron C_0 rho p99=3.1 (scale 1/45.1, axis y)
   rbf_du_max: 4.0       # axial span [-du_max, du_max]; neuron |du| p99=3.1
 
-ema: # can adjust for more stable training, but I haven't had the chance to experiment with it much - working though
-  betas: [1]
+ema: # 0.999 EMA now that the update formula is fixed; warmup ramps and saturates at beta by ~step 1000 (gamma/power below)
+  betas: [1, 0.99, 0.999] # EMA beta values to sweep; 1 = no EMA, 0.99 = fast EMA, 0.999 = slow EMA
   gamma: 1.0
   power: 1.0
 
-name: flow_neuron_unconditional_big_flow10_firstdecent
+name: flowv_neuron_conditional_ema10k_
 debugging: False
 debugging_max_batches: 50
 debugging_dir: "neurons_debug"
