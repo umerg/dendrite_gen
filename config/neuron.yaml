@@ -21,7 +21,7 @@ reduction:
   red_threshold: 0
 
 training:
-  batch_size: 512 # can adjust based on GPU memory, but does make steps slower on increasing and hence there is a tradoff on updates per unit time
+  batch_size: 512 # can adjust based on GPU memory
   lr: 1e-4
   optimizer: adam      # adam | adamw (adamw = decoupled weight decay)
   weight_decay: 0.0     # AdamW decoupled weight decay; 0.01 = torch default. Tune (0 == plain Adam).
@@ -36,8 +36,8 @@ training:
   grad_clip_norm: 1.0   # max global grad-norm; null disables clipping. Pre-clip norm is always logged as training/grad_norm
 
 validation:
-  batch_size: 64 # adjust according train/val split - currently only 50 samples in val set
-  interval: 100 # can make 5k
+  batch_size: 64 # adjust according to GPU memory
+  interval: 100 
   first_step: 0
   per_graph_size: False
   eval_mode: rollout               # rollout | teacher_forced | both. both = free-running metrics AND
@@ -59,16 +59,6 @@ validation:
   tmd_eval_bins: 16
   tmd_pca_ncomp: 64             # N~2000: 256-d is fine; PCA mostly de-noises
   dc_nearest_k: 5               # k for Density/Coverage
-  # Matched, TMD-conditioned pairwise fidelity: gen[i] vs its conditioning GT[i] (opt-in).
-  # Off here because this run is unconditional (tmd_hidden_dim: 0); set True once you enable
-  # TMD conditioning so the per-conditioning signal is meaningful.
-  enable_pairwise_metrics: False
-  tmd_cond_every: 5             # run every N-th validation (cost control); 1 = every validation
-  tmd_cond_max_pairs: 64        # cap matched pairs (PD Wasserstein dominates cost)
-  tmd_cond_pd_filtrations: [path, radial_root]  # per-pair persistence-diagram distance filtrations
-  tmd_cond_wasserstein: True    # PD Wasserstein (persim)
-  tmd_cond_bottleneck: False    # PD bottleneck (persim); off by default
-  tmd_cond_normalize: minmax    # filtration normalization for the paired diagrams
 
 testing: False # if True, only evaluate on test set
 
@@ -91,7 +81,7 @@ model:
   so2_axis: [0., 1., 0.] # z-axis for trees, y-axis for neurons
   # RBF edge-distance kernel (default OFF). Set rbf_k>0 to expand rho/du into Gaussian
   # channels instead of raw scalars. Ranges are in pos_scale_factor-normalized units.
-  rbf_k: 16              # >0 = rbf_k Gaussian channels per distance (recommended 16); 0 = raw scalar
+  rbf_k: 0              # >0 = rbf_k Gaussian channels per distance (recommended 16); 0 = raw scalar
   rbf_gamma: 10.0       # Gaussian width (shared by rho & du)
   rbf_rho_max: 4.0      # in-plane radius span [0, rho_max]; neuron C_0 rho p99=3.1 (scale 1/45.1, axis y)
   rbf_du_max: 4.0       # axial span [-du_max, du_max]; neuron |du| p99=3.1
@@ -101,7 +91,7 @@ ema: # 0.999 EMA now that the update formula is fixed; warmup ramps and saturate
   gamma: 1.0
   power: 1.0
 
-name: flowv_neuron_unconditional_ema10k_rbf
+name: flowv_neuron_unconditional_10k
 debugging: False
 debugging_max_batches: 50
 debugging_dir: "neurons_debug"
