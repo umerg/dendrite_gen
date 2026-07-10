@@ -298,25 +298,6 @@ def main(cfg: DictConfig):
     ]
     _ensure_root(train_graphs)
 
-    # Metrics
-    validation_metrics = [
-        gg.metrics.NodeNumDiff(),
-        gg.metrics.NodeDegree(),
-        gg.metrics.ClusteringCoefficient(),
-        gg.metrics.OrbitCount(),
-        gg.metrics.Spectral(),
-        gg.metrics.Wavelet(),
-        gg.metrics.Ratio(),
-        gg.metrics.Uniqueness(),
-        gg.metrics.Novelty(),
-    ]
-
-    if "tree" in cfg.dataset.name: # retaining tree-specific metrics
-        validation_metrics += [
-            gg.metrics.ValidTree(),
-            gg.metrics.UniqueNovelValidTree(),
-        ]
-
     diffusion_cfg = OmegaConf.select(cfg, "diffusion")
     diffusion = None
     if diffusion_cfg is not None:
@@ -367,7 +348,6 @@ def main(cfg: DictConfig):
         train_graphs=train_graphs,
         validation_graphs=validation_graphs,
         test_graphs=test_graphs,
-        metrics=validation_metrics,
         cfg=cfg,
         pos_scale_factor=method_items.get("pos_scale_factor"),
     )

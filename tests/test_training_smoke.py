@@ -164,7 +164,6 @@ def test_training_smoke():
         train_graphs=graphs_train,
         validation_graphs=graphs_val,
         test_graphs=graphs_test,
-        metrics=[],  # empty -> validation/evaluate metrics loops skipped if interval=0
         cfg=cfg,
     )
 

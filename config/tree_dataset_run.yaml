@@ -36,7 +36,6 @@ validation:
   interval: 5000 # can make 5k
   first_step: 0
   per_graph_size: False
-  enable_metrics: False
   enable_plots: True            # 3D multi-azimuth views (orbiting uhat) of gen + GT
   enable_dist_metrics: True     # Wasserstein-1 of gen-vs-GT stat distributions
   ged_enabled: True             # avg tree-edit distance (capped by node/pair count)

@@ -37,7 +37,6 @@ try:  # Experiment tracking (optional)
 except Exception:  # pragma: no cover
     wandb = None
 
-from .metrics import Metric
 from .model import EMA, EMA1
 
 
@@ -109,7 +108,6 @@ class Trainer:
         train_graphs: list[nx.Graph],
         validation_graphs: list[nx.Graph],
         test_graphs: list[nx.Graph],
-        metrics: list[Metric],
         cfg,
         pos_scale_factor: float | None = None,
     ):
@@ -118,7 +116,6 @@ class Trainer:
         self.train_graphs = train_graphs
         self.validation_graphs = validation_graphs
         self.test_graphs = test_graphs
-        self.metrics = metrics
         self.cfg = cfg
 
         self.rng = np.random.default_rng(0)
@@ -201,7 +198,6 @@ class Trainer:
                 self.run_id = None
         else:
             self.step = 0
-            self.best_validation_scores = {beta: -1 for beta in cfg.ema.betas} # what are EMA betas? TODO
             self.run_id = None
 
         # Wandb (only if requested AND available AND OmegaConf present)
@@ -264,7 +260,6 @@ class Trainer:
         if getattr(self, "scheduler", None) is not None:
             checkpoint["scheduler"] = self.scheduler.state_dict()
         checkpoint["step"] = self.step
-        checkpoint["best_validation_scores"] = self.best_validation_scores
         checkpoint["run_id"] = self.run_id
 
         checkpoint_dir = self.output_dir / "checkpoints"
@@ -296,7 +291,6 @@ class Trainer:
         if "scheduler" in checkpoint and getattr(self, "scheduler", None) is not None:
             self.scheduler.load_state_dict(checkpoint["scheduler"])
         self.step = checkpoint["step"]
-        self.best_validation_scores = checkpoint["best_validation_scores"]
         self.run_id = checkpoint["run_id"]
 
     def train(self):
@@ -421,42 +415,15 @@ class Trainer:
             self.logger.info(f"Running validation at step {self.step}")
         _t_val_start = time()
 
-        # --- VALIDATION LOOP (metrics + optional plots) ---
-        # We gate metric computation & test-trigger logic with cfg.validation.enable_metrics.
-        # We gate example plotting with cfg.validation.enable_plots.
-        # Original code retained inside conditionals for future reactivation.
+        # --- VALIDATION LOOP ---
+        # Generate graphs per EMA beta; the live distribution/TMD metrics and plots
+        # are computed inside evaluate(). test_results stays empty here -- test-set
+        # evaluation is driven by the explicit test() method (cfg.testing).
         val_results = {}
         test_results = {}
-        enable_metrics = getattr(self.cfg.validation, 'enable_metrics', True)
-        enable_plots = getattr(self.cfg.validation, 'enable_plots', True)
-        # The best-checkpoint / test-trigger logic reads free-running metrics; in
-        # teacher_forced-only mode there is no free-running generation, so skip it.
-        run_free = getattr(self.cfg.validation, "eval_mode", "rollout") in ("rollout", "both")
 
         for beta in self.cfg.ema.betas:
-            # Always generate graphs (needed for plots & potential metrics later)
             val_results[f"ema_{beta}"] = self.evaluate(self.validation_graphs, beta)
-
-            if enable_metrics and run_free:
-                # --- METRIC VALIDATION SCORE BLOCK (original logic) ---
-                unique_novel_valid_keys = [
-                    str(m) for m in self.metrics if "UniqueNovelValid" in str(m)
-                ]
-                if len(unique_novel_valid_keys) > 0:
-                    validation_score = val_results[f"ema_{beta}"][
-                        unique_novel_valid_keys[0]
-                    ]
-                else:
-                    # Ratio metric used as inverse score previously
-                    validation_score = 1 / val_results[f"ema_{beta}"]["Ratio"]
-
-                # Evaluate on test set if validation score improved
-                if validation_score >= self.best_validation_scores[beta]:
-                    self.best_validation_scores[beta] = validation_score
-                    test_results[f"ema_{beta}"] = self.evaluate(self.test_graphs, beta)
-            else:
-                # Metrics disabled: insert placeholder
-                val_results[f"ema_{beta}"]["metrics_disabled"] = True
 
         _val_total = time() - _t_val_start
         self.logger.info("[validation step=%d] total=%.1fs", self.step, _val_total)
@@ -832,46 +799,18 @@ class Trainer:
                 "[evaluate beta=%s] dist_metrics=%.1fs", beta, _t_dist
             )
 
-        # Metric computation gated
-        enable_metrics = getattr(self.cfg.validation, 'enable_metrics', True)
-        _t0_metrics = time()
-        if enable_metrics:
-            # Validate graphs (original metric loop)
-            for metric in self.metrics:
-                results[str(metric)] = metric(
-                    reference_graphs=eval_graphs,
-                    predicted_graphs=pred_graphs,
-                    train_graphs=self.train_graphs,
-                )
-
-            if self.cfg.validation.per_graph_size:
-                for n in set(target_size):
-                    eval_graphs_n = [g for g in eval_graphs if len(g) == n]
-                    pred_graphs_n = [g for g in pred_graphs if len(g) == n]
-                    results[f"size_{n}"] = {}
-                    for metric in self.metrics:
-                        results[f"size_{n}"][str(metric)] = metric(
-                            reference_graphs=eval_graphs_n,
-                            predicted_graphs=pred_graphs_n,
-                            train_graphs=self.train_graphs,
-                        )
-        else:
-            results['metrics_disabled'] = True
-        _t_metrics = time() - _t0_metrics
-
         # Timing surfaced to wandb (floats -> flattened as timing/... under this beta).
         n_eval = max(len(eval_graphs), 1)
         results["timing"] = {
             "sampling_s": float(_t_generation),
             "sampling_per_graph_ms": float(_t_generation / n_eval * 1000.0),
-            "metric_loop_s": float(_t_metrics),
         }
         if _t_dist is not None:
             results["timing"]["dist_metrics_s"] = float(_t_dist)
 
         self.logger.info(
-            "[evaluate beta=%s n_graphs=%d] generation=%.1fs metrics=%.1fs",
-            beta, len(eval_graphs), _t_generation, _t_metrics,
+            "[evaluate beta=%s n_graphs=%d] generation=%.1fs",
+            beta, len(eval_graphs), _t_generation,
         )
 
         # Example plots: 3D multi-azimuth views that orbit the model's uhat axis.

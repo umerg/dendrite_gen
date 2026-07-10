@@ -53,8 +53,8 @@ def _make_cfg():
             save_checkpoint=True, resume=False, max_num_workers=0,
         ),
         validation=SimpleNamespace(
-            interval=1, first_step=0, batch_size=4, per_graph_size=False,
-            enable_metrics=False, enable_plots=True, enable_dist_metrics=True,
+            interval=1, first_step=0, batch_size=4,
+            enable_plots=True, enable_dist_metrics=True,
             ged_enabled=True, ged_timeout=5.0,
             plot_angles=[[20, 30], [20, 120]],
             enable_ks=True, enable_morphometrics=True, enable_light_joint=True,
@@ -89,7 +89,7 @@ def _build_trainer(cfg, tmp_path, so2_axis):
     trainer = gg.training.Trainer(
         model=model, method=method, train_dataloader=loader,
         train_graphs=graphs_train, validation_graphs=graphs_val,
-        test_graphs=graphs_test, metrics=[], cfg=cfg,
+        test_graphs=graphs_test, cfg=cfg,
     )
     trainer.output_dir = Path(tmp_path)  # redirect eval_plots / pickles to tmp
     return trainer

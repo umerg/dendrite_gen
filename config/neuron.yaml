@@ -45,7 +45,6 @@ validation:
                                 # to run ONLY the TF eval (skips free-running generation + its metrics/plots).
   tf_max_graphs: 64             # cap GT trees for TF eval (full ODE per reduction level per graph)
   tf_min_depth: 0               # restrict pooled TF metrics to leaves at tree depth >= this (2 drops root children)
-  enable_metrics: False
   enable_plots: True            # 3D multi-azimuth views (orbiting uhat) of gen + GT
   enable_dist_metrics: True     # Wasserstein-1 of gen-vs-GT stat distributions
   ged_enabled: False             # avg tree-edit distance (capped by node/pair count)
