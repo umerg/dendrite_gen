@@ -92,16 +92,14 @@ def _build_dataset(graphs, cfg):
 
     dataset = gg.data.InfiniteRandRedDataset(adjs=adjs, poses=poses, red_factory=red_factory)
 
-    # Infinite dataset => indicate with negative num_red_seqs (already in cfg)
-    is_mp = cfg.reduction.num_red_seqs < 0
     loader = DataLoader(
         dataset,
         batch_size=cfg.training.batch_size,
         shuffle=False,
         pin_memory=False,
         collate_fn=Batch.from_data_list,
-        num_workers=min(0, cfg.training.max_num_workers) * is_mp,  # keep workers 0 for test stability
-        multiprocessing_context="spawn" if is_mp and cfg.training.max_num_workers > 0 else None,
+        num_workers=min(0, cfg.training.max_num_workers),  # keep workers 0 for test stability
+        multiprocessing_context="spawn" if cfg.training.max_num_workers > 0 else None,
     )
     return loader
 
@@ -121,7 +119,6 @@ def _init_model_and_method(cfg):
     diffusion = DenoisingDiffusionModel(num_steps=1)
     method = gg.method.Expansion(
         diffusion=diffusion,
-        red_threshold=cfg.reduction.red_threshold,
     )
     return model, method
 
@@ -135,8 +132,6 @@ def _make_minimal_cfg():
             cherry_p=0.8,
             ensure_progress=True,
             root=0,  # force root to be node 0
-            num_red_seqs=-1,  # infinite
-            red_threshold=0,
             contract_root=False,
         ),
         training=SimpleNamespace(batch_size=2, max_num_workers=0),

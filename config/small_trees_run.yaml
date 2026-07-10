@@ -6,15 +6,11 @@ defaults:
 
 reduction:
   type: "depth"
-  mode: "stochastic"
+  mode: "deterministic"
   cherry_p: 1.0 # imp now with new leaves tracking?
   ensure_progress: True
   root: 0
   contract_root: False
-  num_red_seqs: -1
-  min_red_frac: 0.0
-  max_red_frac: 0.5
-  red_threshold: 0
 
 training:
   batch_size: 512

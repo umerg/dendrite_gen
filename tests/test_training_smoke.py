@@ -106,8 +106,7 @@ def _make_cfg():
             dropout=0.0,
         ),
         method=SimpleNamespace(name="expansion"),
-        reduction=SimpleNamespace(mode="stochastic", cherry_p=0.8, ensure_progress=True, root=0, contract_root=False,
-                                  num_red_seqs=-1, red_threshold=0),
+        reduction=SimpleNamespace(mode="stochastic", cherry_p=0.8, ensure_progress=True, root=0, contract_root=False),
         training=SimpleNamespace(batch_size=2, lr=1e-3, num_steps=3, log_interval=1, save_checkpoint=False, resume=False, max_num_workers=0),
         validation=SimpleNamespace(interval=0, first_step=0, batch_size=None, per_graph_size=False),
         ema=SimpleNamespace(betas=[1], gamma=1.0, power=1.0),
@@ -140,7 +139,6 @@ def test_training_smoke():
     diffusion = DenoisingDiffusionModel(num_steps=1)
     method = gg.method.Expansion(
         diffusion=diffusion,
-        red_threshold=cfg.reduction.red_threshold,
     )
 
     # Quick loss path smoke before trainer: ensures expansion state loss present

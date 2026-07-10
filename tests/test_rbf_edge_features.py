@@ -110,7 +110,7 @@ def test_forward_pass_with_rbf_on():
     feats_dim = 4
     model = _build_model(rbf_k=16, rbf_rho_max=4.0, rbf_du_max=4.0, feats_dim=feats_dim)
     from graph_generation.diffusion.basic import DenoisingDiffusionModel
-    method = gg.method.Expansion(diffusion=DenoisingDiffusionModel(num_steps=1), red_threshold=0)
+    method = gg.method.Expansion(diffusion=DenoisingDiffusionModel(num_steps=1))
 
     from torch_geometric.utils import to_edge_index as _to_edge_index
     batch = None

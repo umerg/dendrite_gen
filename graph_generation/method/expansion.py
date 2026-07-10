@@ -71,13 +71,11 @@ class Expansion(Method):
     def __init__(
         self,
         diffusion: Module | None = None,
-        red_threshold: int = 0,
         expansion_loss_weight: float = 1.0,
         use_size_ratio: bool = True,
         max_tree_size: int = 500,
     ):
         super().__init__(diffusion=diffusion)
-        self.red_threshold = red_threshold
         self.expansion_loss_weight = float(expansion_loss_weight)
         self.use_size_ratio = use_size_ratio
         self.max_tree_size = max_tree_size

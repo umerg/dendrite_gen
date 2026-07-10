@@ -109,7 +109,6 @@ def build_model_diffusion_method(cfg):
     # ---- method ----
     method = gg.method.Expansion(
         diffusion=diffusion,
-        red_threshold=cfg.reduction.red_threshold,
         expansion_loss_weight=getattr(cfg.method, "expansion_loss_weight", 1.0),
         use_size_ratio=getattr(cfg.method, "use_size_ratio", True),
         max_tree_size=getattr(cfg.method, "max_tree_size", 500),

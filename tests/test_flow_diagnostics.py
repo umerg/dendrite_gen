@@ -185,7 +185,7 @@ def test_get_loss_propagates_diag():
     cfg, loader, model = _build_model_and_loader()
     diffusion = FlowMatchingModel(num_steps=4, prior_std_pos=[0.74, 0.61, 0.83])
     method = gg.method.Expansion(
-        diffusion=diffusion, red_threshold=cfg.reduction.red_threshold,
+        diffusion=diffusion,
     )
     saw_diag = False
     for batch in loader:

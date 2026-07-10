@@ -180,7 +180,7 @@ def _build_flow_method_and_batches(seed=7):
     batches = build_reduction_batches_from_graphs(graphs, R, batch_size=4, pos_scale_factor=1.0)
     model = gg.model.SO2_EGNN_Network(
         n_layers=2, feats_dim=16, pos_dim=3, m_dim=16, dropout=0.0, edge_attr_dim=1)
-    method = gg.method.Expansion(diffusion=FlowMatchingModel(num_steps=2), red_threshold=0)
+    method = gg.method.Expansion(diffusion=FlowMatchingModel(num_steps=2))
     return method, model, batches
 
 

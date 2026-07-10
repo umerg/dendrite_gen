@@ -46,7 +46,7 @@ def _make_cfg():
         method=SimpleNamespace(name="expansion"),
         reduction=SimpleNamespace(
             mode="stochastic", cherry_p=0.8, ensure_progress=True, root=0,
-            contract_root=False, num_red_seqs=-1, red_threshold=0,
+            contract_root=False,
         ),
         training=SimpleNamespace(
             batch_size=2, lr=1e-3, num_steps=1, log_interval=1,
@@ -84,8 +84,7 @@ def _build_trainer(cfg, tmp_path, so2_axis):
         edge_attr_dim=1, so2_axis=so2_axis,
     )
     from graph_generation.diffusion.basic import DenoisingDiffusionModel
-    method = gg.method.Expansion(diffusion=DenoisingDiffusionModel(num_steps=1),
-                                 red_threshold=cfg.reduction.red_threshold)
+    method = gg.method.Expansion(diffusion=DenoisingDiffusionModel(num_steps=1))
     trainer = gg.training.Trainer(
         model=model, method=method, train_dataloader=loader,
         train_graphs=graphs_train, validation_graphs=graphs_val,

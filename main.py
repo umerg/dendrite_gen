@@ -77,8 +77,8 @@ def get_expansion_items(cfg: DictConfig, train_graphs, diffusion=None):
         train_dataset = gg.data.InfiniteRandRedDataset(
             adjs=adjs, poses=poses, tmds=tmds, red_factory=red_factory,
         )
-        is_mp = cfg.reduction.num_red_seqs < 0  # if infinite dataset
-        num_workers = min(mp.cpu_count(), cfg.training.max_num_workers) * is_mp
+        # InfiniteRandRedDataset is always infinite -> enable dataloader workers.
+        num_workers = min(mp.cpu_count(), cfg.training.max_num_workers)
     print("Training reduction sequences created.")
 
     # Dataloader
@@ -167,7 +167,6 @@ def get_expansion_items(cfg: DictConfig, train_graphs, diffusion=None):
     use_size_ratio = getattr(cfg.method, "use_size_ratio", True)
     method = gg.method.Expansion(
         diffusion=diffusion,
-        red_threshold=cfg.reduction.red_threshold,
         expansion_loss_weight=expansion_loss_weight,
         use_size_ratio=use_size_ratio,
         max_tree_size=getattr(cfg.method, "max_tree_size", 500),

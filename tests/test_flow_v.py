@@ -86,7 +86,7 @@ def test_v_forward_loss_finite():
     for time_dist in ("uniform", "beta"):
         diffusion = VFlowMatchingModel(num_steps=4, time_dist=time_dist)
         method = gg.method.Expansion(
-            diffusion=diffusion, red_threshold=cfg.reduction.red_threshold,
+            diffusion=diffusion,
         )
         res = method.get_loss(next(iter(loader)), model)
         if res is None:
