@@ -93,8 +93,6 @@ def build_model_diffusion_method(cfg):
 
     # ---- model (egnn) ----
     edge_embedding_nums, edge_embedding_dims, edge_attr_dim = [2], [4], 1
-    if cfg.method.name == "expansion_augmented":
-        edge_embedding_nums = [3]
     m = cfg.model
     model = gg.model.SO2_EGNN_Network(
         n_layers=m.num_layers, feats_dim=m.feats_dim, pos_dim=3, m_dim=m.m_dim,

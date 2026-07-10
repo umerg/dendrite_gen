@@ -36,13 +36,12 @@ conda run -n NEURO2 python -m pytest tests/test_forward_pass.py -v -k "test_name
 2. **Reduction**: Contract trees into multi-level sequences (CherryReducer or DepthReducer)
 3. **Dataset**: Wrap reduction sequences as PyG `Data` objects (InfiniteRandRedDataset / PrecomputedRedDataset)
 4. **Model**: SO2_EGNN_Network processes graph → predicts position offsets + expansion labels
-5. **Method**: Expansion_OneShot (direct) or Expansion (diffusion-wrapped) computes loss
+5. **Method**: Expansion (diffusion-wrapped) computes loss
 6. **Trainer**: Orchestrates training loop with EMA, LR scheduling, validation, checkpointing
 
 ### Key Modules
 - `graph_generation/model/egnn_so2.py` — Main model with SO(2) geometry, global linear attention
-- `graph_generation/method/expansion_oneshot.py` — One-shot expansion training/inference logic (no diffusion)
-- `graph_generation/method/expansion.py` — Diffusion-wrapped expansion; delegates denoising to `diffusion/basic.py` (will extend to EDM)
+- `graph_generation/method/expansion.py` — Diffusion-wrapped expansion; delegates denoising to `diffusion/` (basic, edm, flow, flow_v)
 - `graph_generation/method/helpers.py` — Geometry helpers (branch angles, L/R sibling assignment)
 - `graph_generation/reduction.py` — CherryReducer: stochastic graph contraction
 - `graph_generation/depth_reduction.py` — DepthReducer: deterministic depth-based contraction

@@ -5,7 +5,6 @@ from collections import defaultdict
 from pathlib import Path
 
 import hydra
-import networkx as nx
 import numpy as np
 import torch as th
 import torch.multiprocessing as mp
@@ -93,14 +92,10 @@ def get_expansion_items(cfg: DictConfig, train_graphs, diffusion=None):
         multiprocessing_context="spawn" if num_workers > 0 else None,
     )
 
-    # check if we augment the graph with extra edges
+    # Edge attribute carries a single label category (initial expansion label).
     edge_embedding_nums = [2]
     edge_embedding_dims = [4]
-    edge_attr_dim = 1  # initial edge attribute dimension - label category
-    if cfg.method.name == "expansion_augmented":
-        edge_embedding_nums = [3]
-        edge_embedding_dims = [4]
-        print(f"Using augmented expansion with edge embeddings: nums {edge_embedding_nums}, dims {edge_embedding_dims}")
+    edge_attr_dim = 1
 
     # Model
     print(f"Initializing model: {cfg.model.name}...")
@@ -144,24 +139,6 @@ def get_expansion_items(cfg: DictConfig, train_graphs, diffusion=None):
             rbf_rho_max=rbf_rho_max,
             rbf_du_max=rbf_du_max,
         )
-    elif cfg.model.name == "egnn_simple":
-        model = gg.model.SO2_EGNN_Sparse_Network_Simple(
-            n_layers=cfg.model.num_layers,
-            feats_dim=cfg.model.feats_dim,
-            pos_dim=3,
-            m_dim=cfg.model.m_dim,
-            edge_embedding_nums=edge_embedding_nums,
-            edge_embedding_dims=edge_embedding_dims,
-            edge_attr_dim=edge_attr_dim,
-            dropout=cfg.model.dropout,
-            norm_feats=cfg.model.norm_feats,
-            global_linear_attn_every=cfg.model.global_linear_attn_every,
-            global_linear_attn_heads=cfg.model.global_linear_attn_heads,
-            global_linear_attn_dim_head=cfg.model.global_linear_attn_dim_head,
-            num_global_tokens=cfg.model.num_global_tokens,
-            offset_head_hidden=cfg.model.offset_head_hidden,
-            # so2_axis=cfg.model.so2_axis,
-        )
     else:
         raise ValueError(f"Unknown model name: {cfg.model.name}")
     print("Model initialized.")
@@ -180,38 +157,21 @@ def get_expansion_items(cfg: DictConfig, train_graphs, diffusion=None):
     # else:
     #     raise ValueError(f"Unknown diffusion name: {cfg.diffusion.name}")
 
-    # Method
-    method = None
+    # Method — the live path is the diffusion-wrapped Expansion.
     method_name = cfg.method.name
-    if diffusion is not None:
-        if method_name != "expansion":
-            raise ValueError(
-                f"Diffusion-based runs require method 'expansion', got '{method_name}'."
-            )
-        expansion_loss_weight = getattr(cfg.method, "expansion_loss_weight", 1.0)
-        use_size_ratio = getattr(cfg.method, "use_size_ratio", True)
-        method = gg.method.Expansion(
-            diffusion=diffusion,
-            red_threshold=cfg.reduction.red_threshold,
-            expansion_loss_weight=expansion_loss_weight,
-            use_size_ratio=use_size_ratio,
-            max_tree_size=getattr(cfg.method, "max_tree_size", 500),
-        )
-    elif method_name == "expansion":
-        method = gg.method.Expansion_OneShot(
-            deterministic_expansion=cfg.method.deterministic_expansion,
-            leaf_noise_sigma=cfg.method.leaf_noise_sigma,
-            leaf_noise_clip=cfg.method.leaf_noise_clip,
-            sibling_loss_weight=cfg.method.sibling_loss_weight,
-            use_sibling_matching=cfg.method.use_sibling_matching,
-            use_geo_lr_mask=cfg.method.use_geo_lr_mask,
-            use_radial_distance=cfg.method.use_radial_distance,
-            debug=cfg.debugging,
-            debug_max_batches=cfg.debugging_max_batches,
-            debug_dir=cfg.debugging_dir,
-        )  # expansion with one-shot generation at every step
-    else:
+    if method_name != "expansion":
         raise ValueError(f"Unknown method name: {method_name}")
+    if diffusion is None:
+        raise ValueError("Expansion requires a diffusion block (basic | edm | flow | flow_v).")
+    expansion_loss_weight = getattr(cfg.method, "expansion_loss_weight", 1.0)
+    use_size_ratio = getattr(cfg.method, "use_size_ratio", True)
+    method = gg.method.Expansion(
+        diffusion=diffusion,
+        red_threshold=cfg.reduction.red_threshold,
+        expansion_loss_weight=expansion_loss_weight,
+        use_size_ratio=use_size_ratio,
+        max_tree_size=getattr(cfg.method, "max_tree_size", 500),
+    )
 
     return {
         "train_dataloader": train_dataloader,
@@ -292,12 +252,6 @@ def main(cfg: DictConfig):
     _ensure_root(validation_graphs)
     _ensure_root(test_graphs)
 
-    # keep only largest connected component for train graphs - IS THIS REDUNDANT? TODO
-    train_graphs = [
-        G.subgraph(max(nx.connected_components(G), key=len)) for G in train_graphs
-    ]
-    _ensure_root(train_graphs)
-
     diffusion_cfg = OmegaConf.select(cfg, "diffusion")
     diffusion = None
     if diffusion_cfg is not None:
@@ -329,10 +283,9 @@ def main(cfg: DictConfig):
             raise ValueError(f"Unknown diffusion name: {diffusion_name}")
 
     # Method
-    if cfg.method.name in ("expansion", "expansion_augmented", "expansion_0ed"):
-        method_items = get_expansion_items(cfg, train_graphs, diffusion=diffusion)
-    else:
+    if cfg.method.name != "expansion":
         raise ValueError(f"Unknown method name: {cfg.method.name}")
+    method_items = get_expansion_items(cfg, train_graphs, diffusion=diffusion)
     method_items = defaultdict(lambda: None, method_items)
     # verbose logging of method details
     print(f"Using method: {cfg.method.name}")
