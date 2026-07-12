@@ -135,9 +135,7 @@ def _make_minimal_cfg():
             contract_root=False,
         ),
         training=SimpleNamespace(batch_size=2, max_num_workers=0),
-        method=SimpleNamespace(
-            deterministic_expansion=False,
-        ),
+        method=SimpleNamespace(name="expansion"),
     )
 
 
