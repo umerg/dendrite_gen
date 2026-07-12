@@ -892,15 +892,46 @@ class Trainer:
             eval_plots_dir = self.output_dir / 'eval_plots'
             stem = f"step_{self.step}_beta_{beta}"
 
+            # Under class conditioning the first-8 grid is uninformative; instead show
+            # ONE neuron per class, labelled by class name, and track the same GT neuron
+            # (deterministic first-occurrence) across steps. pred_graphs[i] is aligned to
+            # eval_graphs[i], so each generated sample's class is its eval graph's class.
+            if class_hidden_dim > 0:
+                classes_sorted = sorted({
+                    g.graph.get("cell_class") for g in eval_graphs
+                    if g.graph.get("cell_class") is not None
+                })
+                sel_idx, class_labels = [], []
+                for c in classes_sorted:
+                    i = next((j for j, g in enumerate(eval_graphs)
+                              if g.graph.get("cell_class") == c), None)
+                    if i is None:
+                        continue
+                    sel_idx.append(i)
+                    class_labels.append(
+                        CELL_CLASS_NAMES[c] if 0 <= c < len(CELL_CLASS_NAMES) else f"id{c}"
+                    )
+                gen_graphs = [results["pred_graphs"][i] for i in sel_idx]
+                gt_graphs = [eval_graphs[i] for i in sel_idx]
+                gen_titles = [f"Gen {n}" for n in class_labels]
+                gt_titles = [f"GT {n}" for n in class_labels]
+                n_show = max(len(sel_idx), 1)
+            else:
+                gen_graphs = results["pred_graphs"][:max_examples]
+                gt_graphs = eval_graphs[:max_examples]
+                gen_titles = gt_titles = None
+                n_show = max_examples
+
             gen_fig, gen_path = plot_graph_grid_angles(
-                results["pred_graphs"][:max_examples],
+                gen_graphs,
                 out_dir=eval_plots_dir,
                 stem=stem,
                 file_tag="gen3d",
                 angles=angles,
                 uhat=uhat,
                 title_prefix="Gen",
-                max_graphs=max_examples,
+                per_graph_titles=gen_titles,
+                max_graphs=n_show,
             )
             results["examples"] = gen_fig
             results["examples_path"] = str(gen_path)
@@ -908,15 +939,16 @@ class Trainer:
             # GT references at the same angles for qualitative eyeballing
             # (the distribution metrics are the quantitative signal).
             ref_fig, ref_path = plot_graph_grid_angles(
-                eval_graphs[:max_examples],
+                gt_graphs,
                 out_dir=eval_plots_dir,
                 stem=stem,
                 file_tag="ref3d",
                 angles=angles,
                 uhat=uhat,
                 title_prefix="GT",
+                per_graph_titles=gt_titles,
                 node_color="#1f77b4",
-                max_graphs=max_examples,
+                max_graphs=n_show,
             )
             results["examples_compare"] = ref_fig
             results["examples_compare_path"] = str(ref_path)
