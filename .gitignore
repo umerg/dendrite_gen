@@ -163,3 +163,7 @@ sampling_experiments/artifacts/
 .vscode
 outputs
 AGENTS.md
+
+# Local shareable metric-study reports
+/visualization/metric_study/local_report/
+/output/pdf/tree_metric_inventory_report.pdf

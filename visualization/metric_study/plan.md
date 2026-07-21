@@ -71,7 +71,7 @@ The initial single-pair foundation is implemented:
 | TMD barcode Wasserstein | wrapper in `metrics/persistence.py`; canonical diagram distance remains in `visualization/tmd/distances.py` | path, height, and `rho` filtrations are intrinsically invariant |
 | Distribution Wasserstein | seven named morphology distributions in `metrics/distributions.py` | all current distributions are intrinsically invariant |
 | Fused Gromov-Wasserstein | opt-in POT-backed implementation with cable-length node mass in `metrics/fused_gw.py` | `xyz` features use the relative rotation minimum by default; `(z, rho)` is a cheaper information-discarding ablation |
-| Elastic SRVFT | explicit placeholder in `metrics/adapters/elastic_srvft.py` | external implementation still needs an SO(3)-to-SO(2) alignment audit |
+| Elastic SRVFT | opt-in adapter around an ignored local checkout; canonical rooted SWC to the upstream fixed-depth q-tree; reports alignment energy `E` | audited Python backend has no rotation optimizer; adapter applies an external relative `R_z` minimum with a coarse reported grid and optional refinement |
 
 `metrics/pair.py` provides the programmatic one-pair entry point, and
 `visualization/metric_study/run_pair.py` loads two SWCs and emits structured
@@ -251,9 +251,15 @@ large all-pairs study.
 - an explicitly constrained SO(2)-only shape quotient in place of the paper
   implementation's full SO(3) alignment
 
-Treat the external Python implementation as optional until its revision,
-license, dependencies, representation assumptions, and internal alignment code
-have been audited.
+The Python implementation was audited at revision
+`903a82c8ae9ec8692fea85ea57803ba727b438a1`. It exposes alignment energy `E`,
+not an established metric, and performs no rotation optimization; the adapter
+therefore supplies only the required relative SO(2) search. Its four-layer
+representation silently drops deeper branches, so the adapter rejects those
+trees by default. Radius is carried but unused in the audited energy. Keep the
+method optional because it requires Numba, a single evaluation can take tens of
+seconds, and the upstream README declares CC BY-NC 4.0 without a standalone
+license file.
 
 ### Topology and rooted structure
 
@@ -409,9 +415,10 @@ Use this order of preference:
 
 1. **Pinned package dependency.** If the repository is installable, reference a
    release or exact Git commit in the environment requirements.
-2. **Ignored local checkout under `metrics/external/<project>`** for the initial
-   API and license audit only. Install the checkout into the environment rather
-   than modifying `sys.path`.
+2. **Ignored local checkout under `metrics/external/<project>`** for an API and
+   license audit. When an audited repository is not packageable, an exact-path
+   `importlib` adapter may load it without modifying `sys.path`; it must detect
+   module collisions and record the actual checkout revision.
 3. **Pinned Git submodule** when the code is not packaged and must remain largely
    intact after the initial audit.
 4. **Isolated command-line adapter** when the external project has conflicting
@@ -498,9 +505,10 @@ installing every research repository.
 
 ## Immediate next step
 
-Run the single-pair command on two representative ground-truth neurons and
-inspect the raw values and alignment diagnostics. In parallel, place the
-Elastic SRVFT checkout under `metrics/external/` for an API/license/alignment
-audit. After that, provide one example class manifest (or the current class
-metadata source) so the deterministic pair table and class-aware study schema
-can be finalized.
+Run the single-pair command on two representative ground-truth neurons,
+including Elastic SRVFT as an opt-in family, and inspect energy, runtime,
+truncation, ordering, and SO(2) diagnostics. Use that result to decide whether
+the external method is feasible for the class study and whether its checkout
+can be pinned under the license terms. Then provide one example class manifest
+(or the current class metadata source) so the deterministic pair table and
+class-aware study schema can be finalized.
