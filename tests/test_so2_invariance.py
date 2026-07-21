@@ -5,6 +5,7 @@ import pytest
 
 from graph_generation.method.helpers import (
     _order_root_children_by_uhat,
+    _compute_tree_directions,
     compute_geo_order,
     compute_geo_angle_for_new_leaves,
 )
@@ -227,6 +228,95 @@ class TestComputeGeoOrder:
         assert ordinal[1].item() == pytest.approx(0.0, abs=1e-6)
         # Node 2 has higher z → should be child_1 → ordinal 1.0
         assert ordinal[2].item() == pytest.approx(1.0, abs=1e-6)
+
+
+class TestAxialExtentChild0Override:
+    """axial_extent mode: child0_override / apical_flag pins the apical to ordinal 0
+    (overriding the legacy most-negative-first-edge-uhat rule), while remaining
+    SO(2)-invariant about uhat."""
+
+    def test_override_forces_child0(self):
+        uhat = th.tensor([0.0, 0.0, 1.0])
+        offsets = th.tensor([
+            [1.0, 0.0, 2.0],    # highest z (legacy would rank last)
+            [0.5, 0.3, -1.0],   # lowest z (legacy child_0)
+            [0.7, -0.8, 0.3],
+        ])
+        # Force index 0 (NOT the legacy pick) to be child_0.
+        sorted_idx, fwd0, delta = _order_root_children_by_uhat(offsets, uhat, child0_override=0)
+        assert sorted_idx[0].item() == 0, "forced child must be ordinal 0"
+        assert delta[0].item() == pytest.approx(0.0, abs=1e-6)
+        # fwd0 anchors on child 0's perp direction
+        perp0 = offsets[0] - (offsets[0] @ uhat) * uhat
+        perp0 = perp0 / perp0.norm()
+        th.testing.assert_close(fwd0, perp0, atol=1e-5, rtol=1e-5)
+
+    def test_override_rotation_invariance(self):
+        uhat = th.tensor([0.0, 0.0, 1.0])
+        offsets = th.tensor([
+            [1.0, 0.5, 2.0],
+            [-0.3, 1.0, -1.0],
+            [0.7, -0.8, 0.3],
+        ])
+        sorted_ref, _, delta_ref = _order_root_children_by_uhat(offsets, uhat, child0_override=0)
+        assert sorted_ref[0].item() == 0
+        for angle in [0.5, 1.3, math.pi, 2.7]:
+            R = _rotation_matrix_around_axis(uhat, angle)
+            offsets_rot = (R @ offsets.T).T
+            sorted_rot, _, delta_rot = _order_root_children_by_uhat(
+                offsets_rot, uhat, child0_override=0,
+            )
+            assert th.equal(sorted_ref, sorted_rot)
+            _angles_close_mod2pi(delta_ref, delta_rot)
+
+    def test_override_degenerate_keeps_apical_first(self):
+        """On-axis children (zero perp): forced apical must still be first."""
+        uhat = th.tensor([0.0, 0.0, 1.0])
+        offsets = th.tensor([
+            [0.0, 0.0, 2.0],
+            [0.0, 0.0, -1.0],
+            [0.0, 0.0, 0.5],
+        ])
+        # Legacy would sort by z ascending -> (1, 2, 0); override keeps index 0 first.
+        sorted_idx, fwd0, _ = _order_root_children_by_uhat(offsets, uhat, child0_override=0)
+        assert sorted_idx[0].item() == 0, "forced apical must stay first in degenerate case"
+        assert fwd0.norm().item() < 1e-6
+
+    def test_apical_flag_pins_ordinal0(self):
+        """apical_flag threaded through _compute_tree_directions -> compute_geo_order
+        gives the flagged root child ordinal 0, overriding the legacy pick."""
+        uhat = th.tensor([0.0, 0.0, 1.0])
+        pos, parent_idx = _make_root_tree(4, uhat)  # nodes 1..4 at z=-0.5,-0.1,0.3,0.7
+        legacy_c0 = 1  # lowest z
+        flagged_node = 3  # a different root child
+        flag = th.zeros(pos.size(0), dtype=th.bool)
+        flag[flagged_node] = True
+
+        dirs = _compute_tree_directions(pos, parent_idx, uhat, apical_flag=flag)
+        ordinal, _ = compute_geo_order(pos, parent_idx, uhat, _directions=dirs)
+        assert ordinal[flagged_node].item() == pytest.approx(0.0, abs=1e-6)
+
+        # legacy path (no flag) instead assigns ordinal 0 to the lowest-z child
+        ordinal_legacy, _ = compute_geo_order(pos, parent_idx, uhat)
+        assert ordinal_legacy[legacy_c0].item() == pytest.approx(0.0, abs=1e-6)
+        assert ordinal_legacy[flagged_node].item() != pytest.approx(0.0, abs=1e-6)
+
+    def test_apical_flag_rotation_invariance(self):
+        # k=5 (not k=4): evenly-spaced children put one exactly opposite the reference,
+        # a measure-zero atan2 branch-cut degeneracy (see test_rotation_invariance_large_k).
+        uhat = th.tensor([0.0, 0.0, 1.0])
+        pos, parent_idx = _make_root_tree(5, uhat)
+        flag = th.zeros(pos.size(0), dtype=th.bool)
+        flag[3] = True
+        dirs = _compute_tree_directions(pos, parent_idx, uhat, apical_flag=flag)
+        ord_ref, dt_ref = compute_geo_order(pos, parent_idx, uhat, _directions=dirs)
+        for angle in [0.7, math.pi / 3, math.pi, 4.1]:
+            R = _rotation_matrix_around_axis(uhat, angle)
+            pos_rot = (R @ pos.T).T
+            dirs_rot = _compute_tree_directions(pos_rot, parent_idx, uhat, apical_flag=flag)
+            ord_rot, dt_rot = compute_geo_order(pos_rot, parent_idx, uhat, _directions=dirs_rot)
+            th.testing.assert_close(ord_ref, ord_rot, atol=1e-5, rtol=1e-5)
+            _angles_close_mod2pi(dt_ref, dt_rot)
 
 
 class TestComputeGeoAngleForNewLeaves:

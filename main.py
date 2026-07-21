@@ -46,6 +46,13 @@ def get_expansion_items(cfg: DictConfig, train_graphs, diffusion=None):
     tmd_filtrations = list(getattr(cfg.model, "tmd_filtrations", ("path", "height", "rho")))
     tmd_bins = int(getattr(cfg.model, "tmd_bins", 16))
     uhat = np.asarray(getattr(cfg.model, "so2_axis", (0.0, 0.0, 1.0)), dtype=float).reshape(3)
+    # Root-child ordinal criterion (gates BOTH dataset flag computation AND sampling handling;
+    # a checkpoint must be sampled in the same mode it was trained in). "first_edge" = legacy.
+    root_child_order = str(getattr(cfg.model, "root_child_order", "first_edge"))
+    if root_child_order not in ("first_edge", "axial_extent"):
+        raise ValueError(
+            f"cfg.model.root_child_order must be 'first_edge' or 'axial_extent', got {root_child_order!r}."
+        )
     # Cell-type (class) conditioning knobs (a categorical per-graph label, orthogonal to
     # the TMD structure conditioning). class_hidden_dim>0 turns it ON; num_classes is the
     # one-hot width fed to the model's class_lin.
@@ -85,14 +92,19 @@ def get_expansion_items(cfg: DictConfig, train_graphs, diffusion=None):
 
     print("Creating training reduction sequences...")
     # When depth reduction is deterministic, precompute all sequences once
+    if root_child_order == "axial_extent":
+        print("Root-child ordinal criterion: AXIAL_EXTENT (apical -> ordinal 0). "
+              "Sampling must use the same mode.")
     if reduction_type == "depth":
         train_dataset = gg.data.PrecomputedRedDataset(
             adjs=adjs, poses=poses, tmds=tmds, classes=classes, red_factory=red_factory,
+            uhat=uhat, root_child_order=root_child_order,
         )
         num_workers = 0  # data is precomputed, no worker computation needed
     else:
         train_dataset = gg.data.InfiniteRandRedDataset(
             adjs=adjs, poses=poses, tmds=tmds, classes=classes, red_factory=red_factory,
+            uhat=uhat, root_child_order=root_child_order,
         )
         # InfiniteRandRedDataset is always infinite -> enable dataloader workers.
         num_workers = min(mp.cpu_count(), cfg.training.max_num_workers)
@@ -159,6 +171,7 @@ def get_expansion_items(cfg: DictConfig, train_graphs, diffusion=None):
             rbf_gamma=rbf_gamma,
             rbf_rho_max=rbf_rho_max,
             rbf_du_max=rbf_du_max,
+            root_child_order=root_child_order,
         )
     else:
         raise ValueError(f"Unknown model name: {cfg.model.name}")

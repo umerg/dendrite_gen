@@ -331,13 +331,17 @@ def evaluate_teacher_forced(method, model, batches, uhat, device="cpu", level_mi
 
 
 # --------------------------------------------------------------------------- batch building
-def build_reduction_batches_from_graphs(graphs, reduction_cfg, batch_size, pos_scale_factor=1.0):
+def build_reduction_batches_from_graphs(graphs, reduction_cfg, batch_size, pos_scale_factor=1.0,
+                                        uhat=None, root_child_order="first_edge"):
     """Turn a list of nx graphs into fixed GT reduction batches (full coverage).
 
     Shared by the post-hoc CLI (`_build_eval_batches`) and `Trainer._tf_batches_for`, so batch
     construction is identical on both paths. Positions are divided by `pos_scale_factor` to match
     the training coordinate space. Reduction stochasticity is realized once here; callers cache the
     returned batches so the teacher-forced curve is comparable step-to-step.
+
+    ``root_child_order``/``uhat`` MUST match the trained model's setting so the teacher-forced
+    ordinals agree with training (axial_extent threads the apical flag; first_edge threads none).
     """
     import graph_generation as gg
     from torch_geometric.data import Batch
@@ -363,7 +367,8 @@ def build_reduction_batches_from_graphs(graphs, reduction_cfg, batch_size, pos_s
     # non-stratified TF numbers. Instead we fail fast -- _assemble_diffusion_inputs raises
     # "Expected batch.{tmd,cell_class}" when the model expects conditioning. Thread these here
     # (and stratify evaluate_teacher_forced) if/when per-class TF metrics are wanted.
-    ds = PrecomputedRedDataset(adjs, poses, rf, tmds=None)
+    ds = PrecomputedRedDataset(adjs, poses, rf, tmds=None,
+                               uhat=uhat, root_child_order=root_child_order)
     samples = ds.samples
     return [Batch.from_data_list(samples[i:i + batch_size]) for i in range(0, len(samples), batch_size)]
 
@@ -393,7 +398,12 @@ def _build_eval_batches(cfg, eval_dir, n_graphs, batch_size, gen_seed=1):
             raise ValueError("--eval-dir is required for SWC-loaded datasets (cfg.dataset.load=True).")
         graphs = load_swc_graphs_from_dir(eval_dir)
     graphs = graphs[:n_graphs]
-    batches = build_reduction_batches_from_graphs(graphs, cfg.reduction, batch_size, pos_scale_factor=psf)
+    _uhat = np.asarray(getattr(cfg.model, "so2_axis", (0.0, 0.0, 1.0)), dtype=float).reshape(3)
+    _rco = str(getattr(cfg.model, "root_child_order", "first_edge"))
+    batches = build_reduction_batches_from_graphs(
+        graphs, cfg.reduction, batch_size, pos_scale_factor=psf,
+        uhat=_uhat, root_child_order=_rco,
+    )
     return batches, len(graphs)
 
 

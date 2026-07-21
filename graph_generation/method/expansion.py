@@ -410,6 +410,25 @@ class Expansion(Method):
         geo_feat_all = pre_geom_p0['geo_ordinal'].clamp(min=0.0).clone()
         geo_feat_all[leaf_idx_next] = geo_angle_new  # raw child index (0, 1, ..., k-1)
 
+        # axial_extent mode: SKIP the per-step ordinal *correction* for root children.
+        # Keep their assign-once index-order (== spawn-slot) ordinal so that slot 0 = apical
+        # (the child the model was trained to grow deepest) stays fixed across all steps,
+        # matching the training-time apical flag. Deeper/binary nodes keep their geometric
+        # correction (already in geo_feat_all). See docs/APICAL_AXIAL_ERROR_MODE.md §5.
+        if getattr(model, "root_child_order", "first_edge") == "axial_extent":
+            is_root_node = parent_idx_new_0b < 0
+            is_root_child = (parent_idx_new_0b >= 0) & is_root_node[parent_idx_new_0b.clamp(min=0)]
+            rc_idx = is_root_child.nonzero(as_tuple=False).flatten()
+            if rc_idx.numel() > 0:
+                # rank within each parent by ascending node index (= creation/spawn order)
+                order = th.argsort(parent_idx_new_0b[rc_idx], stable=True)
+                rc_sorted = rc_idx[order]
+                _, counts = th.unique_consecutive(
+                    parent_idx_new_0b[rc_sorted], return_counts=True
+                )
+                ranks = th.cat([th.arange(int(c), device=device) for c in counts])
+                geo_feat_all[rc_sorted] = ranks.to(geo_feat_all.dtype)
+
         # --- Assemble node features --- (MAX_CHILDREN is module-level)
         feats_total = getattr(model, "feats_dim", 0)
         tmd_hidden_dim = getattr(model, "tmd_hidden_dim", 0)
@@ -623,10 +642,17 @@ class Expansion(Method):
         # --- compute full geometry on P_0 (geo_lr + SO(2) angles + edge decomposition)
         _t_glr_0 = _t(pos_gt.device)
         uhat = model.uhat
+        # axial_extent mode: per-node bool flagging each graph's apical root child (deepest
+        # -uhat subtree, computed once on the finest tree by the dataset). Pins it to ordinal 0.
+        # Absent in legacy first_edge mode -> None -> geometry uses the first-edge rule.
+        apical_flag = getattr(batch, "is_apical_root_child", None)
+        if apical_flag is not None:
+            apical_flag = apical_flag.to(device=pos_gt.device)
         with th.no_grad():
             pre_geom_p0 = precompute_full_geometry(
                 pos_gt, parent_idx, edge_index, uhat,
                 debug=getattr(self, "debug", False),
+                apical_flag=apical_flag,
             )
         # --- Convert targets to local frame for SO(2)-equivariant loss
         local_fwd = pre_geom_p0['local_forward']

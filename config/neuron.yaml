@@ -74,6 +74,12 @@ model:
   offset_head_hidden: 256
   use_global_fallback_frames: False
   so2_axis: [0., 1., 0.] # z-axis for trees, y-axis for neurons
+  # Root-child ordinal-0 criterion. first_edge = legacy (child_0 = most-negative first-edge
+  # uhat component). axial_extent = pin ordinal 0 (and fwd0) to the root child whose SUBTREE
+  # reaches deepest along -uhat (the apical); ~97% apical fidelity vs ~62% for first_edge.
+  # Gates BOTH training (dataset apical flag) and sampling (skip root-child ordinal correction);
+  # a checkpoint must be sampled in the mode it was trained in.
+  root_child_order: axial_extent  # first_edge | axial_extent
   # RBF edge-distance kernel (default OFF). Set rbf_k>0 to expand rho/du into Gaussian
   # channels instead of raw scalars. Ranges are in pos_scale_factor-normalized units.
   rbf_k: 0              # >0 = rbf_k Gaussian channels per distance (recommended 16); 0 = raw scalar

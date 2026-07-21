@@ -28,6 +28,12 @@ class ReducedGraphData(Data):
                     (constant across reduction levels) carried like `tmd`; it is
                     intentionally NOT in the __inc__ offset tuple below, so PyG
                     batching concatenates it to (B,) without node-index offsetting.
+      - is_apical_root_child: per-node BoolTensor shape [N], True for the single root
+                    child whose subtree reaches deepest along -uhat (the apical), used
+                    (in `root_child_order='axial_extent'` mode) to pin it to ordinal 0.
+                    None in legacy first_edge mode. A per-node mask (NOT a node index),
+                    so it is intentionally absent from __inc__ — batching concatenates it
+                    per-node, aligned with `pos`/`parent_idx_1b`.
     """
     def __init__(self, **kwargs):
         super().__init__()

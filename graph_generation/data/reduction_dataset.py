@@ -15,15 +15,61 @@ class RandRedDataset(IterableDataset, ABC):
     Expects ReductionFactory to yield a stateful reducer (e.g., CherryReduction).
     No spectral features; only structural fields needed by the expansion model.
     """
-    def __init__(self, adjs, poses, red_factory: ReductionFactory, tmds=None, classes=None):
+    def __init__(self, adjs, poses, red_factory: ReductionFactory, tmds=None, classes=None,
+                 uhat=None, root_child_order="first_edge"):
         super().__init__()
         self.red_factory = red_factory
         self.adjs = adjs  # list of scipy.sparse adjacency arrays (float64 okay)
         self.poses = poses  # list of np.ndarray, each of shape (n, 3) for 3D positions
         self.tmds = tmds  # list of np.ndarray, each of shape (D,) or (1, D)
         self.classes = classes  # list of int cell-class ids (one per source graph), or None
+        # Root-child ordinal criterion. "first_edge" (default) reproduces the legacy behaviour
+        # (geometry picks child_0 = most-negative first-edge uhat component). "axial_extent"
+        # marks the root child whose SUBTREE reaches deepest along -uhat (the apical) so the
+        # geometry pins it to ordinal 0; requires `uhat`.
+        self.root_child_order = root_child_order
+        self.uhat = (
+            np.asarray(uhat, dtype=np.float64).reshape(3) if uhat is not None else None
+        )
 
-    def _build_reduced_graph_data(self, graph, pos, forced_new_leaf_idx=None, tmd=None, cell_class=None):
+    def _compute_apical_flag(self, graph, pos):
+        """Per-node bool array (finest-tree indexing) flagging the single root child
+        whose subtree reaches DEEPEST along -uhat (the apical). Returns None unless
+        `root_child_order == 'axial_extent'` (legacy first_edge mode threads no flag).
+
+        Computed once on the finest tree; the caller slices it by `survivor_mask` at
+        every reduction level (parallel to `pos`) so it stays aligned with node indexing.
+        The flagged root child never contracts, so exactly one True survives per level.
+        """
+        if self.root_child_order != "axial_extent" or self.uhat is None:
+            return None
+        state = graph._state
+        root = state.root
+        if root is None:
+            return None
+        children = state.children.get(root, [])
+        if len(children) == 0:
+            return None
+        axial = pos.astype(np.float64) @ self.uhat  # (n,) projection along uhat
+        best_child, best_reach = None, np.inf
+        for c in children:
+            # deepest -uhat reach = min projection over c's subtree (DFS via children map)
+            reach = axial[c]
+            stack = list(state.children.get(c, []))
+            while stack:
+                v = stack.pop()
+                if axial[v] < reach:
+                    reach = axial[v]
+                stack.extend(state.children.get(v, []))
+            if reach < best_reach:
+                best_reach, best_child = reach, c
+        flag = np.zeros(graph.n, dtype=bool)
+        if best_child is not None:
+            flag[best_child] = True
+        return flag
+
+    def _build_reduced_graph_data(self, graph, pos, forced_new_leaf_idx=None, tmd=None,
+                                  cell_class=None, is_apical=None):
         """Helper: convert reducer state into ReducedGraphData."""
         if graph.leaf_idx is not None:
             leaf_idx = graph.leaf_idx
@@ -88,6 +134,7 @@ class RandRedDataset(IterableDataset, ABC):
             num_root_children=num_root_children,
             tmd=tmd,
             cell_class=cell_class_arr,
+            is_apical_root_child=is_apical,
         )
 
     def get_random_reduction_sequence(self, graph, pos, rng, tmd=None, cell_class=None):
@@ -98,6 +145,9 @@ class RandRedDataset(IterableDataset, ABC):
         data = []
 
         pos = pos.astype(np.float32)
+        # Computed once on the finest tree; sliced by survivor_mask each level (parallel to pos)
+        # so it stays aligned with node indexing. None in legacy first_edge mode.
+        is_apical = self._compute_apical_flag(graph, pos)
         while True:
             reduced_graph = graph.get_reduced_graph()  # use the reducer's internal RNG
 
@@ -109,7 +159,8 @@ class RandRedDataset(IterableDataset, ABC):
                     forced_new = np.array(children, dtype=np.int64)
 
             rgd = self._build_reduced_graph_data(
-                graph, pos, forced_new_leaf_idx=forced_new, tmd=tmd, cell_class=cell_class
+                graph, pos, forced_new_leaf_idx=forced_new, tmd=tmd, cell_class=cell_class,
+                is_apical=is_apical,
             )
             data.append(rgd)
 
@@ -117,6 +168,8 @@ class RandRedDataset(IterableDataset, ABC):
                 break
 
             pos = pos[reduced_graph.survivor_mask]  # update positions to surviving nodes
+            if is_apical is not None:
+                is_apical = is_apical[reduced_graph.survivor_mask]  # keep aligned with pos
             graph = reduced_graph  # advance to next level
 
         return data
@@ -126,8 +179,10 @@ class FiniteRandRedDataset(RandRedDataset):
     """
     Precompute K random reduction sequences per input graph.
     """
-    def __init__(self, adjs, poses, red_factory: ReductionFactory, num_red_seqs: int, tmds=None, classes=None):
-        super().__init__(adjs, poses, red_factory, tmds=tmds, classes=classes)
+    def __init__(self, adjs, poses, red_factory: ReductionFactory, num_red_seqs: int, tmds=None,
+                 classes=None, uhat=None, root_child_order="first_edge"):
+        super().__init__(adjs, poses, red_factory, tmds=tmds, classes=classes,
+                         uhat=uhat, root_child_order=root_child_order)
         self.num_red_seqs = int(num_red_seqs)
 
         self.rng = np.random.default_rng(seed=0)
@@ -159,8 +214,10 @@ class PrecomputedRedDataset(RandRedDataset):
     One epoch = one pass through all samples (N graphs × M_i levels each).
     Infinite iteration: reshuffles after each epoch.
     """
-    def __init__(self, adjs, poses, red_factory: ReductionFactory, tmds=None, classes=None):
-        super().__init__(adjs, poses, red_factory, tmds=tmds, classes=classes)
+    def __init__(self, adjs, poses, red_factory: ReductionFactory, tmds=None, classes=None,
+                 uhat=None, root_child_order="first_edge"):
+        super().__init__(adjs, poses, red_factory, tmds=tmds, classes=classes,
+                         uhat=uhat, root_child_order=root_child_order)
         self.samples = []
         rng = np.random.default_rng(seed=0)
 

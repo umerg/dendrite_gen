@@ -572,10 +572,16 @@ class SO2_EGNN_Network(nn.Module):
                  # offset head
                  LR_offset_head=False,
                  offset_head_hidden=128,
+                 # root-child ordinal criterion: "first_edge" (legacy) | "axial_extent" (apical=ordinal 0)
+                 root_child_order="first_edge",
                  ):
         super().__init__()
 
-        self.n_layers         = n_layers 
+        self.n_layers         = n_layers
+        # Read by Expansion.expand() at sampling: in "axial_extent" mode the per-step ordinal
+        # correction is skipped for root children (their index-order/spawn-slot ordinal is kept,
+        # so slot 0 = apical stays fixed, matching the training-time apical flag).
+        self.root_child_order = root_child_order
 
         # Embeddings? solve here
         self.embedding_nums   = embedding_nums

@@ -654,8 +654,14 @@ class Trainer:
                 else self.cfg.training.batch_size
             )
             psf = self.pos_scale_factor if self.pos_scale_factor is not None else 1.0
+            # Match the trained model's root-child ordinal mode so TF ordinals == training.
+            uhat = np.asarray(
+                getattr(self.cfg.model, "so2_axis", (0.0, 0.0, 1.0)), dtype=float
+            ).reshape(3)
+            rco = str(getattr(self.cfg.model, "root_child_order", "first_edge"))
             batches = build_reduction_batches_from_graphs(
-                graphs, self.cfg.reduction, bs, pos_scale_factor=float(psf))
+                graphs, self.cfg.reduction, bs, pos_scale_factor=float(psf),
+                uhat=uhat, root_child_order=rco)
             self._tf_batch_cache[key] = batches
         return batches
 
