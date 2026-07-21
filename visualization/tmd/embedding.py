@@ -9,7 +9,14 @@ from typing import Literal, Mapping, Sequence
 
 import numpy as np
 
-from dendrite_gen.utils.tmd_conditioning_utils import persistence_image
+try:
+    from dendrite_gen.utils.tmd_conditioning_utils import persistence_image
+except ModuleNotFoundError as exc:
+    if exc.name != "dendrite_gen":
+        raise
+    from utils.tmd_conditioning_utils import persistence_image  # type: ignore
+
+from .distances import persistence_diagram_wasserstein_distance
 
 
 ReducerName = Literal["auto", "umap", "pca"]
@@ -217,48 +224,6 @@ def reduce_tmd_embedding_records(
     return TmdEmbeddingResult(records=list(records), coords=coords, reducer="pca")
 
 
-def persistence_diagram_wasserstein_distance(
-    diagram_a: object,
-    diagram_b: object,
-    *,
-    order: int = 1,
-) -> float:
-    """Compute a persistence-diagram Wasserstein distance with diagonal matching."""
-    if order < 1:
-        raise ValueError("Wasserstein order must be >= 1.")
-
-    pairs_a = _canonical_persistent_pairs(_diagram_pairs(diagram_a))
-    pairs_b = _canonical_persistent_pairs(_diagram_pairs(diagram_b))
-    n_a = pairs_a.shape[0]
-    n_b = pairs_b.shape[0]
-
-    if n_a == 0 and n_b == 0:
-        return 0.0
-    if n_a == 0:
-        return float(np.sum(_diagonal_distances(pairs_b) ** order) ** (1.0 / order))
-    if n_b == 0:
-        return float(np.sum(_diagonal_distances(pairs_a) ** order) ** (1.0 / order))
-
-    from scipy.optimize import linear_sum_assignment
-
-    cost = np.zeros((n_a + n_b, n_b + n_a), dtype=np.float64)
-    cost[:n_a, :n_b] = _pairwise_l2_distances(pairs_a, pairs_b) ** order
-    cost[:n_a, n_b:] = np.repeat(
-        (_diagonal_distances(pairs_a) ** order)[:, None],
-        n_a,
-        axis=1,
-    )
-    cost[n_a:, :n_b] = np.repeat(
-        (_diagonal_distances(pairs_b) ** order)[None, :],
-        n_b,
-        axis=0,
-    )
-
-    row_ind, col_ind = linear_sum_assignment(cost)
-    total = float(cost[row_ind, col_ind].sum())
-    return float(total ** (1.0 / order))
-
-
 def pair_persistence_diagram_distances(
     records: Sequence[TmdDiagramRecord],
     *,
@@ -310,35 +275,6 @@ def pair_persistence_diagram_distances(
             )
         )
     return pair_records
-
-
-def _canonical_persistent_pairs(pairs: np.ndarray) -> np.ndarray:
-    """Return finite (birth, death) pairs with positive persistence."""
-    pairs = np.asarray(pairs, dtype=np.float64)
-    if pairs.size == 0:
-        return np.zeros((0, 2), dtype=np.float64)
-    pairs = pairs.reshape(-1, 2)
-    finite = np.isfinite(pairs).all(axis=1)
-    pairs = pairs[finite]
-    if pairs.size == 0:
-        return np.zeros((0, 2), dtype=np.float64)
-    lo = np.minimum(pairs[:, 0], pairs[:, 1])
-    hi = np.maximum(pairs[:, 0], pairs[:, 1])
-    pairs = np.stack([lo, hi], axis=1)
-    persistent = (pairs[:, 1] - pairs[:, 0]) > 1e-12
-    return pairs[persistent]
-
-
-def _diagonal_distances(pairs: np.ndarray) -> np.ndarray:
-    """Euclidean distance from each birth/death point to the diagonal."""
-    if pairs.size == 0:
-        return np.zeros((0,), dtype=np.float64)
-    return np.abs(pairs[:, 1] - pairs[:, 0]) / np.sqrt(2.0)
-
-
-def _pairwise_l2_distances(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    diff = a[:, None, :] - b[None, :, :]
-    return np.linalg.norm(diff, axis=2)
 
 
 def write_tmd_embedding_points_csv(result: TmdEmbeddingResult, out_path: Path) -> Path:
