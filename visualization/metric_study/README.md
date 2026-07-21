@@ -1,9 +1,135 @@
-# Single-pair tree metric study
+# Ground-truth tree metric study
 
 The first milestone compares exactly two ground-truth SWC trees. It does not
 load prediction pickles, model outputs, labels, or dataset-specific pairings.
 Metric implementations live in the top-level `metrics/` package; this folder
-owns study commands, plans, and eventually analysis/visualization code.
+owns study commands, dataset selection, and analysis plots.
+
+## Run a balanced class comparison
+
+The class-comparison runner reads `cell_class` and `cell_type` from each SWC
+header, selects the same number of trees from every class, prepares each tree
+once, and computes a symmetric distance matrix. The default first metric is
+path-filtration TMD Wasserstein. It is inexpensive after its persistence
+diagrams are cached and does not require an angular search.
+
+The labelled `neurons_conditional` dataset currently contains seven classes.
+Its test split has ten examples in the smallest class, so the default run uses
+ten trees per class (70 trees and 2,415 distinct off-diagonal pairs):
+
+```bash
+source /Users/speltonen/miniconda3/bin/activate trees
+python -m visualization.metric_study.run_class_comparison \
+  --dataset-root /absolute/path/to/neurons_conditional \
+  --splits test \
+  --metric tmd_path_wasserstein \
+  --per-class 10
+```
+
+The ignored output directory contains the selected-tree table, class counts,
+the reusable compressed distance matrix, run metadata, a class-colored MDS
+embedding, an individual-tree distance heatmap grouped by class, and a
+class-to-class median heatmap.
+
+Metrics are registered as configured scalar variants in `metric_registry.py`.
+Each variant implements `prepare(graph)` and `compare(prepared_a, prepared_b)`;
+the dataset, matrix, and plotting code does not need to change when a new
+variant is added.
+
+## Run resumable distance matrices
+
+`run_distance_matrices` computes one checkpointed symmetric matrix per scalar
+metric. It prepares each selected tree once, computes only the strict upper
+triangle, and resumes from a fixed saved tree manifest. Elastic SRVFT is not an
+accepted metric in this runner.
+
+The selection modes are:
+
+- `balanced --per-class N`: choose up to `N` trees from every selected class;
+  a smaller class contributes all of its available trees (the default cap is
+  ten).
+- `random --count N`: choose `N` trees from the pooled selected classes.
+- `all`: use every tree remaining after the split and class filters.
+- `manifest --selection-manifest FILE`: use the listed `tree_id` values in order.
+
+For example, this runs Chamfer, all three persistence variants, and all seven
+distribution-Wasserstein variants on ten test trees per class:
+
+```bash
+source /Users/speltonen/miniconda3/bin/activate trees
+python -u -m visualization.metric_study.run_distance_matrices \
+  --splits test \
+  --selection balanced \
+  --per-class 10 \
+  --metrics chamfer persistence distributions \
+  --so2-grid-size 72 \
+  --so2-refinement-tolerance 1e-8 \
+  --output-dir outputs/metric_study/matrices/balanced_test_10_seed0
+```
+
+Add `fgw` to the metric list when the dense FGW cost is acceptable, or use
+`--metrics all` for all twelve current non-Elastic scalar outputs.
+`--no-so2-refine` disables local refinement after the grid search. The angular
+settings affect Chamfer and `xyz`-feature FGW; the current persistence and
+distribution variants are already invariant to the specified SO(2) action.
+The runner first applies the proper coordinate change
+`(x, y, z) -> (x, -z, y)`, so its internal z-axis search implements the
+scientific y-axis quotient used in the submission.
+
+To detach the same run from the terminal, put `nohup` output outside the new
+run directory (the runner requires that directory to be empty):
+
+```bash
+mkdir -p outputs/metric_study/background
+nohup /bin/zsh -lc '
+source /Users/speltonen/miniconda3/bin/activate trees
+exec python -u -m visualization.metric_study.run_distance_matrices \
+  --splits test \
+  --selection balanced \
+  --per-class 10 \
+  --metrics chamfer persistence distributions \
+  --so2-grid-size 72 \
+  --output-dir outputs/metric_study/matrices/balanced_test_10_seed0
+' > outputs/metric_study/background/balanced_test_10_seed0.log 2>&1 &
+```
+
+### Slurm with multiple CPUs
+
+The Slurm folder contains one reusable job and a small launcher. Running the
+launcher without arguments submits four independent jobs: Chamfer, the three
+barcode distances, the seven distribution distances, and FGW.
+
+```bash
+bash visualization/metric_study/slurm/submit_metric_families.sh
+```
+
+By default Chamfer requests 16 CPUs, barcode and distribution jobs request 8
+each, and FGW requests 16. These can be changed at submission time, and a
+subset of jobs can be named explicitly:
+
+```bash
+CHAMFER_CPUS=96 FGW_CPUS=24 \
+  bash visualization/metric_study/slurm/submit_metric_families.sh chamfer fgw
+```
+
+The defaults follow the storage and conda layout of the older GraphPE Slurm
+template. Override `PROJECT_ROOT`, `CONDA_ROOT`, `DATASET_ROOT`, or
+`OUTPUT_ROOT` in the same way if the cluster checkout differs. Each job uses a
+balanced sample capped at 50 neurons per class and resumes automatically when
+its output directory already contains a run.
+
+After an interruption, repeat the exact scientific configuration with
+`--resume`; already terminal pairs are skipped. Add `--retry-errors` only when
+failed pairs should be attempted again. Resume also verifies the SWC contents,
+coordinate frame, metric source code, and relevant package versions, so it
+will refuse to mix results from different inputs or implementations. A lock
+prevents two processes from writing the same run. `progress.json` summarizes
+the run, `selected_trees.csv` fixes matrix row order, and each
+`metrics/<metric-name>/` directory contains `distances.npy`, `status.npy`, and
+recorded configuration. Distances are mirrored, while the separate status
+matrix distinguishes pending, undefined, failed, and successfully computed
+pairs. A completed run containing failed cells exits nonzero and reports
+`complete_with_errors`.
 
 ## Run one pair
 
@@ -46,12 +172,30 @@ python -m visualization.metric_study.run_pair \
 ```
 
 FGW uses root-centered `xyz` features and the relative SO(2) quotient. Its
-default node masses approximate cable length by assigning half of each edge to
+default node masses approximate neurite length by assigning half of each edge to
 each endpoint; raw uniform-node mass remains an explicit ablation. FGW still
 uses one shared pairwise scale for structural costs and one for node features;
 `--fgw-normalization none` retains physical units. It forms dense node-pair
 matrices and repeats the solver over the angle search, so the CLI refuses trees
 above 1000 nodes unless the limit is deliberately changed.
+
+Elastic SRVFT alignment energy is also opt-in. With the clone at the expected
+location, run:
+
+```bash
+source /Users/speltonen/miniconda3/bin/activate trees
+python -m pip install -r metrics/external/elastic_srvft/python_distance/requirements.txt
+python -m visualization.metric_study.run_pair \
+  --tree-a /absolute/path/to/tree_a.swc \
+  --tree-b /absolute/path/to/tree_b.swc \
+  --metrics elastic_srvft \
+  --elastic-so2-grid-size 8
+```
+
+The family has a separate coarse angular grid because every angle runs the
+external elastic alignment. Local refinement is opt-in with
+`--elastic-so2-refine`; `--elastic-symmetrization mean` roughly doubles the
+work. Use `--help` for weights, checkout, depth policy, and radius fallback.
 
 Use `--help` to select metric families and expose the preprocessing choices.
 The JSON records the settings that affect interpretation.
@@ -62,13 +206,21 @@ distributions have value zero but status `both_empty`.
 
 ## SO(2) contract
 
-The preferred axis is `z`. Chamfer is minimized over relative rotations about
-that axis by default. FGW's default `xyz` features use the same relative SO(2)
-minimum. Its optional `--fgw-feature-mode axis` variant uses `(z, rho)` and is
-already invariant, but deliberately discards azimuthal information. The
+The low-level metric APIs use `z` as their internal preferred axis. Dataset
+study commands map the submission's scientific `y` axis to it with the proper
+coordinate change stated above. Chamfer and FGW's default `xyz` features then
+use the same relative SO(2) minimum. The optional FGW
+`--fgw-feature-mode axis` variant uses `(z, rho)` and is already invariant, but
+deliberately discards azimuthal information. The
 selected TMD filtrations and morphology distributions are intrinsically
 SO(2)-invariant. `--no-so2-quotient` is retained only as an explicit diagnostic
 variant.
+
+Elastic SRVFT is likewise minimized externally over `R_z(theta)`. The audited
+backend itself performs no rotation optimization, and the adapter never
+introduces full-SO(3) rotations. The default eight-point grid is a reported
+numerical approximation; increase it or enable refinement when accuracy rather
+than a first runtime check is the priority.
 
 The numerical quotient group never tilts the preferred axis and never includes
 reflections or axis flips. This does not mean every summary is sensitive to
@@ -80,11 +232,23 @@ SO(2) search group.
 
 ## External Elastic SRVFT code
 
-For the initial audit, a local clone can go under
-`metrics/external/<repository-name>/`; checkout contents there are ignored by
-Git. Keep project-facing calls behind `metrics/adapters/elastic_srvft.py`.
-Before enabling the adapter, pin a revision, check its license and API, and
-replace or constrain any internal full-SO(3) alignment so the comparison uses
-the required SO(2)-only quotient.
+The adapter is enabled and expects the ignored clone at
+`metrics/external/elastic_srvft/`. A missing checkout or Numba dependency gives
+an actionable error. The output is the upstream alignment energy `E`, which is
+a dissimilarity and has not been established here as a metric. It is
+directional unless explicit mean symmetrization is selected.
+
+The upstream data model is limited to four branch layers. The adapter raises
+before silent truncation by default, rejects zero-length edges that can hang
+the upstream decomposition, and records unresolved canonical branch-order
+ties. Radius is carried through the representation but does not affect the
+audited energy. A quotient can take minutes for full neurons, so benchmark a
+representative pair before a class-wide run.
+
+The audited checkout was revision
+`903a82c8ae9ec8692fea85ea57803ba727b438a1`; each result records the actual
+local revision because the clone is ignored. Its README declares CC BY-NC 4.0
+and requests contact for commercial uses or derivatives; it has no standalone
+license file at that revision.
 
 See `plan.md` for the broader class-aware comparison study.
