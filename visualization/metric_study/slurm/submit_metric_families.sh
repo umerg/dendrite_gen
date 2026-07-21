@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="/itet-stor/speltonen/net_scratch/generating-trees/dendrite_gen/visualization/metric_study/slurm"
 SBATCH_SCRIPT="${SCRIPT_DIR}/metric_family.sbatch"
 
 PERMANENT_STORAGE_DIR="${PERMANENT_STORAGE_DIR:-/itet-stor/speltonen/net_scratch}"
