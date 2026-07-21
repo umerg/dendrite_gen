@@ -4,6 +4,10 @@ The package intentionally keeps plotting and dataset orchestration elsewhere.
 Optional third-party backends, such as POT's solver, are loaded only when used.
 """
 
+from .adapters.elastic_srvft import (
+    ElasticSRVFTResult,
+    elastic_srvft_distance,
+)
 from .chamfer import (
     ChamferResult,
     point_chamfer_components,
@@ -23,8 +27,11 @@ from .distributions import (
 from .fused_gw import (
     FusedGWResult,
     MassMode,
+    PreparedFusedGWTree,
     fused_gromov_wasserstein_distance,
+    fused_gromov_wasserstein_distance_prepared,
     fused_gw_distance,
+    prepare_fused_gw_tree,
 )
 from .pair import (
     AVAILABLE_METRIC_FAMILIES,
@@ -51,19 +58,24 @@ __all__ = [
     "DEFAULT_METRIC_FAMILIES",
     "DistributionWassersteinResult",
     "EmpiricalTreeDistribution",
+    "ElasticSRVFTResult",
     "FusedGWResult",
     "MassMode",
+    "PreparedFusedGWTree",
     "SO2Minimum",
     "all_default_distribution_wasserstein_distances",
     "compare_tree_pair",
     "compute_tmd_diagrams",
     "distribution_wasserstein_distance",
     "distribution_wasserstein_result",
+    "elastic_srvft_distance",
     "fused_gromov_wasserstein_distance",
+    "fused_gromov_wasserstein_distance_prepared",
     "fused_gw_distance",
     "minimize_over_so2",
     "point_chamfer_components",
     "point_chamfer_distance",
+    "prepare_fused_gw_tree",
     "rotate_points_about_axis",
     "rotation_matrix_about_axis",
     "sample_tree_points",

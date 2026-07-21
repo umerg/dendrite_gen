@@ -18,7 +18,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from metrics.fused_gw import fused_gromov_wasserstein_distance
+from metrics.fused_gw import (
+    fused_gromov_wasserstein_distance,
+    fused_gromov_wasserstein_distance_prepared,
+    prepare_fused_gw_tree,
+)
 from metrics.so2 import rotate_points_about_axis
 
 
@@ -73,6 +77,30 @@ def test_distance_is_approximately_symmetric() -> None:
     assert forward.value == pytest.approx(reverse.value, rel=1e-7, abs=1e-9)
 
 
+def test_prepared_api_matches_direct_api() -> None:
+    tree_1 = _asymmetric_tree()
+    tree_2 = _second_tree()
+
+    direct = fused_gromov_wasserstein_distance(
+        tree_1,
+        tree_2,
+        feature_mode="xyz",
+        grid_size=8,
+        refine=False,
+    )
+    prepared = fused_gromov_wasserstein_distance_prepared(
+        prepare_fused_gw_tree(tree_1),
+        prepare_fused_gw_tree(tree_2),
+        feature_mode="xyz",
+        grid_size=8,
+        refine=False,
+    )
+
+    assert prepared.value == pytest.approx(direct.value, rel=1e-12, abs=1e-12)
+    assert prepared.angle_rad == pytest.approx(direct.angle_rad)
+    assert prepared.objective_evaluations == direct.objective_evaluations == 8
+
+
 def test_axis_features_are_so2_invariant_without_search() -> None:
     tree = _asymmetric_tree()
     rotated = _rotate_tree(tree, 0.731)
@@ -110,6 +138,7 @@ def test_xyz_quotient_recovers_rotated_asymmetric_tree() -> None:
     assert aligned.feature_mode == "xyz"
     assert aligned.mass_mode == "cable_length"
     assert aligned.quotient_so2 is True
+    assert aligned.objective_evaluations >= aligned.grid_size == 36
     assert 0.0 <= aligned.angle_rad < 2.0 * np.pi
 
 

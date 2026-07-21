@@ -9,10 +9,16 @@ entry point.
 from __future__ import annotations
 
 from dataclasses import asdict
+from pathlib import Path
 from typing import Literal, Sequence
 
 import networkx as nx
 
+from .adapters.elastic_srvft import (
+    DepthPolicy,
+    Symmetrization,
+    elastic_srvft_distance,
+)
 from .chamfer import Reduction, tree_chamfer_distance
 from .distributions import (
     DEFAULT_DISTRIBUTIONS,
@@ -29,12 +35,19 @@ from .persistence import (
 )
 
 
-MetricFamily = Literal["chamfer", "persistence", "distributions", "fgw"]
+MetricFamily = Literal[
+    "chamfer",
+    "persistence",
+    "distributions",
+    "fgw",
+    "elastic_srvft",
+]
 AVAILABLE_METRIC_FAMILIES: tuple[MetricFamily, ...] = (
     "chamfer",
     "persistence",
     "distributions",
     "fgw",
+    "elastic_srvft",
 )
 DEFAULT_METRIC_FAMILIES: tuple[MetricFamily, ...] = (
     "chamfer",
@@ -77,14 +90,24 @@ def compare_tree_pair(
     fgw_alpha: float = 0.5,
     fgw_mass_mode: MassMode = "cable_length",
     fgw_normalize: bool = True,
+    elastic_checkout: str | Path | None = None,
+    elastic_lam_m: float = 0.2,
+    elastic_lam_s: float = 1.0,
+    elastic_lam_p: float = 0.2,
+    elastic_so2_grid_size: int = 8,
+    elastic_so2_refine: bool = False,
+    elastic_refinement_tolerance: float = 1e-3,
+    elastic_symmetrization: Symmetrization = "none",
+    elastic_depth_policy: DepthPolicy = "raise",
+    elastic_default_radius: float = 1.0,
 ) -> dict[str, object]:
     """Evaluate selected metric families for exactly one tree pair.
 
-    ``quotient_so2`` forms the relative-rotation quotient for Chamfer and for
-    FGW with ``xyz`` node features.  TMD filtrations and the default morphology
-    distributions are already invariant to rotations around the preferred
-    z-axis.  FGW's optional ``axis`` features ``(z, rho)`` are invariant as
-    well, so no redundant angular search is performed in that mode.
+    ``quotient_so2`` forms the relative-rotation quotient for Chamfer, Elastic
+    SRVFT, and FGW with ``xyz`` node features. TMD filtrations and the default
+    morphology distributions are already invariant to rotations around the
+    preferred z-axis. Elastic has separate numerical-search settings because
+    each external energy evaluation is substantially slower.
     """
 
     selected = _metric_families(metric_families)
@@ -215,6 +238,41 @@ def compare_tree_pair(
             }
         )
         results["fgw"] = fgw_result
+
+    if "elastic_srvft" in selected:
+        elastic = elastic_srvft_distance(
+            tree_a,
+            tree_b,
+            checkout=elastic_checkout,
+            lam_m=elastic_lam_m,
+            lam_s=elastic_lam_s,
+            lam_p=elastic_lam_p,
+            quotient_so2=quotient_so2,
+            grid_size=elastic_so2_grid_size,
+            refine=elastic_so2_refine,
+            refinement_tolerance=elastic_refinement_tolerance,
+            symmetrization=elastic_symmetrization,
+            depth_policy=elastic_depth_policy,
+            default_radius=elastic_default_radius,
+        )
+        elastic_result = asdict(elastic)
+        elastic_result.update(
+            {
+                "value_kind": "upstream_alignment_energy",
+                "metric_status": "dissimilarity_not_established_as_a_metric",
+                "so2_handling": (
+                    "relative_minimum"
+                    if quotient_so2
+                    else "absolute_azimuth_retained"
+                ),
+                "relative_reflection_invariant": False,
+                "invariance_note": (
+                    "The audited Python backend performs no rotational "
+                    "optimization; this adapter searches only rotations around z."
+                ),
+            }
+        )
+        results["elastic_srvft"] = elastic_result
 
     return results
 

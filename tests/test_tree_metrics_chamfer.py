@@ -48,6 +48,8 @@ def test_so2_quotient_removes_relative_azimuth() -> None:
     )
     assert raw.value > 0.1
     assert quotient.value < 1e-4
+    assert raw.objective_evaluations == 0
+    assert quotient.objective_evaluations >= quotient.grid_size == 36
 
 
 def test_so2_quotient_does_not_remove_axis_tilt() -> None:

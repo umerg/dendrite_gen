@@ -2,15 +2,29 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
 
+import metrics.pair as pair_module
 from metrics.pair import compare_tree_pair
 from utils.data_loading import load_swc_graph
+import visualization.metric_study.run_pair as run_pair_module
 from visualization.metric_study.run_pair import main
+
+
+@dataclass(frozen=True)
+class _FakeElasticResult:
+    value: float
+    energy: float
+    quotient_so2: bool
+    grid_size: int
+    refine: bool
+    external_revision: str = "fake-revision"
 
 
 def _write_swc(path: Path, *, angle_rad: float = 0.0) -> None:
@@ -72,6 +86,70 @@ def test_compare_tree_pair_rejects_unknown_family(tmp_path: Path) -> None:
         compare_tree_pair(tree, tree, metric_families=("not_a_metric",))  # type: ignore[arg-type]
 
 
+def test_compare_tree_pair_wires_opt_in_elastic_configuration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    swc = tmp_path / "tree.swc"
+    checkout = tmp_path / "elastic-checkout"
+    _write_swc(swc)
+    tree = load_swc_graph(swc)
+    captured: dict[str, Any] = {}
+
+    def fake_elastic(tree_a: object, tree_b: object, **kwargs: Any) -> _FakeElasticResult:
+        assert tree_a is tree
+        assert tree_b is tree
+        captured.update(kwargs)
+        return _FakeElasticResult(
+            value=4.25,
+            energy=4.25,
+            quotient_so2=kwargs["quotient_so2"],
+            grid_size=kwargs["grid_size"],
+            refine=kwargs["refine"],
+        )
+
+    monkeypatch.setattr(pair_module, "elastic_srvft_distance", fake_elastic)
+    result = pair_module.compare_tree_pair(
+        tree,
+        tree,
+        metric_families=("elastic_srvft",),
+        quotient_so2=False,
+        elastic_checkout=checkout,
+        elastic_lam_m=0.31,
+        elastic_lam_s=1.23,
+        elastic_lam_p=0.42,
+        elastic_so2_grid_size=16,
+        elastic_so2_refine=True,
+        elastic_refinement_tolerance=2e-4,
+        elastic_symmetrization="mean",
+        elastic_depth_policy="allow",
+        elastic_default_radius=0.75,
+    )
+
+    assert captured == {
+        "checkout": checkout,
+        "lam_m": 0.31,
+        "lam_s": 1.23,
+        "lam_p": 0.42,
+        "quotient_so2": False,
+        "grid_size": 16,
+        "refine": True,
+        "refinement_tolerance": 2e-4,
+        "symmetrization": "mean",
+        "depth_policy": "allow",
+        "default_radius": 0.75,
+    }
+    assert list(result) == ["elastic_srvft"]
+    elastic = result["elastic_srvft"]
+    assert elastic["value"] == 4.25  # type: ignore[index]
+    assert elastic["value_kind"] == "upstream_alignment_energy"  # type: ignore[index]
+    assert elastic["metric_status"] == (  # type: ignore[index]
+        "dissimilarity_not_established_as_a_metric"
+    )
+    assert elastic["so2_handling"] == "absolute_azimuth_retained"  # type: ignore[index]
+    assert elastic["relative_reflection_invariant"] is False  # type: ignore[index]
+
+
 def test_cli_compares_two_swcs_and_writes_standard_json(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -127,6 +205,88 @@ def test_cli_compares_two_swcs_and_writes_standard_json(
     )
     assert stdout_payload["tree_a"]["nodes"] == 5
     assert stdout_payload["tree_b"]["nodes"] == 5
+
+
+def test_cli_wires_dedicated_elastic_options_without_loading_checkout(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tree_a = tmp_path / "a.swc"
+    tree_b = tmp_path / "b.swc"
+    checkout = tmp_path / "elastic-checkout"
+    _write_swc(tree_a)
+    _write_swc(tree_b, angle_rad=0.4)
+    captured: dict[str, Any] = {}
+
+    def fake_compare(_tree_a: object, _tree_b: object, **kwargs: Any) -> dict[str, object]:
+        captured.update(kwargs)
+        return {
+            "elastic_srvft": {
+                "value": 3.5,
+                "value_kind": "upstream_alignment_energy",
+                "so2_handling": "absolute_azimuth_retained",
+            }
+        }
+
+    monkeypatch.setattr(run_pair_module, "compare_tree_pair", fake_compare)
+    assert main(
+        [
+            "--tree-a",
+            str(tree_a),
+            "--tree-b",
+            str(tree_b),
+            "--metrics",
+            "elastic_srvft",
+            "--no-so2-quotient",
+            "--so2-grid-size",
+            "18",
+            "--no-so2-refine",
+            "--elastic-checkout",
+            str(checkout),
+            "--elastic-lam-m",
+            "0.31",
+            "--elastic-lam-s",
+            "1.23",
+            "--elastic-lam-p",
+            "0.42",
+            "--elastic-so2-grid-size",
+            "12",
+            "--elastic-so2-refine",
+            "--elastic-refinement-tolerance",
+            "0.002",
+            "--elastic-symmetrization",
+            "mean",
+            "--elastic-depth-policy",
+            "warn",
+            "--elastic-default-radius",
+            "0.75",
+        ]
+    ) == 0
+
+    assert captured["metric_families"] == ["elastic_srvft"]
+    assert captured["quotient_so2"] is False
+    assert captured["so2_grid_size"] == 18
+    assert captured["so2_refine"] is False
+    assert captured["elastic_checkout"] == checkout
+    assert captured["elastic_lam_m"] == 0.31
+    assert captured["elastic_lam_s"] == 1.23
+    assert captured["elastic_lam_p"] == 0.42
+    assert captured["elastic_so2_grid_size"] == 12
+    assert captured["elastic_so2_refine"] is True
+    assert captured["elastic_refinement_tolerance"] == 0.002
+    assert captured["elastic_symmetrization"] == "mean"
+    assert captured["elastic_depth_policy"] == "warn"
+    assert captured["elastic_default_radius"] == 0.75
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["results"]["elastic_srvft"] == {
+        "so2_handling": "absolute_azimuth_retained",
+        "value": 3.5,
+        "value_kind": "upstream_alignment_energy",
+    }
+    assert payload["quotient_group"]["grid_size"] == 18
+    assert payload["quotient_group"]["local_refinement"] is False
 
 
 def test_cli_explains_undefined_one_empty_distribution(

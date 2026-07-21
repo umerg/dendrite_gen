@@ -35,10 +35,23 @@ class FusedGWResult:
     angle_rad: float
     grid_size: int
     refine: bool
+    refinement_tolerance: float
+    objective_evaluations: int
     max_iter: int
     tolerance: float
     n_nodes_1: int
     n_nodes_2: int
+
+
+@dataclass(frozen=True)
+class PreparedFusedGWTree:
+    """Pair-independent arrays cached for repeated FGW comparisons."""
+
+    centered_positions: np.ndarray
+    structure: np.ndarray
+    mass: np.ndarray
+    mass_mode: MassMode
+    node_count: int
 
 
 def _load_pot():
@@ -216,6 +229,122 @@ def _fgw_objective(
     return max(result, 0.0)
 
 
+def prepare_fused_gw_tree(
+    tree: nx.Graph,
+    *,
+    mass_mode: MassMode = "cable_length",
+) -> PreparedFusedGWTree:
+    """Prepare the expensive pair-independent FGW representation once."""
+
+    nodes, root, positions = _validate_tree(tree, name="tree")
+    return PreparedFusedGWTree(
+        centered_positions=_root_centered_positions(nodes, root, positions),
+        structure=_tree_distance_matrix(tree, nodes, positions),
+        mass=_node_masses(tree, nodes, positions, mode=mass_mode),
+        mass_mode=mass_mode,
+        node_count=len(nodes),
+    )
+
+
+def fused_gromov_wasserstein_distance_prepared(
+    tree_1: PreparedFusedGWTree,
+    tree_2: PreparedFusedGWTree,
+    *,
+    feature_mode: FeatureMode = "xyz",
+    alpha: float = 0.5,
+    normalize: bool = True,
+    quotient_so2: bool = True,
+    grid_size: int = 72,
+    refine: bool = True,
+    refinement_tolerance: float = 1e-8,
+    max_iter: int = 1_000,
+    tol: float = 1e-9,
+) -> FusedGWResult:
+    """Compare two prepared trees without rebuilding their path matrices."""
+
+    if not isinstance(tree_1, PreparedFusedGWTree) or not isinstance(
+        tree_2, PreparedFusedGWTree
+    ):
+        raise TypeError("tree_1 and tree_2 must be PreparedFusedGWTree objects.")
+    if tree_1.mass_mode != tree_2.mass_mode:
+        raise ValueError("Prepared FGW trees must use the same mass_mode.")
+    if feature_mode not in ("axis", "xyz"):
+        raise ValueError("feature_mode must be either 'axis' or 'xyz'.")
+    if not 0.0 <= alpha <= 1.0:
+        raise ValueError("alpha must lie in the closed interval [0, 1].")
+    if max_iter < 1:
+        raise ValueError("max_iter must be at least 1.")
+    if tol <= 0.0:
+        raise ValueError("tol must be positive.")
+    if not np.isfinite(refinement_tolerance) or refinement_tolerance <= 0.0:
+        raise ValueError("refinement_tolerance must be finite and positive.")
+
+    structure_1 = tree_1.structure
+    structure_2 = tree_2.structure
+    features_1 = _node_features(tree_1.centered_positions, feature_mode)
+    features_2 = _node_features(tree_2.centered_positions, feature_mode)
+    if normalize:
+        structure_1, structure_2, features_1, features_2 = _normalize_inputs(
+            structure_1,
+            structure_2,
+            features_1,
+            features_2,
+        )
+
+    ot = _load_pot()
+
+    def objective(candidate_features_2: np.ndarray) -> float:
+        return _fgw_objective(
+            ot,
+            features_1,
+            candidate_features_2,
+            structure_1,
+            structure_2,
+            tree_1.mass,
+            tree_2.mass,
+            alpha=alpha,
+            max_iter=max_iter,
+            tol=tol,
+        )
+
+    angle_rad = 0.0
+    effective_quotient = quotient_so2 and feature_mode == "xyz" and alpha < 1.0
+    if effective_quotient:
+        z_axis = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        minimization = minimize_over_so2(
+            lambda angle: objective(
+                rotate_points_about_axis(features_2, angle, z_axis)
+            ),
+            grid_size=grid_size,
+            refine=refine,
+            refinement_tolerance=refinement_tolerance,
+        )
+        value = float(minimization.value)
+        angle_rad = float(minimization.angle_rad)
+        objective_evaluations = int(minimization.evaluations)
+    else:
+        value = objective(features_2)
+        objective_evaluations = 1
+
+    return FusedGWResult(
+        value=max(value, 0.0),
+        feature_mode=feature_mode,
+        alpha=float(alpha),
+        mass_mode=tree_1.mass_mode,
+        normalize=bool(normalize),
+        quotient_so2=bool(effective_quotient),
+        angle_rad=angle_rad,
+        grid_size=int(grid_size),
+        refine=bool(refine),
+        refinement_tolerance=float(refinement_tolerance),
+        objective_evaluations=objective_evaluations,
+        max_iter=int(max_iter),
+        tolerance=float(tol),
+        n_nodes_1=tree_1.node_count,
+        n_nodes_2=tree_2.node_count,
+    )
+
+
 def fused_gromov_wasserstein_distance(
     tree_1: nx.Graph,
     tree_2: nx.Graph,
@@ -227,6 +356,7 @@ def fused_gromov_wasserstein_distance(
     quotient_so2: bool = True,
     grid_size: int = 72,
     refine: bool = True,
+    refinement_tolerance: float = 1e-8,
     max_iter: int = 1_000,
     tol: float = 1e-9,
 ) -> FusedGWResult:
@@ -250,79 +380,20 @@ def fused_gromov_wasserstein_distance(
     relative SO(2) rotation.
     """
 
-    if feature_mode not in ("axis", "xyz"):
-        raise ValueError("feature_mode must be either 'axis' or 'xyz'.")
-    if not 0.0 <= alpha <= 1.0:
-        raise ValueError("alpha must lie in the closed interval [0, 1].")
-    if max_iter < 1:
-        raise ValueError("max_iter must be at least 1.")
-    if tol <= 0.0:
-        raise ValueError("tol must be positive.")
-
-    nodes_1, root_1, positions_1 = _validate_tree(tree_1, name="tree_1")
-    nodes_2, root_2, positions_2 = _validate_tree(tree_2, name="tree_2")
-    centered_1 = _root_centered_positions(nodes_1, root_1, positions_1)
-    centered_2 = _root_centered_positions(nodes_2, root_2, positions_2)
-
-    structure_1 = _tree_distance_matrix(tree_1, nodes_1, positions_1)
-    structure_2 = _tree_distance_matrix(tree_2, nodes_2, positions_2)
-    features_1 = _node_features(centered_1, feature_mode)
-    features_2 = _node_features(centered_2, feature_mode)
-
-    if normalize:
-        structure_1, structure_2, features_1, features_2 = _normalize_inputs(
-            structure_1, structure_2, features_1, features_2
-        )
-
-    mass_1 = _node_masses(tree_1, nodes_1, positions_1, mode=mass_mode)
-    mass_2 = _node_masses(tree_2, nodes_2, positions_2, mode=mass_mode)
-    ot = _load_pot()
-
-    def objective(candidate_features_2: np.ndarray) -> float:
-        return _fgw_objective(
-            ot,
-            features_1,
-            candidate_features_2,
-            structure_1,
-            structure_2,
-            mass_1,
-            mass_2,
-            alpha=alpha,
-            max_iter=max_iter,
-            tol=tol,
-        )
-
-    angle_rad = 0.0
-    effective_quotient = quotient_so2 and feature_mode == "xyz" and alpha < 1.0
-    if effective_quotient:
-        z_axis = np.array([0.0, 0.0, 1.0], dtype=np.float64)
-        minimization = minimize_over_so2(
-            lambda angle: objective(
-                rotate_points_about_axis(features_2, angle, z_axis)
-            ),
-            grid_size=grid_size,
-            refine=refine,
-        )
-        value = float(minimization.value)
-        angle_rad = float(minimization.angle_rad)
-    else:
-        # Axis features are invariant, and alpha=1 ignores features entirely.
-        value = objective(features_2)
-
-    return FusedGWResult(
-        value=max(value, 0.0),
+    prepared_1 = prepare_fused_gw_tree(tree_1, mass_mode=mass_mode)
+    prepared_2 = prepare_fused_gw_tree(tree_2, mass_mode=mass_mode)
+    return fused_gromov_wasserstein_distance_prepared(
+        prepared_1,
+        prepared_2,
         feature_mode=feature_mode,
-        alpha=float(alpha),
-        mass_mode=mass_mode,
-        normalize=bool(normalize),
-        quotient_so2=bool(effective_quotient),
-        angle_rad=angle_rad,
-        grid_size=int(grid_size),
-        refine=bool(refine),
-        max_iter=int(max_iter),
-        tolerance=float(tol),
-        n_nodes_1=len(nodes_1),
-        n_nodes_2=len(nodes_2),
+        alpha=alpha,
+        normalize=normalize,
+        quotient_so2=quotient_so2,
+        grid_size=grid_size,
+        refine=refine,
+        refinement_tolerance=refinement_tolerance,
+        max_iter=max_iter,
+        tol=tol,
     )
 
 
@@ -335,7 +406,10 @@ __all__ = [
     "FeatureMode",
     "FusedGWResult",
     "MassMode",
+    "PreparedFusedGWTree",
     "fgw_distance",
     "fused_gromov_wasserstein_distance",
+    "fused_gromov_wasserstein_distance_prepared",
     "fused_gw_distance",
+    "prepare_fused_gw_tree",
 ]

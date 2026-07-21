@@ -37,6 +37,10 @@ class ChamferResult:
     squared: bool
     reduction: Reduction
     quotient_so2: bool
+    grid_size: int
+    refine: bool
+    refinement_tolerance: float
+    objective_evaluations: int
 
 
 def _position(graph: nx.Graph, node: Hashable) -> np.ndarray:
@@ -199,6 +203,7 @@ def tree_chamfer_distance(
     axis: Sequence[float] = (0.0, 0.0, 1.0),
     grid_size: int = 72,
     refine: bool = True,
+    refinement_tolerance: float = 1e-8,
 ) -> ChamferResult:
     """Compare two rooted trees, optionally minimizing over relative SO(2) rotation."""
     points_a = sample_tree_points(graph_a, spacing=spacing, root=root_a, center_root=True)
@@ -214,10 +219,17 @@ def tree_chamfer_distance(
         )
 
     if quotient_so2:
-        minimum = minimize_over_so2(objective, grid_size=grid_size, refine=refine)
+        minimum = minimize_over_so2(
+            objective,
+            grid_size=grid_size,
+            refine=refine,
+            refinement_tolerance=refinement_tolerance,
+        )
         angle = minimum.angle_rad
+        objective_evaluations = minimum.evaluations
     else:
         angle = 0.0
+        objective_evaluations = 0
 
     aligned_b = rotate_points_about_axis(points_b, angle, axis)
     a_to_b, b_to_a = point_chamfer_components(points_a, aligned_b, squared=squared)
@@ -234,4 +246,8 @@ def tree_chamfer_distance(
         squared=bool(squared),
         reduction=reduction,
         quotient_so2=bool(quotient_so2),
+        grid_size=int(grid_size),
+        refine=bool(refine),
+        refinement_tolerance=float(refinement_tolerance),
+        objective_evaluations=int(objective_evaluations),
     )

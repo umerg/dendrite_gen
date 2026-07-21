@@ -66,7 +66,9 @@ def rotate_points_about_axis(
     if arr.ndim != 2 or arr.shape[1] != 3:
         raise ValueError(f"points must have shape (N, 3), got {arr.shape}")
     rotation = rotation_matrix_about_axis(angle_rad, axis)
-    return arr @ rotation.T
+    # ``np.dot`` avoids spurious floating-point warnings emitted by some
+    # Accelerate-backed NumPy builds for otherwise finite small matrix products.
+    return np.dot(arr, rotation.T)
 
 
 def _canonical_angle(angle_rad: float) -> float:
