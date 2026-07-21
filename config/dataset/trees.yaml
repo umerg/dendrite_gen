@@ -1,3 +1,7 @@
 name: tree_dataset
-data_dir: # add path to tree dataset
+data_dir: /scratch/guptau/small_trees # add path to tree dataset
 load: True
+pos_scale_factor: 0.5  # ÷0.5 (×2) brings mean per-axis C_0 offset std to ~0.93 (≈unit). z-axis symmetry.
+                       # Derived from data_analysis/so2_geometry_stats.py --axis z and
+                       # tests/analyse_c0_distribution.py --axis z on the 3656-tree train split
+                       # (raw per-axis std [0.285, 0.256, 0.851], mean 0.464 -> /0.5 = [0.57,0.51,1.70]).

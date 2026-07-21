@@ -293,6 +293,7 @@ def main(cfg: DictConfig):
                 num_steps=diffusion_cfg.num_steps,
             )
         elif diffusion_name == "flow":
+            _prior_std_pos = getattr(diffusion_cfg, "prior_std_pos", None)
             diffusion = gg.diffusion.FlowMatchingModel(
                 num_steps=diffusion_cfg.num_steps,
                 prior_std=getattr(diffusion_cfg, "prior_std", 1.0),
@@ -300,6 +301,7 @@ def main(cfg: DictConfig):
                 beta_a=getattr(diffusion_cfg, "beta_a", 2.0),
                 beta_b=getattr(diffusion_cfg, "beta_b", 1.0),
                 sigma_min=getattr(diffusion_cfg, "sigma_min", 0.0),
+                prior_std_pos=(list(_prior_std_pos) if _prior_std_pos is not None else None),
             )
         else:
             raise ValueError(f"Unknown diffusion name: {diffusion_name}")

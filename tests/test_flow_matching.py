@@ -78,7 +78,49 @@ def test_flow_sample_shapes_finite():
     print(f"sample_graphs OK: sizes={[getattr(g, 'num_nodes', None) for g in graphs]}")
 
 
+def test_anisotropic_prior_per_axis_std():
+    """prior_std_pos scales the position prior per-axis; None falls back to isotropic."""
+    th.manual_seed(0)
+    sigma = [0.74, 0.61, 0.83]
+    fm = FlowMatchingModel(num_steps=4, prior_std=1.0, prior_std_pos=sigma)
+
+    scale = fm._pos_scale(th.device("cpu"), th.float32)
+    assert tuple(scale.shape) == (1, 3)
+    assert th.allclose(scale, th.tensor(sigma).view(1, 3), atol=1e-6)
+
+    # Empirical per-axis std of the position prior matches sigma.
+    noise = th.randn((200_000, 3)) * scale
+    emp = noise.std(dim=0)
+    assert th.allclose(emp, th.tensor(sigma), atol=0.02), f"per-axis std {emp.tolist()} != {sigma}"
+
+    # Isotropic fallback: None -> scalar prior_std (unchanged behavior).
+    fm_iso = FlowMatchingModel(num_steps=4, prior_std=1.3, prior_std_pos=None)
+    assert fm_iso._pos_scale(th.device("cpu"), th.float32) == 1.3
+
+    # Wrong length is rejected.
+    try:
+        FlowMatchingModel(prior_std_pos=[1.0, 2.0])
+        raise AssertionError("expected ValueError for length-2 prior_std_pos")
+    except ValueError:
+        pass
+
+
+def test_anisotropic_prior_forward_runs():
+    """forward() still returns finite losses with an anisotropic prior."""
+    cfg, loader, model = _build_model_and_loader()
+    diffusion = FlowMatchingModel(num_steps=4, prior_std_pos=[0.74, 0.61, 0.83])
+    method = gg.method.Expansion(
+        diffusion=diffusion, red_threshold=cfg.reduction.red_threshold,
+    )
+    res = method.get_loss(next(iter(loader)), model)
+    if res is not None:
+        loss, _ = res
+        assert th.isfinite(loss).all()
+
+
 if __name__ == "__main__":
     test_flow_forward_loss_finite()
     test_flow_sample_shapes_finite()
+    test_anisotropic_prior_per_axis_std()
+    test_anisotropic_prior_forward_runs()
     print("Flow-matching functional checks complete.")

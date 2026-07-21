@@ -159,6 +159,10 @@ wandb/
 
 sampling_experiments/artifacts/
 
+# local-only flow-matching prior reference (c0_distribution.png covered by *.png above)
+
+DISTRIBUTION.md
+
 
 .vscode
 outputs

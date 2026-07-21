@@ -164,6 +164,95 @@ def _nice_title(label: str, n_nodes: int, suffix: str = "") -> str:
     return f"{label}{suffix_str} (n={n_nodes})"
 
 
+def _rotation_align(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Rotation matrix R (3x3) with R @ a == b for unit vectors a, b (Rodrigues)."""
+    a = np.asarray(a, dtype=np.float64).reshape(3)
+    b = np.asarray(b, dtype=np.float64).reshape(3)
+    a = a / (np.linalg.norm(a) + 1e-12)
+    b = b / (np.linalg.norm(b) + 1e-12)
+    c = float(np.dot(a, b))
+    if c > 1.0 - 1e-8:  # already aligned
+        return np.eye(3)
+    if c < -1.0 + 1e-8:  # antipodal: rotate 180 deg about any axis perpendicular to a
+        p = np.cross(a, np.array([1.0, 0.0, 0.0]))
+        if np.linalg.norm(p) < 1e-6:
+            p = np.cross(a, np.array([0.0, 1.0, 0.0]))
+        p = p / (np.linalg.norm(p) + 1e-12)
+        return 2.0 * np.outer(p, p) - np.eye(3)
+    v = np.cross(a, b)
+    vx = np.array(
+        [[0.0, -v[2], v[1]], [v[2], 0.0, -v[0]], [-v[1], v[0], 0.0]],
+        dtype=np.float64,
+    )
+    return np.eye(3) + vx + vx @ vx * (1.0 / (1.0 + c))
+
+
+def align_uhat_to_z(G: nx.Graph, uhat) -> nx.Graph:
+    """
+    Return a copy of ``G`` whose node positions are rotated so the model's symmetry
+    axis ``uhat`` points along +z. Plotting this copy and sweeping the matplotlib
+    azimuth then orbits the *true* uhat axis for any ``so2_axis`` (not hardcoded z).
+
+    The original graph's positions are left untouched (plotting-only transform).
+    """
+    R = _rotation_align(np.asarray(uhat, dtype=np.float64).reshape(3), np.array([0.0, 0.0, 1.0]))
+    H = G.copy()
+    for n in H.nodes():
+        p = _pos_to_xyz(H.nodes[n].get("pos", np.zeros(3)))
+        H.nodes[n]["pos"] = R @ p
+    if "root" in G.graph:
+        H.graph["root"] = G.graph["root"]
+    return H
+
+
+def plot_graph_grid_angles(
+    graphs: list[nx.Graph],
+    *,
+    out_dir: Path,
+    stem: str,
+    file_tag: str,
+    angles: Iterable[tuple[float, float]] = DEFAULT_ANGLES,
+    uhat=None,
+    title_prefix: str = "",
+    node_color: str = PRED_COLOR,
+    edge_color: str = "lightgray",
+    max_graphs: int = 8,
+):
+    """
+    Build a single figure: one row per graph, one column per (elev, azim) angle,
+    rendered in 3D. Azimuths orbit ``uhat`` when provided. Returns (fig, out_path).
+
+    The figure is NOT closed here so callers can log it (e.g. to wandb); release it
+    with ``plt.close`` afterwards.
+    """
+    angles = list(angles)
+    graphs = list(graphs)[:max_graphs]
+    n_rows = max(len(graphs), 1)
+    n_cols = max(len(angles), 1)
+    fig = plt.figure(figsize=(n_cols * 3.2, n_rows * 3.0))
+    for r, G in enumerate(graphs):
+        Gp = align_uhat_to_z(G, uhat) if uhat is not None else G
+        n_nodes = G.number_of_nodes()
+        for c, (elev, azim) in enumerate(angles):
+            ax = fig.add_subplot(n_rows, n_cols, r * n_cols + c + 1, projection="3d")
+            _plot_graph(
+                ax,
+                Gp,
+                _nice_title(title_prefix, n_nodes, f"az{int(azim)}"),
+                node_color=node_color,
+                edge_color=edge_color,
+            )
+            ax.title.set_fontsize(9)  # grid is dense; module default (24) overlaps
+            ax.view_init(elev=elev, azim=azim)
+            ax.set_axis_off()
+    fig.tight_layout()
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{stem}_{file_tag}.png"
+    fig.savefig(out_path, dpi=150)
+    return fig, out_path
+
+
 def plot_graph_pair_separate(
     gt: nx.Graph,
     pred: nx.Graph,

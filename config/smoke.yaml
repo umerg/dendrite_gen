@@ -31,6 +31,7 @@ training:
   lr_scheduler: "cosine_annealing"              # Enable cosine annealing
   scheduler_T_max: ${training.num_steps}  # Optional: full cosine cycle length
   scheduler_eta_min: 1.0e-8          # Optional: minimum learning rate
+  grad_clip_norm: 1.0   # max global grad-norm; null disables clipping. Pre-clip norm logged as training/grad_norm
 
 validation:
   batch_size: 3
