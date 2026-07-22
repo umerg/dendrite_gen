@@ -35,7 +35,7 @@ esac
 PERMANENT_STORAGE_DIR="${PERMANENT_STORAGE_DIR:-/itet-stor/speltonen/net_scratch}"
 PROJECT_ROOT="${PROJECT_ROOT:-${PERMANENT_STORAGE_DIR}/generating-trees}"
 REPOSITORY_DIR="${REPOSITORY_DIR:-${PROJECT_ROOT}/dendrite_gen}"
-DATASET_ROOT="${DATASET_ROOT:-${PROJECT_ROOT}/data/neurons_conditional}"
+DATASET_ROOT="${DATASET_ROOT:-${PROJECT_ROOT}/data/neurons_conditional/neurons_conditional}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-${PROJECT_ROOT}/outputs/metric_study/matrices}"
 CONDA_ROOT="${CONDA_ROOT:-${PERMANENT_STORAGE_DIR}/conda}"
 CONDA_ENVIRONMENT="${CONDA_ENVIRONMENT:-trees}"
