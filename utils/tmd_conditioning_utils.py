@@ -95,20 +95,69 @@ def filtration_path_length_from_root(G: nx.Graph, *, weight_edges_by_euclidean: 
     return {nid: float(d) for nid, d in lengths.items()}
 
 
-def filtration_height_z(G: nx.Graph) -> Dict[int, float]:
-    """Filtration: node height (z coordinate)."""
-    assert_rooted_tree_graph(G)
-    return {nid: float(np.asarray(G.nodes[nid]["pos"], dtype=np.float64)[2]) for nid in G.nodes}
+def _unit_axis(uhat: Sequence[float]) -> np.ndarray:
+    """Coerce ``uhat`` to a unit 3-vector (matches the model's normalized uhat buffer)."""
+    u = np.asarray(uhat, dtype=np.float64).reshape(3)
+    n = float(np.linalg.norm(u))
+    if n < 1e-12:
+        raise ValueError("uhat must be a non-zero 3-vector.")
+    return u / n
 
 
-def filtration_radial_rho(G: nx.Graph) -> Dict[int, float]:
-    """Filtration: radial distance rho = sqrt(x^2 + y^2)."""
+def filtration_height_z(
+    G: nx.Graph, *, uhat: Sequence[float] = (0.0, 0.0, 1.0)
+) -> Dict[int, float]:
+    """
+    Filtration: signed height = projection of the node position onto the axis ``uhat``.
+
+    Defaults to the z-axis (``uhat=(0,0,1)`` ⇒ ``pos[2]``) for back-compat with z-up
+    trees. For neurons pass the dataset's ``so2_axis`` (e.g. ``(0,1,0)``) so "height"
+    tracks the actual equivariance/growth axis rather than a hardcoded z.
+    """
     assert_rooted_tree_graph(G)
+    u = _unit_axis(uhat)
+    return {
+        nid: float(np.asarray(G.nodes[nid]["pos"], dtype=np.float64) @ u)
+        for nid in G.nodes
+    }
+
+
+def filtration_radial_rho(
+    G: nx.Graph, *, uhat: Sequence[float] = (0.0, 0.0, 1.0)
+) -> Dict[int, float]:
+    """
+    Filtration: radial distance perpendicular to the axis ``uhat``.
+
+    ``rho = || pos - (pos·uhat) uhat ||``. Defaults to the z-axis
+    (``uhat=(0,0,1)`` ⇒ ``sqrt(x^2 + y^2)``) for back-compat; pass ``so2_axis`` for
+    neurons so this is the perpendicular-to-axis distance the model itself uses
+    (see ``egnn_so2.py`` ``r_perp = rel - (rel·uhat) uhat``).
+    """
+    assert_rooted_tree_graph(G)
+    u = _unit_axis(uhat)
     out: Dict[int, float] = {}
     for nid in G.nodes:
-        x, y, _z = np.asarray(G.nodes[nid]["pos"], dtype=np.float64)
-        out[nid] = float(math.sqrt(x * x + y * y))
+        p = np.asarray(G.nodes[nid]["pos"], dtype=np.float64)
+        p_perp = p - float(p @ u) * u
+        out[nid] = float(np.linalg.norm(p_perp))
     return out
+
+
+def filtration_radial_root(G: nx.Graph) -> Dict[int, float]:
+    """
+    Filtration: straight-line (Euclidean) distance from the root position.
+
+    Unlike ``rho`` (distance from the z-axis) or ``height`` (z), this is the
+    canonical Kanari-style radial filtration anchored at the soma/root. It encodes
+    branching topology weighted by spatial reach and is fully rotation-invariant.
+    """
+    assert_rooted_tree_graph(G)
+    root = G.graph["root"]
+    root_pos = np.asarray(G.nodes[root]["pos"], dtype=np.float64)
+    return {
+        nid: float(np.linalg.norm(np.asarray(G.nodes[nid]["pos"], dtype=np.float64) - root_pos))
+        for nid in G.nodes
+    }
 
 
 def normalize_filtration_values(
@@ -345,7 +394,7 @@ def persistence_image(
 # High-level API for your workflow
 # -----------------------------
 
-FiltrationName = Literal["path", "height", "rho"]
+FiltrationName = Literal["path", "height", "rho", "radial_root"]
 
 
 def compute_tmd_global_embedding(
@@ -357,6 +406,7 @@ def compute_tmd_global_embedding(
     normalize_mode: Literal["minmax", "max"] = "minmax",
     weighting: Literal["none", "persistence"] = "persistence",
     weight_edges_by_euclidean: bool = True,
+    uhat: Sequence[float] = (0.0, 0.0, 1.0),
 ) -> np.ndarray:
     """
     Compute a concatenated global conditioning vector for a rooted tree graph.
@@ -375,9 +425,9 @@ def compute_tmd_global_embedding(
         if name == "path":
             f = filtration_path_length_from_root(G, weight_edges_by_euclidean=weight_edges_by_euclidean)
         elif name == "height":
-            f = filtration_height_z(G)
+            f = filtration_height_z(G, uhat=uhat)
         elif name == "rho":
-            f = filtration_radial_rho(G)
+            f = filtration_radial_rho(G, uhat=uhat)
         else:
             raise ValueError(f"Unknown filtration name: {name!r}")
 

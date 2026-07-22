@@ -6,19 +6,17 @@ defaults:
 
 reduction:
   type: "depth"
-  mode: "stochastic"
+  mode: "deterministic"
   cherry_p: 1.0 # imp now with new leaves tracking?
   ensure_progress: True
   root: 0
   contract_root: False
-  num_red_seqs: -1
-  min_red_frac: 0.0
-  max_red_frac: 0.5
-  red_threshold: 0
 
 training:
   batch_size: 512
   lr: 5e-4
+  optimizer: adam        # adam | adamw (adamw = decoupled weight decay)
+  weight_decay: 0.0      # >0 only meaningful with adamw
   num_steps: 60000 # ~200 epochs; considering 1 step = 1 batch
   max_num_workers: 0
   log_interval: 100
@@ -34,12 +32,23 @@ validation:
   interval: 1000 # can make 5k
   first_step: 0
   per_graph_size: False
-  enable_metrics: False
+  eval_mode: rollout            # rollout | teacher_forced | both. teacher_forced = per-level TF eval only
+                                # (skips free-running generation); both runs both (expensive).
+  tf_max_graphs: 64             # cap GT trees for TF eval (full ODE per reduction level per graph)
+  tf_min_depth: 0               # restrict pooled TF metrics to leaves at tree depth >= this (2 drops root children)
   enable_plots: True            # 3D multi-azimuth views (orbiting uhat) of gen + GT
   enable_dist_metrics: True     # Wasserstein-1 of gen-vs-GT stat distributions
   ged_enabled: False             # avg tree-edit distance (capped by node/pair count)
   ged_timeout: 5.0
   plot_angles: [[20, 30], [20, 120], [20, 210]]   # (elev, azim) around uhat
+  enable_ks: True               # KS alongside W1 (continuous features)
+  enable_morphometrics: True    # path/radial/contraction/order/strahler/asymmetry/sholl
+  enable_light_joint: True      # morpho + Euclidean-TMD MMD/Density/Coverage every val
+  enable_floor: True            # real-vs-real reference lines + headline excess
+  tmd_eval_filtration: radial_root
+  tmd_eval_bins: 16
+  tmd_pca_ncomp: 32             # PCA dim for TMD persistence-image embedding (eval)
+  dc_nearest_k: 5               # k for Density/Coverage
 
 testing: False # if True, only evaluate on test set
 

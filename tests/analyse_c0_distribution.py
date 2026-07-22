@@ -63,6 +63,12 @@ def parse_args():
         "--out", type=Path, default=None,
         help="Output PNG path (default: c0_distribution_<axis>.png at repo root).",
     )
+    ap.add_argument(
+        "--prior-std-pos", type=float, nargs=3, default=[0.74, 0.61, 0.83],
+        metavar=("FWD", "SIDE", "AXIAL"),
+        help="Current per-axis prior std (forward, sideways, axial) to diagnose against "
+             "(default: neuron flow config [0.74, 0.61, 0.83]).",
+    )
     return ap.parse_args()
 
 
@@ -175,6 +181,35 @@ def main():
     print(f"\nexpansion label e: fraction 'expand' (label 1) = {frac_pos:.4f}  (n={E.size})")
     print("\nReference: isotropic prior N(0, prior_std^2). For overlap, prior_std should")
     print(f"  ~ match per-axis std; current best single scalar ~= {sd.mean():.3f} (mean of axis stds).")
+    print("=" * 70)
+
+    # ---- prior-matching diagnosis (mean + std) ----
+    # The flow prior is N(0, diag(prior_std_pos^2)) -> centered on the PARENT (offset mean 0).
+    # The data offsets are NOT mean-zero (children grow outward), so the prior is mis-centered.
+    # A flow whose prior matches BOTH data moments has the shortest/straightest transport.
+    prior_std = np.asarray(args.prior_std_pos, dtype=float)
+    mu_np = np.asarray(mu, dtype=float)
+    sd_np = np.asarray(sd, dtype=float)
+    print("\n" + "=" * 70)
+    print("PRIOR-MATCHING DIAGNOSIS  (prior is N(mean=0, std=prior_std_pos))")
+    print("=" * 70)
+    print(f"{'axis':<12}{'data_mean':>10}{'data_std':>10}{'prior_std':>10}"
+          f"{'mean/std':>10}{'shift_um':>10}")
+    for k, ax in enumerate(axes):
+        mean_over_std = mu_np[k] / (sd_np[k] + 1e-12)
+        shift_um = mu_np[k] * pos_scale
+        print(f"{ax:<12}{mu_np[k]:>10.4f}{sd_np[k]:>10.4f}{prior_std[k]:>10.4f}"
+              f"{mean_over_std:>10.3f}{shift_um:>10.2f}")
+    std_err = np.abs(sd_np - prior_std) / (sd_np + 1e-12)
+    print(f"\nstd match: per-axis |Δ|/std = {np.array2string(std_err, precision=3)} "
+          f"(prior_std_pos {'OK' if std_err.max() < 0.1 else 'NEEDS RETUNE'})")
+    print("mean mismatch: prior is centered on the parent (0), data is not. The flow must")
+    print("  transport this DC offset on every sample; on the worst axis that is the")
+    print("  systematic push the sampler can overshoot (-> over-production).")
+    print(f"\nRECOMMENDED prior_mean_pos (match data 1st moment): "
+          f"[{mu_np[0]:.3f}, {mu_np[1]:.3f}, {mu_np[2]:.3f}]")
+    print("  (set the noise draw to prior_mean_pos + randn*prior_std_pos in BOTH train & sample;")
+    print("   equivalently regress the residual C_0 - prior_mean_pos. Shortens/straightens paths.)")
     print("=" * 70)
 
     # ---- plots ----

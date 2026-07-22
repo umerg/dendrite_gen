@@ -214,6 +214,7 @@ def plot_graph_grid_angles(
     angles: Iterable[tuple[float, float]] = DEFAULT_ANGLES,
     uhat=None,
     title_prefix: str = "",
+    per_graph_titles: list[str] | None = None,
     node_color: str = PRED_COLOR,
     edge_color: str = "lightgray",
     max_graphs: int = 8,
@@ -221,6 +222,10 @@ def plot_graph_grid_angles(
     """
     Build a single figure: one row per graph, one column per (elev, azim) angle,
     rendered in 3D. Azimuths orbit ``uhat`` when provided. Returns (fig, out_path).
+
+    ``per_graph_titles``, when given, supplies a per-row label (e.g. a cell-class
+    name) that replaces the shared ``title_prefix`` for that row; otherwise every
+    row uses ``title_prefix``.
 
     The figure is NOT closed here so callers can log it (e.g. to wandb); release it
     with ``plt.close`` afterwards.
@@ -233,12 +238,17 @@ def plot_graph_grid_angles(
     for r, G in enumerate(graphs):
         Gp = align_uhat_to_z(G, uhat) if uhat is not None else G
         n_nodes = G.number_of_nodes()
+        row_label = (
+            per_graph_titles[r]
+            if per_graph_titles is not None and r < len(per_graph_titles)
+            else title_prefix
+        )
         for c, (elev, azim) in enumerate(angles):
             ax = fig.add_subplot(n_rows, n_cols, r * n_cols + c + 1, projection="3d")
             _plot_graph(
                 ax,
                 Gp,
-                _nice_title(title_prefix, n_nodes, f"az{int(azim)}"),
+                _nice_title(row_label, n_nodes, f"az{int(azim)}"),
                 node_color=node_color,
                 edge_color=edge_color,
             )

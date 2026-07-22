@@ -11,12 +11,16 @@ import networkx as nx
 import numpy as np
 import torch as th
 from matplotlib.figure import Figure
-from torch.optim import Adam
+from torch.optim import Adam, AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
-from utils.tmd import compute_tmd_mixed
-from validation.dist_metrics import compute_distribution_metrics
+from utils.tmd import compute_tmd_mixed, compute_tmd_embedding
+from utils.data_loading import CELL_CLASS_NAMES
+from validation.dist_metrics import compute_distribution_metrics, build_gt_cache
 from validation.plot import plot_graph_grid_angles, DEFAULT_ANGLES
+# NOTE: validation.teacher_forced_eval is imported lazily inside evaluate()/_tf_batches_for()
+# to avoid a circular import (it imports graph_generation.method.helpers, and this module is
+# itself imported by graph_generation/__init__).
 
 # Optional / guarded imports (Hydra, OmegaConf, wandb)
 try:  # Hydra runtime config access
@@ -34,7 +38,6 @@ try:  # Experiment tracking (optional)
 except Exception:  # pragma: no cover
     wandb = None
 
-from .metrics import Metric
 from .model import EMA, EMA1
 
 
@@ -79,6 +82,24 @@ def build_wandb_config(cfg):
     return {**base_cfg, **alias_cfg}
 
 
+def build_optimizer(parameters, cfg_training):
+    """Construct the optimizer from cfg.training.
+
+    Defaults preserve the legacy plain-Adam behavior (weight_decay=0), so
+    configs without these fields are unchanged. Adam and AdamW share an
+    identical state_dict layout, so checkpoint resume stays compatible even if
+    the optimizer type is switched.
+    """
+    name = str(getattr(cfg_training, "optimizer", "adam")).lower()
+    lr = cfg_training.lr
+    weight_decay = getattr(cfg_training, "weight_decay", 0.0)
+    if name == "adam":
+        return Adam(parameters, lr=lr, weight_decay=weight_decay)
+    if name == "adamw":
+        return AdamW(parameters, lr=lr, weight_decay=weight_decay)
+    raise ValueError(f"Unknown optimizer '{name}' (expected 'adam' or 'adamw')")
+
+
 class Trainer:
     def __init__(
         self,
@@ -88,7 +109,6 @@ class Trainer:
         train_graphs: list[nx.Graph],
         validation_graphs: list[nx.Graph],
         test_graphs: list[nx.Graph],
-        metrics: list[Metric],
         cfg,
         pos_scale_factor: float | None = None,
     ):
@@ -97,10 +117,21 @@ class Trainer:
         self.train_graphs = train_graphs
         self.validation_graphs = validation_graphs
         self.test_graphs = test_graphs
-        self.metrics = metrics
         self.cfg = cfg
 
         self.rng = np.random.default_rng(0)
+        # Per-eval-set caches for the distribution metrics: the GT-fit objects
+        # (morpho mean/std, TMD PCA, MMD bandwidths, Sholl radii) and the
+        # real-vs-real floor are model-independent, so computed once per eval set.
+        self._eval_cache: dict[int, dict] = {}
+        self._floor_cache: dict[int, dict] = {}
+        # Fixed GT reduction batches for teacher-forced eval, built once per eval set and
+        # reused every validation so the TF curve is comparable step-to-step.
+        self._tf_batch_cache: dict[int, list] = {}
+        # Per-eval-set GT cache for the matched TMD-conditioned pairwise metrics (GT diagrams,
+        # geometric scalars, value arrays) -- fixed across steps, so built once. Keyed by
+        # (id(eval_graphs), filtrations, normalize_mode).
+        self._tmd_cond_gt_cache: dict[tuple, dict] = {}
         # Prefer CUDA, fallback to CPU (MPS has stability issues with PyG)
         if not cfg.debugging:
             if th.cuda.is_available():
@@ -112,7 +143,7 @@ class Trainer:
         print(f"Selected device: {self.device}")
         self.method = method.to(self.device)
         self.model = model.to(self.device)
-        self.optimizer = Adam(self.model.parameters(), cfg.training.lr)
+        self.optimizer = build_optimizer(self.model.parameters(), cfg.training)
 
         # Optional LR scheduler (Cosine Annealing over training horizon)
         self.scheduler = None
@@ -168,7 +199,6 @@ class Trainer:
                 self.run_id = None
         else:
             self.step = 0
-            self.best_validation_scores = {beta: -1 for beta in cfg.ema.betas} # what are EMA betas? TODO
             self.run_id = None
 
         # Wandb (only if requested AND available AND OmegaConf present)
@@ -217,6 +247,10 @@ class Trainer:
         self.logger.info(f"Training initialized on device: {self.device}")
         self.logger.info(f"Total model parameters: {num_parameters / 1e6:.6f} Million")
 
+        # Surface static run metadata (model size, dataset sizes, device) in the
+        # wandb Overview -> Config panel.
+        self._log_run_metadata(model, num_parameters)
+
     def save_checkpoint(self):
         checkpoint = {
             name: model.state_dict()
@@ -227,7 +261,6 @@ class Trainer:
         if getattr(self, "scheduler", None) is not None:
             checkpoint["scheduler"] = self.scheduler.state_dict()
         checkpoint["step"] = self.step
-        checkpoint["best_validation_scores"] = self.best_validation_scores
         checkpoint["run_id"] = self.run_id
 
         checkpoint_dir = self.output_dir / "checkpoints"
@@ -259,7 +292,6 @@ class Trainer:
         if "scheduler" in checkpoint and getattr(self, "scheduler", None) is not None:
             self.scheduler.load_state_dict(checkpoint["scheduler"])
         self.step = checkpoint["step"]
-        self.best_validation_scores = checkpoint["best_validation_scores"]
         self.run_id = checkpoint["run_id"]
 
     def train(self):
@@ -384,43 +416,33 @@ class Trainer:
             self.logger.info(f"Running validation at step {self.step}")
         _t_val_start = time()
 
-        # --- VALIDATION LOOP (metrics + optional plots) ---
-        # We gate metric computation & test-trigger logic with cfg.validation.enable_metrics.
-        # We gate example plotting with cfg.validation.enable_plots.
-        # Original code retained inside conditionals for future reactivation.
+        # --- VALIDATION LOOP ---
+        # Generate graphs per EMA beta; the live distribution/TMD metrics and plots
+        # are computed inside evaluate(). test_results stays empty here -- test-set
+        # evaluation is driven by the explicit test() method (cfg.testing).
         val_results = {}
         test_results = {}
-        enable_metrics = getattr(self.cfg.validation, 'enable_metrics', True)
-        enable_plots = getattr(self.cfg.validation, 'enable_plots', True)
 
         for beta in self.cfg.ema.betas:
-            # Always generate graphs (needed for plots & potential metrics later)
             val_results[f"ema_{beta}"] = self.evaluate(self.validation_graphs, beta)
 
-            if enable_metrics:
-                # --- METRIC VALIDATION SCORE BLOCK (original logic) ---
-                unique_novel_valid_keys = [
-                    str(m) for m in self.metrics if "UniqueNovelValid" in str(m)
-                ]
-                if len(unique_novel_valid_keys) > 0:
-                    validation_score = val_results[f"ema_{beta}"][
-                        unique_novel_valid_keys[0]
-                    ]
-                else:
-                    # Ratio metric used as inverse score previously
-                    validation_score = 1 / val_results[f"ema_{beta}"]["Ratio"]
-
-                # Evaluate on test set if validation score improved
-                if validation_score >= self.best_validation_scores[beta]:
-                    self.best_validation_scores[beta] = validation_score
-                    test_results[f"ema_{beta}"] = self.evaluate(self.test_graphs, beta)
-            else:
-                # Metrics disabled: insert placeholder
-                val_results[f"ema_{beta}"]["metrics_disabled"] = True
-
-        self.logger.info("[validation step=%d] total=%.1fs", self.step, time() - _t_val_start)
+        _val_total = time() - _t_val_start
+        self.logger.info("[validation step=%d] total=%.1fs", self.step, _val_total)
+        # Aggregate sampling time across betas (per-beta timing already lives in val_results).
+        sampling_total = sum(
+            v.get("timing", {}).get("sampling_s", 0.0)
+            for v in val_results.values()
+            if isinstance(v, dict)
+        )
         # Log results (test_results empty if metrics disabled & no improvements tracked)
-        self.log({"validation": val_results, "test": test_results})
+        self.log({
+            "validation": val_results,
+            "test": test_results,
+            "timing": {
+                "validation_total_s": float(_val_total),
+                "sampling_total_s": float(sampling_total),
+            },
+        })
 
         # Strip Figure objects from results before pickling: PNGs are already
         # saved to eval_plots/ and their paths are stored in *_path keys. Keeping
@@ -453,9 +475,199 @@ class Trainer:
         # cause a linear RSS leak over long runs.
         plt.close('all')
 
+    def _eval_embed_fn(self):
+        """Euclidean-from-root TMD persistence-image embedding used for joint metrics."""
+        tmd_bins = getattr(self.cfg.validation, "tmd_eval_bins", 16)
+        filtration = getattr(self.cfg.validation, "tmd_eval_filtration", "radial_root")
+        return lambda G: compute_tmd_embedding(G, filtration=filtration, n_bins=tmd_bins)
+
+    def _gt_cache_for(self, eval_graphs: list[nx.Graph], uhat_np: np.ndarray) -> dict:
+        """Build (once, then cache) the GT-fit objects for the distribution metrics."""
+        key = id(eval_graphs)
+        cache = self._eval_cache.get(key)
+        if cache is None:
+            cache = build_gt_cache(
+                eval_graphs,
+                uhat=tuple(np.asarray(uhat_np, dtype=float).reshape(3).tolist()),
+                embed_fn=self._eval_embed_fn(),
+                tmd_pca_ncomp=getattr(self.cfg.validation, "tmd_pca_ncomp", 32),
+            )
+            self._eval_cache[key] = cache
+        return cache
+
+    def _floor_for(self, eval_graphs: list[nx.Graph], cache: dict, uhat_np: np.ndarray) -> dict:
+        """Real-vs-real floor: a train subset (matched to N) vs the eval/GT set, cached once."""
+        key = id(eval_graphs)
+        floor = self._floor_cache.get(key)
+        if floor is None:
+            n = len(eval_graphs)
+            train = self.train_graphs or []
+            if not train:
+                floor = {}
+            else:
+                rng = np.random.default_rng(0)
+                if len(train) > n:
+                    idx = rng.choice(len(train), size=n, replace=False)
+                    train_sub = [train[i] for i in idx]
+                else:
+                    train_sub = list(train)
+                floor = compute_distribution_metrics(
+                    train_sub,
+                    eval_graphs,
+                    uhat=uhat_np,
+                    gt_cache=cache,
+                    embed_fn=self._eval_embed_fn(),
+                    ged_enabled=False,
+                    enable_ks=getattr(self.cfg.validation, "enable_ks", True),
+                    enable_morphometrics=getattr(self.cfg.validation, "enable_morphometrics", True),
+                    enable_light_joint=getattr(self.cfg.validation, "enable_light_joint", True),
+                    dc_k=getattr(self.cfg.validation, "dc_nearest_k", 5),
+                    tmd_pca_ncomp=getattr(self.cfg.validation, "tmd_pca_ncomp", 32),
+                )
+            self._floor_cache[key] = floor
+        return floor
+
     @th.no_grad()
     def evaluate(self, eval_graphs: list[nx.Graph], beta):
-        """Evaluate model for given beta on given graphs."""
+        """Run the selected validation eval(s) for `beta` and return one merged results dict.
+
+        `cfg.validation.eval_mode` selects which sampler(s) run:
+          - "rollout"        : free-running generation + its dist/graph metrics + plots (default);
+          - "teacher_forced" : only the per-level teacher-forced eval (skips free-running);
+          - "both"           : both, for the TF<->free-running exposure-gap comparison.
+        """
+        model = self.ema_models[beta]
+        eval_mode = getattr(self.cfg.validation, "eval_mode", "rollout")
+        run_free = eval_mode in ("rollout", "both")
+        run_tf = eval_mode in ("teacher_forced", "both")
+
+        if run_free:
+            results = self._evaluate_rollout(eval_graphs, beta)
+        else:
+            # No free-running generation: keep the keys the downstream (plots/pickling) code expects.
+            results = {
+                "pred_graphs": [], "timing": {}, "metrics_disabled": True,
+                "examples": None, "examples_path": None,
+                "examples_compare": None, "examples_compare_path": None,
+            }
+
+        if run_tf:
+            from validation.teacher_forced_eval import evaluate_teacher_forced
+            uhat_np = (
+                model.uhat.detach().cpu().numpy().reshape(-1)
+                if getattr(model, "uhat", None) is not None
+                else np.array([0.0, 0.0, 1.0])
+            )
+            _t0_tf = time()
+            tf_batches = self._tf_batches_for(eval_graphs)
+            results["teacher_forced"] = evaluate_teacher_forced(
+                self.method, model, tf_batches, uhat_np, device=self.device,
+                min_depth=getattr(self.cfg.validation, "tf_min_depth", 0),
+                include_breakdowns=False,   # pooled-only for the live wandb path
+                enable_ks=False,            # W1 only, per config preference
+            )
+            results.setdefault("timing", {})["teacher_forced_s"] = float(time() - _t0_tf)
+
+        # Matched, TMD-conditioned pairwise fidelity (opt-in via validation.enable_pairwise_metrics,
+        # gated to every-N-th validation for cost). Needs rollout's pred_graphs, which are already
+        # index-aligned to eval_graphs, so pred[i] is compared to its conditioning source gt[i].
+        pred_graphs = results.get("pred_graphs") or []
+        if run_free and pred_graphs and self._tmd_cond_due():
+            from validation.tmd_conditional_eval import compute_conditional_pairwise_metrics
+            uhat_np = (
+                model.uhat.detach().cpu().numpy().reshape(-1)
+                if getattr(model, "uhat", None) is not None
+                else np.array([0.0, 0.0, 1.0])
+            )
+            filts = tuple(getattr(self.cfg.validation, "tmd_cond_pd_filtrations", ("path", "radial_root")))
+            normalize_mode = getattr(self.cfg.validation, "tmd_cond_normalize", "minmax")
+            _t0_tc = time()
+            res = compute_conditional_pairwise_metrics(
+                pred_graphs, eval_graphs, uhat=uhat_np, pd_filtrations=filts,
+                max_pairs=getattr(self.cfg.validation, "tmd_cond_max_pairs", 64),
+                enable_wasserstein=bool(getattr(self.cfg.validation, "tmd_cond_wasserstein", True)),
+                enable_bottleneck=bool(getattr(self.cfg.validation, "tmd_cond_bottleneck", False)),
+                normalize_mode=normalize_mode,
+                gt_cache=self._tmd_cond_gt_cache_for(eval_graphs, filts, normalize_mode, uhat_np),
+            )
+            res["conditioned"] = float(getattr(model, "tmd_hidden_dim", 0) > 0)
+            results["tmd_cond"] = res
+            results.setdefault("timing", {})["tmd_cond_s"] = float(time() - _t0_tc)
+
+        return results
+
+    def _tmd_cond_due(self) -> bool:
+        """Whether the matched pairwise block runs this validation.
+
+        Off unless ``validation.enable_pairwise_metrics`` (default False) -- unconditional runs
+        pay zero cost. When on, runs every ``validation.tmd_cond_every``-th validation (plus the
+        first, for a baseline). Gate is ``self.step``-based, NOT a counter: ``evaluate()`` is
+        called once per beta and again per beta for the test set on improvement, so ``self.step``
+        is the only stable clock across those calls within one validation.
+        """
+        if not getattr(self.cfg.validation, "enable_pairwise_metrics", False):
+            return False
+        every = int(getattr(self.cfg.validation, "tmd_cond_every", 5))
+        if every <= 1:
+            return True
+        interval = max(int(self.cfg.validation.interval), 1)
+        vc = self.step // interval
+        return vc <= 1 or vc % every == 0
+
+    def _tmd_cond_gt_cache_for(self, eval_graphs, filtrations, normalize_mode, uhat) -> dict:
+        """GT-side pairwise cache (diagrams/scalars/value arrays), built once per eval set.
+
+        Mirrors ``_tf_batches_for``: keyed by (id(eval_graphs), filtrations, normalize_mode) so the
+        fixed GT side is reused every validation and the pairwise curve is comparable step-to-step.
+        """
+        from validation.tmd_conditional_eval import build_gt_pairwise_cache
+        key = (id(eval_graphs), tuple(filtrations), normalize_mode)
+        cache = self._tmd_cond_gt_cache.get(key)
+        if cache is None:
+            cap = getattr(self.cfg.validation, "tmd_cond_max_pairs", 64)
+            graphs = list(eval_graphs)
+            if cap is not None and int(cap) > 0:
+                graphs = graphs[:int(cap)]
+            cache = build_gt_pairwise_cache(
+                graphs, uhat=uhat, pd_filtrations=filtrations, normalize_mode=normalize_mode)
+            self._tmd_cond_gt_cache[key] = cache
+        return cache
+
+    def _tf_batches_for(self, eval_graphs: list[nx.Graph]) -> list:
+        """Fixed GT reduction batches for teacher-forced eval, built once then cached.
+
+        Capped at `cfg.validation.tf_max_graphs` (the full ODE runs per reduction level per graph,
+        so this bounds cost). Cached by `id(eval_graphs)` -- like `_gt_cache_for` -- so every
+        validation reuses the identical batches and the TF curve is comparable across steps.
+        """
+        from validation.teacher_forced_eval import build_reduction_batches_from_graphs
+        key = id(eval_graphs)
+        batches = self._tf_batch_cache.get(key)
+        if batches is None:
+            cap = getattr(self.cfg.validation, "tf_max_graphs", 64)  # may be null -> no cap
+            graphs = list(eval_graphs)
+            if cap is not None and int(cap) > 0:
+                graphs = graphs[:int(cap)]
+            bs = (
+                self.cfg.validation.batch_size
+                if self.cfg.validation.batch_size is not None
+                else self.cfg.training.batch_size
+            )
+            psf = self.pos_scale_factor if self.pos_scale_factor is not None else 1.0
+            # Match the trained model's root-child ordinal mode so TF ordinals == training.
+            uhat = np.asarray(
+                getattr(self.cfg.model, "so2_axis", (0.0, 0.0, 1.0)), dtype=float
+            ).reshape(3)
+            rco = str(getattr(self.cfg.model, "root_child_order", "first_edge"))
+            batches = build_reduction_batches_from_graphs(
+                graphs, self.cfg.reduction, bs, pos_scale_factor=float(psf),
+                uhat=uhat, root_child_order=rco)
+            self._tf_batch_cache[key] = batches
+        return batches
+
+    @th.no_grad()
+    def _evaluate_rollout(self, eval_graphs: list[nx.Graph], beta):
+        """Free-running generation + its distribution/graph metrics + 3D plots (the "rollout" eval)."""
         model = self.ema_models[beta]
 
         # Shuffle prediction order to make size distribution more uniform
@@ -473,10 +685,33 @@ class Trainer:
         tmd_hidden_dim = getattr(model, "tmd_hidden_dim", 0)
         tmds = None
         if tmd_hidden_dim > 0:
+            # Match the training-side conditioning exactly: same filtrations, bins, and axis.
+            uhat_np = (
+                model.uhat.detach().cpu().numpy().reshape(-1)
+                if getattr(model, "uhat", None) is not None
+                else np.array([0.0, 0.0, 1.0])
+            )
+            tmd_filtrations = list(getattr(self.cfg.model, "tmd_filtrations", ("path", "height", "rho")))
+            tmd_bins = int(getattr(self.cfg.model, "tmd_bins", 16))
             tmds = np.stack(
-                [compute_tmd_mixed(g) for g in eval_graphs],
+                [
+                    compute_tmd_mixed(g, filtrations=tmd_filtrations, n_bins=tmd_bins, uhat=uhat_np)
+                    for g in eval_graphs
+                ],
                 axis=0,
             )[pred_perm]
+
+        # Cell-type conditioning: copy each eval graph's own class onto its generated
+        # neuron (index-aligned to eval_graphs, same as size/tmd), so pred[i] <-> eval[i].
+        class_hidden_dim = getattr(model, "class_hidden_dim", 0)
+        class_all = None
+        if class_hidden_dim > 0:
+            raw_classes = [g.graph.get("cell_class") for g in eval_graphs]
+            if any(c is None for c in raw_classes):
+                raise ValueError(
+                    "class_hidden_dim>0 requires every eval graph to carry a 'cell_class' label."
+                )
+            class_all = np.array([int(c) for c in raw_classes], dtype=np.int64)[pred_perm]
         bs = (
             self.cfg.validation.batch_size
             if self.cfg.validation.batch_size is not None
@@ -495,11 +730,15 @@ class Trainer:
             tmd_batch = None
             if tmds is not None:
                 tmd_batch = th.from_numpy(tmds[cursor : cursor + len(batch)]).to(self.device)
+            cell_class_batch = None
+            if class_all is not None:
+                cell_class_batch = th.from_numpy(class_all[cursor : cursor + len(batch)]).to(self.device)
             pred_graphs_batch = self.method.sample_graphs(
                 target_size=th.tensor(batch, device=self.device),
                 model=model,
                 tmd=tmd_batch,
                 num_root_children=th.tensor(nrc_batch, device=self.device),
+                cell_class=cell_class_batch,
             )  # returns list[nx.Graph] with geometric node attrs
             pred_graphs += pred_graphs_batch
             cursor += len(batch)
@@ -550,49 +789,99 @@ class Trainer:
 
         # Distribution-level comparison of generated vs GT statistics (Wasserstein-1
         # per stat + avg tree-edit distance). Logged as floats -> wandb scalars.
+        _t_dist = None
         if getattr(self.cfg.validation, "enable_dist_metrics", True):
             _t0_dist = time()
+            gt_cache = self._gt_cache_for(eval_graphs, uhat_np)
             results["dist"] = compute_distribution_metrics(
                 results["pred_graphs"],
                 eval_graphs,
                 uhat=uhat_np,
                 ged_enabled=getattr(self.cfg.validation, "ged_enabled", True),
                 ged_timeout=getattr(self.cfg.validation, "ged_timeout", 5.0),
+                enable_ks=getattr(self.cfg.validation, "enable_ks", True),
+                enable_morphometrics=getattr(self.cfg.validation, "enable_morphometrics", True),
+                enable_light_joint=getattr(self.cfg.validation, "enable_light_joint", True),
+                gt_cache=gt_cache,
+                embed_fn=self._eval_embed_fn(),
+                dc_k=getattr(self.cfg.validation, "dc_nearest_k", 5),
+                tmd_pca_ncomp=getattr(self.cfg.validation, "tmd_pca_ncomp", 32),
             )
+            # Real-vs-real floor as reference lines + a single headline excess used
+            # for checkpoint selection (gen MMD above the achievable real-vs-real floor).
+            if getattr(self.cfg.validation, "enable_floor", True):
+                floor = self._floor_for(eval_graphs, gt_cache, uhat_np)
+                if floor:
+                    results["floor"] = floor
+                    gen_mmd = results["dist"].get("mmd_morpho", float("nan"))
+                    floor_mmd = floor.get("mmd_morpho", float("nan"))
+                    if np.isfinite(gen_mmd) and np.isfinite(floor_mmd):
+                        results["dist"]["headline_excess_mmd_morpho"] = float(gen_mmd - floor_mmd)
+            _t_dist = time() - _t0_dist
             self.logger.info(
-                "[evaluate beta=%s] dist_metrics=%.1fs", beta, time() - _t0_dist
+                "[evaluate beta=%s] dist_metrics=%.1fs", beta, _t_dist
             )
 
-        # Metric computation gated
-        enable_metrics = getattr(self.cfg.validation, 'enable_metrics', True)
-        _t0_metrics = time()
-        if enable_metrics:
-            # Validate graphs (original metric loop)
-            for metric in self.metrics:
-                results[str(metric)] = metric(
-                    reference_graphs=eval_graphs,
-                    predicted_graphs=pred_graphs,
-                    train_graphs=self.train_graphs,
+            # Per-cell-class stratified distribution metrics (curated subset). Uses the
+            # same order-independent compute_distribution_metrics on each class's subset;
+            # pred_graphs[i] is aligned to eval_graphs[i], so subsetting by the eval graph's
+            # class matches generated-to-real. Tree-edit/KS are dropped (expensive/noisy on
+            # small subsets); PCA n_components and density/coverage k are clamped to class size.
+            if getattr(self.cfg.validation, "per_cell_class", False) and class_hidden_dim > 0:
+                min_count = int(getattr(self.cfg.validation, "per_cell_class_min_count", 20))
+                pred_all = results["pred_graphs"]
+                classes_present = sorted({
+                    g.graph.get("cell_class") for g in eval_graphs
+                    if g.graph.get("cell_class") is not None
+                })
+                for c in classes_present:
+                    idx = [i for i, g in enumerate(eval_graphs) if g.graph.get("cell_class") == c]
+                    cname = CELL_CLASS_NAMES[c] if 0 <= c < len(CELL_CLASS_NAMES) else f"id{c}"
+                    if len(idx) < min_count:
+                        self.logger.info(
+                            "[per_cell_class] skip %s (n=%d < min_count=%d)", cname, len(idx), min_count
+                        )
+                        continue
+                    eval_c = [eval_graphs[i] for i in idx]
+                    pred_c = [pred_all[i] for i in idx]
+                    ncomp = max(1, min(getattr(self.cfg.validation, "tmd_pca_ncomp", 32), len(eval_c) - 1))
+                    dc_k = max(1, min(getattr(self.cfg.validation, "dc_nearest_k", 5), len(eval_c) - 1))
+                    gt_cache_c = build_gt_cache(
+                        eval_c,
+                        uhat=tuple(np.asarray(uhat_np, dtype=float).reshape(3).tolist()),
+                        embed_fn=self._eval_embed_fn(),
+                        tmd_pca_ncomp=ncomp,
+                    )
+                    results[f"class_{cname}"] = compute_distribution_metrics(
+                        pred_c,
+                        eval_c,
+                        uhat=uhat_np,
+                        ged_enabled=False,          # skip tree-edit: expensive + noisy per class
+                        enable_ks=False,            # curated subset -> W1 + joint MMD/DC only
+                        enable_morphometrics=True,  # per-tree W1 (extents, Strahler, Sholl)
+                        enable_light_joint=True,    # joint MMD/density-coverage (morpho & TMD)
+                        gt_cache=gt_cache_c,
+                        embed_fn=self._eval_embed_fn(),
+                        dc_k=dc_k,
+                        tmd_pca_ncomp=ncomp,
+                    )
+                self.logger.info(
+                    "[evaluate beta=%s] per_cell_class metrics: %d classes",
+                    beta, sum(1 for k in results if k.startswith("class_")),
                 )
 
-            if self.cfg.validation.per_graph_size:
-                for n in set(target_size):
-                    eval_graphs_n = [g for g in eval_graphs if len(g) == n]
-                    pred_graphs_n = [g for g in pred_graphs if len(g) == n]
-                    results[f"size_{n}"] = {}
-                    for metric in self.metrics:
-                        results[f"size_{n}"][str(metric)] = metric(
-                            reference_graphs=eval_graphs_n,
-                            predicted_graphs=pred_graphs_n,
-                            train_graphs=self.train_graphs,
-                        )
-        else:
-            results['metrics_disabled'] = True
-        _t_metrics = time() - _t0_metrics
+        # Timing surfaced to wandb (floats -> flattened as timing/... under this beta).
+        n_eval = max(len(eval_graphs), 1)
+        results["timing"] = {
+            "sampling_s": float(_t_generation),
+            "sampling_per_graph_ms": float(_t_generation / n_eval * 1000.0),
+        }
+        if _t_dist is not None:
+            results["timing"]["dist_metrics_s"] = float(_t_dist)
 
         self.logger.info(
-            "[evaluate beta=%s n_graphs=%d] generation=%.1fs metrics=%.1fs",
-            beta, len(eval_graphs), _t_generation, _t_metrics,
+            "[evaluate beta=%s n_graphs=%d] generation=%.1fs",
+            beta, len(eval_graphs), _t_generation,
         )
 
         # Example plots: 3D multi-azimuth views that orbit the model's uhat axis.
@@ -609,15 +898,46 @@ class Trainer:
             eval_plots_dir = self.output_dir / 'eval_plots'
             stem = f"step_{self.step}_beta_{beta}"
 
+            # Under class conditioning the first-8 grid is uninformative; instead show
+            # ONE neuron per class, labelled by class name, and track the same GT neuron
+            # (deterministic first-occurrence) across steps. pred_graphs[i] is aligned to
+            # eval_graphs[i], so each generated sample's class is its eval graph's class.
+            if class_hidden_dim > 0:
+                classes_sorted = sorted({
+                    g.graph.get("cell_class") for g in eval_graphs
+                    if g.graph.get("cell_class") is not None
+                })
+                sel_idx, class_labels = [], []
+                for c in classes_sorted:
+                    i = next((j for j, g in enumerate(eval_graphs)
+                              if g.graph.get("cell_class") == c), None)
+                    if i is None:
+                        continue
+                    sel_idx.append(i)
+                    class_labels.append(
+                        CELL_CLASS_NAMES[c] if 0 <= c < len(CELL_CLASS_NAMES) else f"id{c}"
+                    )
+                gen_graphs = [results["pred_graphs"][i] for i in sel_idx]
+                gt_graphs = [eval_graphs[i] for i in sel_idx]
+                gen_titles = [f"Gen {n}" for n in class_labels]
+                gt_titles = [f"GT {n}" for n in class_labels]
+                n_show = max(len(sel_idx), 1)
+            else:
+                gen_graphs = results["pred_graphs"][:max_examples]
+                gt_graphs = eval_graphs[:max_examples]
+                gen_titles = gt_titles = None
+                n_show = max_examples
+
             gen_fig, gen_path = plot_graph_grid_angles(
-                results["pred_graphs"][:max_examples],
+                gen_graphs,
                 out_dir=eval_plots_dir,
                 stem=stem,
                 file_tag="gen3d",
                 angles=angles,
                 uhat=uhat,
                 title_prefix="Gen",
-                max_graphs=max_examples,
+                per_graph_titles=gen_titles,
+                max_graphs=n_show,
             )
             results["examples"] = gen_fig
             results["examples_path"] = str(gen_path)
@@ -625,15 +945,16 @@ class Trainer:
             # GT references at the same angles for qualitative eyeballing
             # (the distribution metrics are the quantitative signal).
             ref_fig, ref_path = plot_graph_grid_angles(
-                eval_graphs[:max_examples],
+                gt_graphs,
                 out_dir=eval_plots_dir,
                 stem=stem,
                 file_tag="ref3d",
                 angles=angles,
                 uhat=uhat,
                 title_prefix="GT",
+                per_graph_titles=gt_titles,
                 node_color="#1f77b4",
-                max_graphs=max_examples,
+                max_graphs=n_show,
             )
             results["examples_compare"] = ref_fig
             results["examples_compare_path"] = str(ref_path)
@@ -645,25 +966,74 @@ class Trainer:
 
         return results
 
+    def _log_run_metadata(self, model, num_parameters):
+        """Push static run metadata (model size, dataset sizes, device) into the
+        wandb Overview -> Config panel. num_parameters is only known after
+        wandb.init, so we use config.update rather than the init config. No-op
+        (and best-effort) when wandb is disabled/unavailable."""
+        if self.wandb_run is None:
+            return
+        try:
+            param_bytes = sum(p.numel() * p.element_size() for p in model.parameters())
+            buffer_bytes = sum(b.numel() * b.element_size() for b in model.buffers())
+            self.wandb_run.config.update(
+                {
+                    "model_num_parameters": int(num_parameters),
+                    "model_num_parameters_millions": round(num_parameters / 1e6, 4),
+                    "model_size_mb": round((param_bytes + buffer_bytes) / 1e6, 3),
+                    "num_train_graphs": len(self.train_graphs),
+                    "num_val_graphs": len(self.validation_graphs),
+                    "num_test_graphs": len(self.test_graphs),
+                    "device": str(self.device),
+                },
+                allow_val_change=True,
+            )
+        except Exception as e:  # pragma: no cover - metadata is best-effort
+            print(f"[wandb config metadata skipped] {e}")
+
     def log(self, log_dict: dict, prefix: str = "", indent: int = 0):
-        """Logs an arbitrarily nested dict to the console and wandb."""
+        """Logs an arbitrarily nested dict to the console and wandb.
+
+        All wandb-bound leaves (float scalars + Figures) from a single log()
+        call are collected into one flat payload and flushed with a SINGLE
+        wandb.log(..., step=self.step). Batching (instead of one .log() per
+        leaf) keeps wandb's internal `_step` counter aligned with our training
+        step, so image/media panels — whose step slider ignores the custom
+        `train_step` metric and always uses `_step` — land at the true step
+        instead of a runaway internal counter.
+        """
+        wandb_enabled = (
+            getattr(self.cfg.wandb, 'logging', False)
+            and self.wandb_run is not None
+            and wandb is not None
+        )
+        payload: dict = {}
+        self._collect_log(log_dict, payload, wandb_enabled, prefix=prefix, indent=indent)
+        if wandb_enabled and payload:
+            payload["train_step"] = self.step
+            self.wandb_run.log(payload, step=self.step)
+
+    def _collect_log(self, log_dict: dict, payload: dict, wandb_enabled: bool,
+                     prefix: str = "", indent: int = 0):
+        """Recursively print a nested dict and collect wandb leaves into `payload`."""
         for key, value in log_dict.items():
             if isinstance(value, dict):
                 print(f"{'   ' * indent}{key}:")
-                self.log(value, prefix=f"{prefix}{key}/", indent=indent + 1)
+                self._collect_log(value, payload, wandb_enabled,
+                                  prefix=f"{prefix}{key}/", indent=indent + 1)
             elif isinstance(value, float):
                 log_msg = f"{'   ' * indent}{key}: {value}"
                 print(log_msg)
                 # Also log to file
                 if hasattr(self, 'logger'):
                     self.logger.info(f"{prefix}{key}: {value}")
-                if self.cfg.wandb.logging and self.wandb_run is not None:
-                    self.wandb_run.log({f"{prefix}{key}": value, "train_step": self.step})
+                if wandb_enabled:
+                    payload[f"{prefix}{key}"] = value
             elif isinstance(value, Figure):
-                # Wandb logging for figures currently disabled or wandb import commented out.
-                # Keeping placeholder for future reactivation.
-                if getattr(self.cfg.wandb, 'logging', False) and self.wandb_run is not None and wandb is not None:
+                if wandb_enabled:
                     try:
-                        self.wandb_run.log({f"{prefix}{key}": wandb.Image(value), "train_step": self.step})
+                        payload[f"{prefix}{key}"] = wandb.Image(
+                            value, caption=f"step {self.step}"
+                        )
                     except Exception as e:
                         print(f"[wandb logging skipped] {e}")

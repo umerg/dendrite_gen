@@ -4,6 +4,14 @@ import networkx as nx
 from pathlib import Path
 
 
+# Canonical cortical-layer-ordered pyramidal cell classes. The integer id is the
+# list index; this is the single source of truth for the id<->name mapping shared
+# by the dataset writer (preprocessing/prepare_conditional_dataset.py) and the
+# per-class validation metrics (graph_generation/training.py). The dropped
+# test-only rare classes (WM-P, MC, BPC) are intentionally absent.
+CELL_CLASS_NAMES = ["23P", "4P", "5P-IT", "5P-ET", "5P-NP", "6P-IT", "6P-CT"]
+
+
 def load_swc_graph(path):
     """
     Load a single cleaned SWC file into an undirected NetworkX tree graph.
@@ -18,6 +26,8 @@ def load_swc_graph(path):
     Post-processing adjustments:
         * Positions are recentered so the root node is at the origin (0,0,0).
         * Root id stored as G.graph['root'].
+        * Optional per-neuron cell class ('# cell_class N' header) stored as
+          G.graph['cell_class'] (int), or None if the header is absent.
 
     Node attributes:
         pos: np.ndarray shape (3,) float64 (x,y,z) (after recentering)
@@ -34,11 +44,22 @@ def load_swc_graph(path):
     G = nx.Graph()
     parent_links = []
     root_id = None
+    cell_class = None
 
     with path.open("r") as f:
         for line in f:
             line = line.strip()
-            if not line or line.startswith("#"):
+            if not line:
+                continue
+            if line.startswith("#"):
+                # Optional per-neuron class label embedded by the cleaning pipeline,
+                # format: "# cell_class N" (integer). Absent in older files -> None.
+                tok = line.lstrip("#").split()
+                if len(tok) == 2 and tok[0] == "cell_class":
+                    try:
+                        cell_class = int(tok[1])
+                    except ValueError:
+                        pass
                 continue
             parts = line.split()
             if len(parts) < 7:
@@ -79,6 +100,7 @@ def load_swc_graph(path):
         G.nodes[nid]["pos"] = G.nodes[nid]["pos"] - root_pos
 
     G.graph["root"] = root_id
+    G.graph["cell_class"] = cell_class
     return G
 
 

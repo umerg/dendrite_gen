@@ -53,6 +53,7 @@ def graph_unconditional_feature_row(
     pair_index: int | None = None,
     distribution_metrics: Sequence[str] = UNCONDITIONAL_DISTRIBUTION_METRICS,
     scalar_metrics: Sequence[str] = UNCONDITIONAL_SCALAR_METRICS,
+    uhat=(0.0, 0.0, 1.0),
 ) -> dict[str, object]:
     """Return one tree-level feature row for unconditioned distribution plots."""
     row: dict[str, object] = {
@@ -66,7 +67,7 @@ def graph_unconditional_feature_row(
         row[f"{metric}_mean"] = float(np.mean(values)) if values.size else float("nan")
         row[f"{metric}_std"] = float(np.std(values)) if values.size else float("nan")
 
-    scalar_stats = graph_tree_scalar_stats(graph)
+    scalar_stats = graph_tree_scalar_stats(graph, uhat=uhat)
     for metric in scalar_metrics:
         row[metric] = float(scalar_stats.get(metric, float("nan")))
 

@@ -121,7 +121,7 @@ Hydra-based YAML configs live in `config/`. The primary training config is `conf
 |---------|---------|------|
 | Dataset | `trees_test` | `config/dataset/trees_test.yaml` |
 | Diffusion | `basic` | `config/diffusion/basic.yaml` |
-| Method | `expansion_oneshot` | `config/method/expansion_oneshot.yaml` |
+| Method | `expansion` | `config/method/expansion.yaml` |
 
 ### Key Config Parameters
 
@@ -281,13 +281,11 @@ dendrite_gen/
 │   ├── training.py                  # Trainer class
 │   ├── depth_reduction.py           # Depth-based tree contraction
 │   ├── reduction.py                 # Cherry-based tree contraction
-│   ├── metrics.py                   # Evaluation metrics
 │   ├── model/
 │   │   ├── egnn_so2.py              # SO2_EGNN_Network (main model)
 │   │   └── ...
 │   ├── method/
 │   │   ├── expansion.py             # Diffusion-wrapped expansion
-│   │   ├── expansion_oneshot.py     # One-shot expansion (no diffusion)
 │   │   └── helpers.py               # Geometry helpers
 │   ├── diffusion/
 │   │   ├── basic.py                 # DenoisingDiffusionModel

@@ -24,6 +24,16 @@ class ReducedGraphData(Data):
       - new_leaf_idx_from_next: LongTensor indices of nodes considered "new leaves" when expanding from next level
       - new_leaf_mask_from_next: BoolTensor mask aligned with nodes for the above
       - num_root_children: scalar int, branching factor of the root node (k)
+      - cell_class: per-graph int64 cell-type label, shape (1,). A graph-level field
+                    (constant across reduction levels) carried like `tmd`; it is
+                    intentionally NOT in the __inc__ offset tuple below, so PyG
+                    batching concatenates it to (B,) without node-index offsetting.
+      - is_apical_root_child: per-node BoolTensor shape [N], True for the single root
+                    child whose subtree reaches deepest along -uhat (the apical), used
+                    (in `root_child_order='axial_extent'` mode) to pin it to ordinal 0.
+                    None in legacy first_edge mode. A per-node mask (NOT a node index),
+                    so it is intentionally absent from __inc__ — batching concatenates it
+                    per-node, aligned with `pos`/`parent_idx_1b`.
     """
     def __init__(self, **kwargs):
         super().__init__()
@@ -174,4 +184,182 @@ def generate_tree_graphs(
             G.nodes[u]['pos'] = coords[idx]
 
         graphs.append(G)
+    return graphs
+
+
+# ---------------------------------------------------------------------------
+# Deterministic synthetic trees (zero conditional entropy)
+# ---------------------------------------------------------------------------
+# Built to isolate "can the framework learn at all" from "real neuron data is
+# intrinsically stochastic". Each child's local-frame offset C_0 and each
+# expansion decision is a DETERMINISTIC function of features the model observes
+# (depth, child ordinal, local turn-history, lateral eccentricity), so the
+# achievable ceiling is R^2 ~= 1 and ~100% expansion accuracy.
+#
+# Topology: root has 4 arms; every interior node is binary (0 or 2 children) --
+# a hard framework constraint (the expansion label is {1,2} = spawn 0-or-2).
+# Growth/symmetry axis is +y (uhat = [0,1,0]), matching the neuron runs.
+#
+# Per-tree variation comes from a single observable latent: the 4 arm
+# base-depths d_r, drawn per tree and ENCODED in each root child's y-height.
+# The 4 direct root children are therefore the only entropy source; everything
+# below them is zero-entropy (and `is_root_child` masks them in diagnostics).
+
+_Y_AXIS = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+
+
+def _proj_perp_y(v: np.ndarray) -> np.ndarray:
+    """Component of v in the plane perpendicular to the y growth-axis."""
+    return v - float(v @ _Y_AXIS) * _Y_AXIS
+
+
+def _parent_frame(incoming: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Local (forward, sideways) frame for a node's children.
+
+    Matches the pipeline convention (helpers._compute_tree_directions /
+    compute_local_bases): forward = normalize(proj_perp_y(parent - grandparent)),
+    sideways = cross(y, forward). Placing children in this frame makes the
+    recovered C_0 equal the injected (forward, sideways, axial) offset exactly.
+    """
+    f = _proj_perp_y(incoming)
+    n = np.linalg.norm(f)
+    if n < 1e-8:  # purely axial incoming edge -> degenerate; not hit by our placements
+        f = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+    else:
+        f = f / n
+    s = np.cross(_Y_AXIS, f)
+    s = s / (np.linalg.norm(s) + 1e-12)
+    return f, s
+
+
+def _run_len(path: list[int], cap: int) -> int:
+    """Length of the maximal run of identical turns ending at path[-1], capped."""
+    if not path:
+        return 0
+    last = path[-1]
+    r = 0
+    for x in reversed(path):
+        if x == last:
+            r += 1
+        else:
+            break
+    return min(r, cap)
+
+
+def _switch_count(path: list[int], window: int) -> int:
+    """Number of left/right direction changes over the last `window` ordinals."""
+    seg = path[-window:] if window > 0 else path
+    return sum(1 for i in range(1, len(seg)) if seg[i] != seg[i - 1])
+
+
+def generate_deterministic_trees(
+    num_graphs: int,
+    seed: int | None = None,
+    *,
+    max_depth: int = 12,
+    n_arms: int = 4,
+    # per-tree latent: arm base-depths drawn from [d_lo, d_hi] (inclusive)
+    d_lo: int = 4,
+    d_hi: int = 9,
+    min_T: int = 3,
+    # --- length schedule:  base(d) = L0 * gamma^d * (1 + amp*sin(omega*d + phase_ord))
+    L0: float = 1.0,
+    gamma: float = 0.92,
+    amp: float = 0.25,
+    omega: float = 1.3,
+    # --- eccentricity taper on axial:  axial = base(d) * (1 - lam*tanh(ecc/e0))
+    lam: float = 0.4,
+    e0: float = 3.0,
+    # --- path-momentum splay:  sideways = sign(ord) * S0 * gamma^d * (1 + kappa*run)
+    S0: float = 0.6,
+    kappa: float = 0.35,
+    # --- sibling asymmetry: forward persistence by ordinal (left != right)
+    F_left: float = 0.7,
+    F_right: float = 0.45,
+    # --- root children: y-height encodes the arm latent d_r; fanned at fixed azimuths
+    A0: float = 1.0,
+    A_step: float = 0.35,
+    R_root: float = 1.0,
+    # --- expansion budget:  terminate iff depth >= clamp(d_r + run_w*run - switch_w*switches - floor(ecc/e1))
+    e1: float = 1.0,
+    run_w: int = 1,
+    switch_w: int = 2,
+    run_cap: int = 3,
+    switch_window: int = 4,
+) -> list[nx.Graph]:
+    """Generate `num_graphs` deterministic binary trees with zero conditional entropy.
+
+    The only randomness is the per-tree arm-depth latent ``d_r`` (which selects
+    *which* deterministic tree, not any offset). Returns plain ``networkx.Graph``
+    objects with a float32 ``pos`` attribute per node and ``G.graph['root']=0``.
+
+    Each child additionally stores ``G.nodes[c]['c0_inject']`` -- the local-frame
+    offset (forward, sideways, axial) that was injected -- so the pre-flight check
+    can verify the pipeline recovers exactly this as ``C_0`` (root children excepted).
+    """
+    rng = np.random.default_rng(seed)
+    graphs: list[nx.Graph] = []
+
+    def grow(G, node, parent, depth, d_r, path, nid):
+        """Decide whether `node` expands; if so place 2 children and recurse.
+
+        Returns the next free node id.
+        """
+        run = _run_len(path, run_cap)
+        switches = _switch_count(path, switch_window)
+        ecc = float(np.linalg.norm(_proj_perp_y(G.nodes[node]["pos"].astype(np.float64))))
+        T = d_r + run_w * run - switch_w * switches - int(ecc // e1)
+        T = max(min_T, min(max_depth, T))
+        if depth >= T:
+            return nid  # leaf -> expansion label 1
+
+        incoming = (
+            G.nodes[node]["pos"].astype(np.float64)
+            - G.nodes[parent]["pos"].astype(np.float64)
+        )
+        fwd_hat, side_hat = _parent_frame(incoming)
+        node_pos = G.nodes[node]["pos"].astype(np.float64)
+        dd = depth + 1  # child depth
+        decay = gamma ** dd
+        axial_scale = 1.0 - lam * np.tanh(ecc / e0)
+
+        for ordn in (0, 1):
+            cpath = path + [ordn]
+            crun = _run_len(cpath, run_cap)
+            phase = 0.0 if ordn == 0 else np.pi / 2.0
+            base = L0 * decay * (1.0 + amp * np.sin(omega * dd + phase))
+            axial = base * axial_scale
+            sign = -1.0 if ordn == 0 else 1.0
+            sideways = sign * S0 * decay * (1.0 + kappa * crun)
+            forward = (F_left if ordn == 0 else F_right) * decay
+            offset = forward * fwd_hat + sideways * side_hat + axial * _Y_AXIS
+            cid = nid
+            G.add_node(cid, pos=(node_pos + offset).astype(np.float32))
+            G.nodes[cid]["c0_inject"] = np.array(
+                [forward, sideways, axial], dtype=np.float64
+            )
+            G.add_edge(node, cid)
+            nid = grow(G, cid, node, dd, d_r, cpath, cid + 1)
+        return nid
+
+    for _ in range(num_graphs):
+        arm_depths = rng.integers(d_lo, d_hi + 1, size=n_arms)
+        G = nx.Graph()
+        G.add_node(0, pos=np.zeros(3, dtype=np.float32))
+        G.graph["root"] = 0
+        nid = 1
+        root_children = []
+        for r in range(n_arms):
+            az = 2.0 * np.pi * r / n_arms  # 0, 90, 180, 270 deg in the xz-plane
+            horiz = R_root * np.array([np.cos(az), 0.0, np.sin(az)], dtype=np.float64)
+            height = (A0 + float(arm_depths[r]) * A_step) * _Y_AXIS  # encodes d_r
+            cid = nid
+            G.add_node(cid, pos=(horiz + height).astype(np.float32))
+            G.add_edge(0, cid)
+            root_children.append((cid, int(arm_depths[r])))
+            nid += 1
+        for cid, d_r in root_children:
+            nid = grow(G, cid, 0, depth=1, d_r=d_r, path=[], nid=nid)
+        graphs.append(G)
+
     return graphs

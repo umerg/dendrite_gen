@@ -9,6 +9,7 @@ from graph_generation.method.helpers import (
     local_to_global,
     patch_geometry_for_noised_leaves,
 )
+from graph_generation.diffusion.diagnostics import compute_flow_diagnostics
 
 logger = logging.getLogger(__name__)
 
@@ -88,12 +89,22 @@ class FlowMatchingModel(Module):
         leaf_parent_idx: th.Tensor,
         model: Module,
         tmd: th.Tensor | None = None,
+        cell_class: th.Tensor | None = None,
         pre_geom_p0: dict | None = None,
         local_forward: th.Tensor | None = None,
         local_sideways: th.Tensor | None = None,
         uhat: th.Tensor | None = None,
-    ) -> tuple[th.Tensor, th.Tensor]:
-        """Compute flow-matching (data-prediction) losses for positional + expansion targets."""
+        return_diag_arrays: bool = False,
+    ) -> tuple[th.Tensor, th.Tensor, dict]:
+        """Compute flow-matching (data-prediction) losses for positional + expansion targets.
+
+        Returns ``(exp_loss, pos_loss, diag)`` where ``diag`` is a flat dict of stratified
+        training diagnostics (see ``compute_flow_diagnostics``); empty when there are no leaves.
+        When ``return_diag_arrays`` is set, ``diag['_arrays']`` additionally carries the raw
+        per-leaf tensors (implied clean prediction ``C_pred``, target ``C_0``, flow time
+        ``t_leaf``, root-child mask) for teacher-forced diagnostics — off by default so the
+        training path and ``Trainer.log`` (which only flattens float leaves) are unchanged.
+        """
         device = P_0.device
         num_leaves = leaf_idx_train.numel()
         if node_feats is None:
@@ -101,7 +112,7 @@ class FlowMatchingModel(Module):
 
         if num_leaves == 0:
             zero = P_0.new_zeros(())
-            return zero, zero
+            return zero, zero, {}
 
         leaf_expansion = leaf_expansion.to(dtype=P_0.dtype).view(-1, 1)
         e_0 = 2.0 * leaf_expansion - 1.0  # map [0,1] to [-1,1]
@@ -157,6 +168,7 @@ class FlowMatchingModel(Module):
             edge_attr=edge_attr,
             parent_idx=parent_idx,
             tmd=tmd,
+            cell_class=cell_class,
             pre_geom=pre_geom,
         )
         if device.type == 'cuda':
@@ -174,7 +186,28 @@ class FlowMatchingModel(Module):
         # Data-prediction loss: regress the clean targets directly.
         pos_loss = F.mse_loss(C_pred, C_0)
         exp_loss = F.mse_loss(e_pred, e_0)
-        return exp_loss, pos_loss
+
+        # Stratified, teacher-forced training diagnostics (cheap, no-grad). These share
+        # the exact targets/frames the loss is computed against and are returned as a
+        # third element; `expansion.get_loss` unpacks them tolerantly so the other
+        # diffusion variants (2-tuple return) are unaffected.
+        with th.no_grad():
+            if self.prior_std_pos is not None:
+                prior_var = tuple(s * s for s in self.prior_std_pos)
+            else:
+                prior_var = (self.prior_std ** 2,) * 3
+            # A leaf is a root-child iff its parent is the root (parent_idx == -1).
+            is_root_child = parent_idx[leaf_parent_idx] < 0
+            diag = compute_flow_diagnostics(
+                C_pred=C_pred, C_0=C_0, e_pred=e_pred, e_0=e_0,
+                t_leaf=t_leaf, is_root_child=is_root_child, prior_var=prior_var,
+            )
+        if return_diag_arrays:
+            diag = {**diag, "_arrays": {
+                "C_pred": C_pred.detach(), "C_0": C_0.detach(),
+                "t_leaf": t_leaf.detach(), "is_root_child": is_root_child.detach(),
+            }}
+        return exp_loss, pos_loss, diag
 
     @th.no_grad()
     def sample(
@@ -191,6 +224,7 @@ class FlowMatchingModel(Module):
         model: Module,
         model_kwargs: dict | None = None,
         tmd: th.Tensor | None = None,
+        cell_class: th.Tensor | None = None,
         local_forward: th.Tensor | None = None,
         local_sideways: th.Tensor | None = None,
         uhat: th.Tensor | None = None,
@@ -201,6 +235,8 @@ class FlowMatchingModel(Module):
         model_kwargs = model_kwargs or {}
         if tmd is not None:
             model_kwargs = {**model_kwargs, "tmd": tmd}
+        if cell_class is not None:
+            model_kwargs = {**model_kwargs, "cell_class": cell_class}
         if node_feats is None:
             node_feats = P_0.new_zeros((P_0.size(0), 0))
 

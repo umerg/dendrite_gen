@@ -8,6 +8,13 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Width of the one-hot ordinal encoding a root (soma) child's index among its
+# siblings. This bounds the number of primary dendrites the model can represent:
+# a child with rank >= MAX_CHILDREN would collide onto the last bit. The dataset
+# is pre-filtered to drop somata whose degree exceeds this (see
+# preprocessing/prepare_conditional_dataset.py and data_analysis/prepare_neurons_final.py).
+MAX_CHILDREN = 16
+
 
 def _t(device: th.device) -> float:
     """Return current wall time, syncing CUDA if needed for accurate GPU timing."""
@@ -29,6 +36,33 @@ from .helpers import (
 )
 from .method import Method
 
+
+def _forward_to_sample_kwargs(inp: dict) -> dict:
+    """Map the training-forward kwargs (assembled for ``diffusion.forward``) onto ``diffusion.sample``.
+
+    ``forward`` and ``sample`` share the same geometry/feature inputs; sampling drops the two
+    supervised targets (``C_0``, ``leaf_expansion``) and renames ``leaf_idx_train`` -> ``leaf_idx``.
+    (basic/flow/flow_v share this ``sample`` signature; EDM is not wired through this path.)
+    """
+    return dict(
+        node_feats=inp["node_feats"],
+        edge_index=inp["edge_index"],
+        batch=inp["batch"],
+        edge_attr=inp["edge_attr"],
+        P_0=inp["P_0"],
+        parent_idx=inp["parent_idx"],
+        leaf_idx=inp["leaf_idx_train"],
+        leaf_parent_idx=inp["leaf_parent_idx"],
+        model=inp["model"],
+        tmd=inp["tmd"],
+        cell_class=inp.get("cell_class"),
+        local_forward=inp["local_forward"],
+        local_sideways=inp["local_sideways"],
+        uhat=inp["uhat"],
+        pre_geom_p0=inp["pre_geom_p0"],
+    )
+
+
 class Expansion(Method):
     """Graph generation method generating graphs by local expansion."""
 
@@ -38,19 +72,18 @@ class Expansion(Method):
     def __init__(
         self,
         diffusion: Module | None = None,
-        red_threshold: int = 0,
         expansion_loss_weight: float = 1.0,
         use_size_ratio: bool = True,
         max_tree_size: int = 500,
     ):
         super().__init__(diffusion=diffusion)
-        self.red_threshold = red_threshold
         self.expansion_loss_weight = float(expansion_loss_weight)
         self.use_size_ratio = use_size_ratio
         self.max_tree_size = max_tree_size
     
     def sample_graphs(self, target_size: th.Tensor, model: Module, tmd: th.Tensor | None = None,
-                      num_root_children: th.Tensor | int | None = None):
+                      num_root_children: th.Tensor | int | None = None,
+                      cell_class: th.Tensor | None = None):
         """Generate graphs via iterative diffusion-based leaf expansion."""
         if self.diffusion is None:
             raise ValueError("Diffusion module is required for sampling.")
@@ -63,6 +96,8 @@ class Expansion(Method):
         num_graphs = int(target_size.numel())
         if tmd is not None:
             tmd = tmd.to(device=device)
+        if cell_class is not None:
+            cell_class = cell_class.to(device=device).long().reshape(-1)
 
         # Normalize num_root_children to a per-graph tensor
         if num_root_children is not None:
@@ -114,6 +149,7 @@ class Expansion(Method):
                 tmd=tmd,
                 step=step,
                 num_root_children=nrc,
+                cell_class=cell_class,
             )
             step += 1
 
@@ -150,6 +186,7 @@ class Expansion(Method):
         step: int = 0,
         map_threshold: float = 0.0,
         num_root_children: th.Tensor | None = None,
+        cell_class: th.Tensor | None = None,
     ):
         """Expand graphs by one generation step.
 
@@ -373,14 +410,36 @@ class Expansion(Method):
         geo_feat_all = pre_geom_p0['geo_ordinal'].clamp(min=0.0).clone()
         geo_feat_all[leaf_idx_next] = geo_angle_new  # raw child index (0, 1, ..., k-1)
 
-        # --- Assemble node features ---
-        MAX_CHILDREN = 10  # one-hot ordinal dimension
+        # axial_extent mode: SKIP the per-step ordinal *correction* for root children.
+        # Keep their assign-once index-order (== spawn-slot) ordinal so that slot 0 = apical
+        # (the child the model was trained to grow deepest) stays fixed across all steps,
+        # matching the training-time apical flag. Deeper/binary nodes keep their geometric
+        # correction (already in geo_feat_all). See docs/APICAL_AXIAL_ERROR_MODE.md §5.
+        if getattr(model, "root_child_order", "first_edge") == "axial_extent":
+            is_root_node = parent_idx_new_0b < 0
+            is_root_child = (parent_idx_new_0b >= 0) & is_root_node[parent_idx_new_0b.clamp(min=0)]
+            rc_idx = is_root_child.nonzero(as_tuple=False).flatten()
+            if rc_idx.numel() > 0:
+                # rank within each parent by ascending node index (= creation/spawn order)
+                order = th.argsort(parent_idx_new_0b[rc_idx], stable=True)
+                rc_sorted = rc_idx[order]
+                _, counts = th.unique_consecutive(
+                    parent_idx_new_0b[rc_sorted], return_counts=True
+                )
+                ranks = th.cat([th.arange(int(c), device=device) for c in counts])
+                geo_feat_all[rc_sorted] = ranks.to(geo_feat_all.dtype)
+
+        # --- Assemble node features --- (MAX_CHILDREN is module-level)
         feats_total = getattr(model, "feats_dim", 0)
         tmd_hidden_dim = getattr(model, "tmd_hidden_dim", 0)
+        class_hidden_dim = getattr(model, "class_hidden_dim", 0)
         cond_dim = getattr(self.diffusion, "cond_dim", 0)
-        avail_feats_dim = feats_total - cond_dim - tmd_hidden_dim
-        if tmd_hidden_dim > 0 and avail_feats_dim < (MAX_CHILDREN + 4):
-            raise ValueError(f"feats_dim - tmd_hidden_dim - cond_dim must be >= {MAX_CHILDREN + 4} when using TMD.")
+        avail_feats_dim = feats_total - cond_dim - tmd_hidden_dim - class_hidden_dim
+        if (tmd_hidden_dim > 0 or class_hidden_dim > 0) and avail_feats_dim < (MAX_CHILDREN + 4):
+            raise ValueError(
+                f"feats_dim - cond_dim - tmd_hidden_dim - class_hidden_dim must be >= "
+                f"{MAX_CHILDREN + 4} when conditioning is enabled."
+            )
         if avail_feats_dim > 0:
             N = pos_new.size(0)
             features = []
@@ -425,7 +484,14 @@ class Expansion(Method):
             node_feats = pos_new.new_zeros((pos_new.size(0), 0))
 
         # --- Diffusion sampling with precomputed geometry ---
-        model_kwargs = {"tmd": tmd} if tmd is not None else None
+        # tmd/cell_class ride in model_kwargs; flow.sample forwards them via model(**model_kwargs).
+        model_kwargs = {}
+        if tmd is not None:
+            model_kwargs["tmd"] = tmd
+        if cell_class is not None:
+            model_kwargs["cell_class"] = cell_class
+        if not model_kwargs:
+            model_kwargs = None
         _t_diff_0 = _t(device)
         rel_pred, exp_pred = self.diffusion.sample(
             node_feats=node_feats,
@@ -478,8 +544,17 @@ class Expansion(Method):
     # ---------------------------------------------------------
     # 4) Forward + loss (positional + expansion)
     # ---------------------------------------------------------
-    def get_loss(self, batch, model: th.nn.Module):
-        """
+    def _assemble_diffusion_inputs(self, batch, model: th.nn.Module) -> dict:
+        """Assemble the exact keyword inputs consumed by ``self.diffusion(...)`` from a batch.
+
+        This is the shared teacher-forced input-construction: parent indices, directed edge
+        index/attrs, leaf tracking + expansion targets, the local-frame offset target ``C_0``,
+        precomputed P_0 geometry, and node features. It has no side effects and writes nothing
+        to ``self``. ``get_loss`` (training) feeds the returned dict to ``diffusion.forward``;
+        ``teacher_forced_sample`` re-maps it onto ``diffusion.sample`` (see
+        ``_forward_to_sample_kwargs``) — so both paths reuse one assembly instead of the old
+        runtime monkeypatch.
+
         Expected batch fields:
           - adj: SparseTensor [N×N] (undirected ok)
           - pos: Float [N,3] (absolute GT)
@@ -567,10 +642,17 @@ class Expansion(Method):
         # --- compute full geometry on P_0 (geo_lr + SO(2) angles + edge decomposition)
         _t_glr_0 = _t(pos_gt.device)
         uhat = model.uhat
+        # axial_extent mode: per-node bool flagging each graph's apical root child (deepest
+        # -uhat subtree, computed once on the finest tree by the dataset). Pins it to ordinal 0.
+        # Absent in legacy first_edge mode -> None -> geometry uses the first-edge rule.
+        apical_flag = getattr(batch, "is_apical_root_child", None)
+        if apical_flag is not None:
+            apical_flag = apical_flag.to(device=pos_gt.device)
         with th.no_grad():
             pre_geom_p0 = precompute_full_geometry(
                 pos_gt, parent_idx, edge_index, uhat,
                 debug=getattr(self, "debug", False),
+                apical_flag=apical_flag,
             )
         # --- Convert targets to local frame for SO(2)-equivariant loss
         local_fwd = pre_geom_p0['local_forward']
@@ -588,13 +670,20 @@ class Expansion(Method):
         # --- prepare EGNN input (positions + minimal node features)
         feats_total = getattr(model, 'feats_dim', 0)
         tmd_hidden_dim = getattr(model, "tmd_hidden_dim", 0)
+        class_hidden_dim = getattr(model, "class_hidden_dim", 0)
         cond_dim = getattr(self.diffusion, "cond_dim", 0) if self.diffusion is not None else 0
-        avail_feats_dim = feats_total - cond_dim - tmd_hidden_dim
-        if tmd_hidden_dim > 0 and avail_feats_dim < 5:
-            raise ValueError("feats_dim - tmd_hidden_dim - cond_dim must be >= 5 when using TMD.")
+        avail_feats_dim = feats_total - cond_dim - tmd_hidden_dim - class_hidden_dim
+        if (tmd_hidden_dim > 0 or class_hidden_dim > 0) and avail_feats_dim < (MAX_CHILDREN + 4):
+            raise ValueError(
+                f"feats_dim - cond_dim - tmd_hidden_dim - class_hidden_dim must be >= "
+                f"{MAX_CHILDREN + 4} when conditioning is enabled."
+            )
         tmd = getattr(batch, "tmd", None)
         if tmd_hidden_dim > 0 and tmd is None:
             raise ValueError("Expected batch.tmd when tmd_hidden_dim > 0.")
+        cell_class = getattr(batch, "cell_class", None)
+        if class_hidden_dim > 0 and cell_class is None:
+            raise ValueError("Expected batch.cell_class when class_hidden_dim > 0.")
         
         # if tmd is not None:
         #     tmd_cpu = tmd.detach().cpu()
@@ -610,7 +699,7 @@ class Expansion(Method):
         #         uniq.tolist(),
         #     )
 
-        MAX_CHILDREN = 10  # one-hot ordinal dimension
+        # (MAX_CHILDREN is module-level; keep training/sampling one-hot width in lockstep)
         if avail_feats_dim > 0:
             N_nodes = pos_gt.size(0)
             is_leaf = pos_gt.new_zeros((N_nodes, 1))
@@ -686,8 +775,7 @@ class Expansion(Method):
         #     leaf_targets_per_node=leaf_targets_per_node,
         # )
 
-        _t_diff_loss_0 = _t(pos_gt.device)
-        expansion_loss, position_loss = self.diffusion(
+        return dict(
             node_feats=node_feats,
             edge_index=edge_index,
             batch=batch.batch,
@@ -700,24 +788,88 @@ class Expansion(Method):
             leaf_parent_idx=leaf_parent_idx,
             model=model,
             tmd=tmd,
+            cell_class=cell_class,
             pre_geom_p0=pre_geom_p0,
             local_forward=leaf_fwd,
             local_sideways=leaf_side,
             uhat=uhat,
         )
-        _t_diff_loss = _t(pos_gt.device) - _t_diff_loss_0
-        # logger.info(
-        #     "[get_loss N=%d L=%d] geo_lr_mask=%.4fs diffusion_forward=%.4fs",
-        #     int(pos_gt.size(0)), int(leaf_idx_train.numel()),
-        #     _t_geo_lr_loss, _t_diff_loss,
-        # )
+
+    def get_loss(self, batch, model: th.nn.Module):
+        """Teacher-forced training loss (positional + expansion) for one reduction batch.
+
+        Assembles the diffusion inputs (`_assemble_diffusion_inputs`) and runs
+        `diffusion.forward`. The flow variants return a 3rd stratified-diagnostics element;
+        basic/edm return a 2-tuple — unpacked tolerantly so both are supported.
+        """
+        inp = self._assemble_diffusion_inputs(batch, model)
+        result = self.diffusion(**inp)
+        # Tolerant unpack: the flow-matching path returns a 3rd element (stratified
+        # training diagnostics); basic/edm return a 2-tuple and are left untouched.
+        if len(result) == 3:
+            expansion_loss, position_loss, diag = result
+        else:
+            expansion_loss, position_loss = result
+            diag = None
 
         loss = position_loss + self.expansion_loss_weight * expansion_loss
         metrics = {
             "leaf_pos_loss": float(position_loss.item()),
             "leaf_expansion_loss": float(expansion_loss.item()),
             "cumulative_loss": float(loss.item()),
-            "num_leaves": int(leaf_idx_train.numel()),
-            "num_total_leaves": int(leaf_idx_all.numel()),
+            "num_leaves": int(inp["leaf_idx_train"].numel()),
+            "num_total_leaves": int(batch.leaf_idx.numel()),
         }
+        # Nest flow-matching diagnostics under "diag" -> Trainer.log recurses to
+        # training/diag/*. Only added when present, so basic/edm logs are unchanged.
+        if diag:
+            metrics["diag"] = diag
         return loss, metrics
+
+    @th.no_grad()
+    def teacher_forced_sample(self, batch, model) -> dict:
+        """Teacher-forced sampling for one GT reduction batch.
+
+        Reuses the exact training-forward input assembly (`_assemble_diffusion_inputs`) but
+        routes it into `diffusion.sample` instead of `diffusion.forward`: the partial tree /
+        context is GT and only the new leaves start from noise. Returns the sampled local-frame
+        offsets/expansion plus the GT targets, local frames, and indices the teacher-forced
+        metric suite needs. Replaces the previous `diffusion.forward` monkeypatch.
+        """
+        inp = self._assemble_diffusion_inputs(batch, model)
+        cs, es = self.diffusion.sample(**_forward_to_sample_kwargs(inp))
+        return dict(
+            cs=cs,
+            es=es,
+            c0=inp["C_0"],
+            lexp=inp["leaf_expansion"],
+            lp=inp["leaf_parent_idx"],
+            fwd=inp["local_forward"],
+            side=inp["local_sideways"],
+            leaf_idx_train=inp["leaf_idx_train"],
+            batch=inp["batch"],
+            parent_idx=inp["parent_idx"],
+        )
+
+    @th.no_grad()
+    def teacher_forced_diagnostics(self, batch, model) -> dict:
+        """Teacher-forced TRAINING-forward diagnostics for one GT reduction batch.
+
+        Runs the real training forward on GT-assembled inputs with `return_diag_arrays=True`
+        and returns the per-leaf implied-clean prediction (`cp`), GT target (`c0`), root-child
+        mask (`root`), flow time (`t`), plus `parent_idx`/`leaf_idx_train` so the caller can
+        derive tree depth. Requires a flow-family diffusion (only those accept the flag /
+        produce diagnostics). Replaces the previous `install_capture` monkeypatch.
+        """
+        inp = self._assemble_diffusion_inputs(batch, model)
+        result = self.diffusion(**inp, return_diag_arrays=True)
+        diag = result[2] if isinstance(result, (tuple, list)) and len(result) == 3 else {}
+        arr = diag.get("_arrays", {}) if isinstance(diag, dict) else {}
+        return dict(
+            cp=arr.get("C_pred"),
+            c0=arr.get("C_0"),
+            root=arr.get("is_root_child"),
+            t=arr.get("t_leaf"),
+            parent_idx=inp["parent_idx"],
+            leaf_idx_train=inp["leaf_idx_train"],
+        )

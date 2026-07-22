@@ -19,8 +19,13 @@ from dendrite_gen.validation.structural_metrics import (
 from ._graph import branch_order_map, pos_to_xyz, resolve_root, weighted_graph_with_lengths
 
 
-def graph_tree_scalar_stats(graph: nx.Graph) -> dict[str, float]:
-    """Return a tree-level scalar summary for one rooted graph."""
+def graph_tree_scalar_stats(graph: nx.Graph, uhat=(0.0, 0.0, 1.0)) -> dict[str, float]:
+    """Return a tree-level scalar summary for one rooted graph.
+
+    ``uhat`` is the equivariance/growth axis used for the ``height`` (along-axis) and
+    ``span_xy`` (perpendicular-to-axis) scalars; defaults to z for back-compat, pass
+    the dataset's ``so2_axis`` (e.g. ``(0,1,0)``) for neurons.
+    """
     if graph.number_of_nodes() == 0:
         return {
             "num_nodes": float("nan"),
@@ -61,8 +66,8 @@ def graph_tree_scalar_stats(graph: nx.Graph) -> dict[str, float]:
         "num_branchpoints": float(
             sum(1 for n in graph.nodes() if n != root and graph.degree(n) >= 3)
         ),
-        "height": float(height_z_range(pts)),
-        "span_xy": float(span_xy_diameter(pts)),
+        "height": float(height_z_range(pts, uhat=uhat)),
+        "span_xy": float(span_xy_diameter(pts, uhat=uhat)),
         "bbox_diag": float(bbox_diag_length(pts)),
         "max_path_dist": float(max(path_lengths.values()) if path_lengths else 0.0),
         "max_radial_dist": float(max(radial_dist) if radial_dist else 0.0),
@@ -78,9 +83,10 @@ def graph_tree_scalar_row(
     tree_name: str,
     source: str,
     pair_index: int | None = None,
+    uhat=(0.0, 0.0, 1.0),
 ) -> pd.DataFrame:
     """Return one-row dataframe for a graph-level scalar summary."""
-    row = graph_tree_scalar_stats(graph)
+    row = graph_tree_scalar_stats(graph, uhat=uhat)
     row["tree_name"] = tree_name
     row["source"] = source
     row["pair_index"] = pair_index

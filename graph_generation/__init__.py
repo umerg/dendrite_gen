@@ -1,4 +1,4 @@
-from . import data, reduction, depth_reduction, training, model, method, metrics, diffusion
+from . import data, reduction, depth_reduction, training, model, method, diffusion
 
 __all__ = [
     "data",
@@ -7,6 +7,5 @@ __all__ = [
     "training",
     "model",
     "method",
-    "metrics",
     "diffusion",
 ]

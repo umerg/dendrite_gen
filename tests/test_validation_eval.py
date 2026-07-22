@@ -20,12 +20,13 @@ if str(_ROOT) not in sys.path:
 import numpy as np
 import networkx as nx
 import torch as th
+import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 from torch.utils.data import DataLoader
 from torch_geometric.data import Batch
 
 import graph_generation as gg
-from utils.data_loading import nx_graph_to_adj_pos
+from utils.data_loading import nx_graph_to_adj_pos, CELL_CLASS_NAMES
 
 import graph_generation.training as _training_mod
 if not hasattr(_training_mod, "HydraConfig"):
@@ -46,17 +47,20 @@ def _make_cfg():
         method=SimpleNamespace(name="expansion"),
         reduction=SimpleNamespace(
             mode="stochastic", cherry_p=0.8, ensure_progress=True, root=0,
-            contract_root=False, num_red_seqs=-1, red_threshold=0,
+            contract_root=False,
         ),
         training=SimpleNamespace(
             batch_size=2, lr=1e-3, num_steps=1, log_interval=1,
             save_checkpoint=True, resume=False, max_num_workers=0,
         ),
         validation=SimpleNamespace(
-            interval=1, first_step=0, batch_size=4, per_graph_size=False,
-            enable_metrics=False, enable_plots=True, enable_dist_metrics=True,
+            interval=1, first_step=0, batch_size=4,
+            enable_plots=True, enable_dist_metrics=True,
             ged_enabled=True, ged_timeout=5.0,
             plot_angles=[[20, 30], [20, 120]],
+            enable_ks=True, enable_morphometrics=True, enable_light_joint=True,
+            enable_floor=True, tmd_eval_filtration="radial_root", tmd_eval_bins=16,
+            tmd_pca_ncomp=32, dc_nearest_k=5,
         ),
         ema=SimpleNamespace(betas=[1], gamma=1.0, power=1.0),
         wandb=SimpleNamespace(logging=False),
@@ -81,12 +85,11 @@ def _build_trainer(cfg, tmp_path, so2_axis):
         edge_attr_dim=1, so2_axis=so2_axis,
     )
     from graph_generation.diffusion.basic import DenoisingDiffusionModel
-    method = gg.method.Expansion(diffusion=DenoisingDiffusionModel(num_steps=1),
-                                 red_threshold=cfg.reduction.red_threshold)
+    method = gg.method.Expansion(diffusion=DenoisingDiffusionModel(num_steps=1))
     trainer = gg.training.Trainer(
         model=model, method=method, train_dataloader=loader,
         train_graphs=graphs_train, validation_graphs=graphs_val,
-        test_graphs=graphs_test, metrics=[], cfg=cfg,
+        test_graphs=graphs_test, cfg=cfg,
     )
     trainer.output_dir = Path(tmp_path)  # redirect eval_plots / pickles to tmp
     return trainer
@@ -101,9 +104,25 @@ def test_evaluate_emits_dist_metrics_and_3d_plots(tmp_path):
     # Distribution metrics present and well-formed
     assert "dist" in results
     dist = results["dist"]
-    for key in ("branch_length_w1", "tmd_barlen_w1", "node_count_w1", "tree_edit_dist_mean"):
+    for key in (
+        "branch_length_w1", "tmd_barlen_w1", "node_count_w1", "tree_edit_dist_mean",
+        "contraction_w1", "strahler_w1", "branch_length_ks",
+        "mmd_morpho", "coverage_morpho", "mmd_tmd",
+    ):
         assert key in dist, f"missing dist key {key}"
         assert isinstance(dist[key], float)
+
+    # Floor reference lines + headline excess for checkpoint selection
+    assert "floor" in results and isinstance(results["floor"], dict)
+    assert "mmd_morpho" in results["floor"]
+    assert "headline_excess_mmd_morpho" in dist
+
+    # GT-fit cache (bandwidth/std/PCA/floor) is built once and reused across calls
+    key = id(trainer.validation_graphs)
+    assert key in trainer._eval_cache and key in trainer._floor_cache
+    cache_first = trainer._eval_cache[key]
+    trainer.evaluate(trainer.validation_graphs, beta=1)
+    assert trainer._eval_cache[key] is cache_first  # not rebuilt
 
     # 3D figures produced and saved
     assert isinstance(results["examples"], Figure)
@@ -131,3 +150,108 @@ def test_run_validation_non_z_axis(tmp_path):
     eval_plots = list((Path(tmp_path) / "eval_plots").glob("*.png"))
     assert any("gen3d" in p.name for p in eval_plots)
     assert any("ref3d" in p.name for p in eval_plots)
+
+
+# --- Per-class validation diagram (class-conditional generation) ---
+
+from validation.plot import plot_graph_grid_angles
+
+
+def test_plot_grid_per_graph_titles(tmp_path):
+    """per_graph_titles supplies a per-row label that overrides title_prefix; omitting
+    it keeps the shared title_prefix (backward-compatible)."""
+    graphs = _generate_graphs(num_graphs=2, n_min=10, n_max=15, seed=3)
+    for G in graphs:
+        G.graph["root"] = 0
+
+    fig, _ = plot_graph_grid_angles(
+        graphs, out_dir=tmp_path, stem="t", file_tag="x",
+        angles=[(20, 30)], uhat=None,
+        title_prefix="IGNORED", per_graph_titles=["Gen 23P", "Gen 4P"],
+    )
+    titles = [ax.get_title() for ax in fig.axes]
+    assert any(t.startswith("Gen 23P") for t in titles)
+    assert any(t.startswith("Gen 4P") for t in titles)
+    assert not any("IGNORED" in t for t in titles)
+    plt.close(fig)
+
+    fig2, _ = plot_graph_grid_angles(
+        graphs, out_dir=tmp_path, stem="t2", file_tag="x",
+        angles=[(20, 30)], uhat=None, title_prefix="Gen",
+    )
+    assert all(ax.get_title().startswith("Gen") for ax in fig2.axes)
+    plt.close(fig2)
+
+
+def _build_conditional_trainer(cfg, tmp_path, so2_axis):
+    """Like _build_trainer, but a class-conditioned model (class_hidden_dim>0) and
+    distinct cell_class labels on the validation graphs."""
+    seed = 777
+    th.manual_seed(seed); np.random.seed(seed); random.seed(seed)
+    graphs_train = _generate_graphs(num_graphs=4, n_min=20, n_max=35, seed=seed)
+    graphs_val = _generate_graphs(num_graphs=3, n_min=20, n_max=35, seed=seed + 1)
+    graphs_test = _generate_graphs(num_graphs=2, n_min=20, n_max=35, seed=seed + 2)
+    for graphs in (graphs_train, graphs_val, graphs_test):
+        for G in graphs:
+            G.graph["root"] = 0
+    # one distinct class per val graph -> 3 classes present (0,1,2)
+    for k, G in enumerate(graphs_val):
+        G.graph["cell_class"] = k
+
+    loader = _build_dataloader(graphs_train, cfg)
+    model = gg.model.SO2_EGNN_Network(
+        n_layers=cfg.model.num_layers, feats_dim=cfg.model.feats_dim,
+        pos_dim=3, m_dim=cfg.model.m_dim, dropout=cfg.model.dropout,
+        edge_attr_dim=1, so2_axis=so2_axis,
+        num_classes=len(CELL_CLASS_NAMES), class_hidden_dim=8,
+    )
+    from graph_generation.diffusion.basic import DenoisingDiffusionModel
+    method = gg.method.Expansion(diffusion=DenoisingDiffusionModel(num_steps=1))
+    trainer = gg.training.Trainer(
+        model=model, method=method, train_dataloader=loader,
+        train_graphs=graphs_train, validation_graphs=graphs_val,
+        test_graphs=graphs_test, cfg=cfg,
+    )
+    trainer.output_dir = Path(tmp_path)
+    return trainer
+
+
+def test_evaluate_per_class_plots_when_conditional(tmp_path):
+    """With class_hidden_dim>0 the example grids switch to one labelled neuron per
+    class (rows == distinct classes), replacing the first-8 grids."""
+    cfg = _make_cfg()
+    cfg.model.feats_dim = 32  # feats_dim - cond_dim - class_hidden_dim >= MAX_CHILDREN+4
+    trainer = _build_conditional_trainer(cfg, tmp_path, so2_axis=(0.0, 0.0, 1.0))
+
+    results = trainer.evaluate(trainer.validation_graphs, beta=1)
+
+    assert isinstance(results["examples"], Figure)
+    assert isinstance(results["examples_compare"], Figure)
+    assert Path(results["examples_path"]).exists()
+    assert Path(results["examples_compare_path"]).exists()
+    assert "gen3d" in results["examples_path"]
+    assert "ref3d" in results["examples_compare_path"]
+
+    # rows == number of distinct classes (3), one per class, not the first 8
+    n_angles = len(cfg.validation.plot_angles)
+    assert len(results["examples"].axes) == 3 * n_angles
+    assert len(results["examples_compare"].axes) == 3 * n_angles
+
+    # rows are labelled by class name (class 0 -> CELL_CLASS_NAMES[0] == "23P")
+    gen_titles = [ax.get_title() for ax in results["examples"].axes]
+    gt_titles = [ax.get_title() for ax in results["examples_compare"].axes]
+    assert any(t.startswith(f"Gen {CELL_CLASS_NAMES[0]}") for t in gen_titles)
+    assert any(t.startswith(f"GT {CELL_CLASS_NAMES[0]}") for t in gt_titles)
+    plt.close("all")
+
+
+def test_evaluate_first8_plots_when_unconditional(tmp_path):
+    """No conditioning -> unchanged first-N behavior, no per-class labels."""
+    cfg = _make_cfg()
+    trainer = _build_trainer(cfg, tmp_path, so2_axis=(0.0, 0.0, 1.0))
+    results = trainer.evaluate(trainer.validation_graphs, beta=1)
+    # 3 val graphs -> min(8, 3) = 3 rows, titled with the shared "Gen"/"GT" prefix
+    gen_titles = [ax.get_title() for ax in results["examples"].axes]
+    assert all(t.startswith("Gen") for t in gen_titles)
+    assert not any(name in t for t in gen_titles for name in CELL_CLASS_NAMES)
+    plt.close("all")

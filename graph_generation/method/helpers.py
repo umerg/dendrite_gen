@@ -113,11 +113,16 @@ def _compute_tree_directions(
     parent_idx: th.Tensor,
     uhat: th.Tensor,
     eps: float = 1e-8,
+    apical_flag: th.Tensor | None = None,
 ) -> dict:
     """Compute shared tree topology, root ordering, and direction vectors (ONCE).
 
     Runs ``_order_root_children_by_uhat`` per root first to establish *fwd0*
     (root→child_0 direction), then sets v_in for every node:
+
+    ``apical_flag`` (optional per-node bool, ``axial_extent`` mode): when a root's
+    flagged child is present, it is forced to child_0 (ordinal 0) instead of the
+    default most-negative-first-edge-uhat rule; fwd0 then follows that child.
 
       - Nodes with grandparent: ``v_in = pos[parent] - pos[grandparent]``
       - Root children: ``v_in = fwd0`` (shared by ALL children of a root)
@@ -180,8 +185,15 @@ def _compute_tree_directions(
                 geo_delta_theta[children[0]] = 0.0
                 v_in[children[0]] = fwd0_perp
             else:
+                # axial_extent mode: force child_0 to the flagged apical (local index
+                # within `children`); otherwise fall back to the first-edge uhat rule.
+                child0_override = None
+                if apical_flag is not None:
+                    flagged = apical_flag[children].nonzero(as_tuple=False).flatten()
+                    if flagged.numel() > 0:
+                        child0_override = int(flagged[0].item())
                 sorted_idx, fwd0_unit, delta_angles = _order_root_children_by_uhat(
-                    offsets, uhat, eps=eps,
+                    offsets, uhat, eps=eps, child0_override=child0_override,
                 )
                 root_ordering[r] = (sorted_idx, fwd0_unit, delta_angles, children)
                 for si in range(k):
@@ -237,16 +249,20 @@ def _order_root_children_by_uhat(
     offsets: th.Tensor,
     uhat: th.Tensor,
     eps: float = 1e-8,
+    child0_override: int | None = None,
 ) -> Tuple[th.Tensor, th.Tensor, th.Tensor]:
     """SO(2)-invariant ordering of root children.
 
-    child_0 = lowest uhat component (tiebreak: largest perp-plane distance).
-    Remaining children ordered clockwise relative to child_0's perp direction.
+    child_0 = lowest uhat component (tiebreak: largest perp-plane distance), UNLESS
+    ``child0_override`` is given (``axial_extent`` mode) — then that local index is
+    forced to child_0 (the apical). Remaining children are ordered clockwise relative
+    to child_0's perp direction.
 
     Args:
         offsets: [k, 3] offsets from root to each child
         uhat:    [3] SO(2) axis
         eps:     numerical tolerance
+        child0_override: optional local index to force as child_0 (apical)
 
     Returns:
         sorted_idx:   [k] indices sorted by ordinal (child_0 first)
@@ -263,11 +279,15 @@ def _order_root_children_by_uhat(
     offsets_perp = offsets - uhat_components.unsqueeze(-1) * uhat_vec  # [k, 3]
     perp_dist = offsets_perp.norm(dim=-1)                       # [k]
 
-    # Select child_0: lowest uhat component, tiebreak largest perp distance
-    min_uhat = uhat_components.min()
-    is_min = uhat_components <= min_uhat + eps
-    tied_perp = th.where(is_min, perp_dist, perp_dist.new_tensor(-1.0))
-    child0_local = int(tied_perp.argmax().item())
+    # Select child_0: forced apical (axial_extent) or lowest uhat component
+    # (tiebreak largest perp distance) in the legacy first_edge path.
+    if child0_override is not None:
+        child0_local = int(child0_override)
+    else:
+        min_uhat = uhat_components.min()
+        is_min = uhat_components <= min_uhat + eps
+        tied_perp = th.where(is_min, perp_dist, perp_dist.new_tensor(-1.0))
+        child0_local = int(tied_perp.argmax().item())
 
     fwd0 = offsets_perp[child0_local]
     fwd0_norm = fwd0.norm()
@@ -275,8 +295,12 @@ def _order_root_children_by_uhat(
     delta_angles = th.zeros(k, device=device, dtype=dtype)
 
     if fwd0_norm <= eps:
-        # Degenerate: all children on uhat axis — sort by uhat ascending
+        # Degenerate: chosen child_0 is (near-)axial (no usable perp direction) —
+        # sort by uhat ascending, but keep child_0 first so a forced apical is preserved.
         _, sorted_idx = uhat_components.sort()
+        if child0_override is not None and int(sorted_idx[0].item()) != child0_local:
+            sorted_idx = sorted_idx[sorted_idx != child0_local]
+            sorted_idx = th.cat([sorted_idx.new_tensor([child0_local]), sorted_idx])
         return sorted_idx, th.zeros(3, device=device, dtype=dtype), delta_angles
 
     fwd0_unit = fwd0 / fwd0_norm
@@ -1085,17 +1109,21 @@ def precompute_full_geometry(
     eps: float = 1e-8,
     tol: float = 1e-6,
     debug: bool = False,
+    apical_flag: th.Tensor | None = None,
 ) -> dict:
     """Compute all geometry once on P_0 (clean positions).
 
     Uses ``_compute_tree_directions`` as the shared base, then derives:
     ordinals, branch angles, edge features, and local coordinate frames.
 
+    ``apical_flag`` (optional per-node bool, ``axial_extent`` mode) pins the flagged
+    root child to ordinal 0 (child_0), overriding the default first-edge selection.
+
     Returns a dict compatible with the ``pre_geom`` format expected by
     ``SO2_EGNN.forward()`` plus extras needed for leaf-patching.
     """
     # 1. Shared tree directions + root ordering (ONCE)
-    dirs = _compute_tree_directions(pos, parent_idx, uhat, eps=eps)
+    dirs = _compute_tree_directions(pos, parent_idx, uhat, eps=eps, apical_flag=apical_flag)
 
     # 2. Unified geometric ordering (ordinals for root + binary interior)
     geo_ordinal, geo_delta_theta = compute_geo_order(

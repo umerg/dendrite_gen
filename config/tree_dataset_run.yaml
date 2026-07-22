@@ -9,15 +9,11 @@ method:
 
 reduction:
   type: "depth"
-  mode: "stochastic"
+  mode: "deterministic"
   cherry_p: 1.0 
   ensure_progress: True
   root: 0
   contract_root: False
-  num_red_seqs: -1
-  min_red_frac: 0.0
-  max_red_frac: 0.5
-  red_threshold: 0
 
 training:
   batch_size: 512 # can adjust based on GPU memory
@@ -36,12 +32,29 @@ validation:
   interval: 5000 # can make 5k
   first_step: 0
   per_graph_size: False
-  enable_metrics: False
   enable_plots: True            # 3D multi-azimuth views (orbiting uhat) of gen + GT
   enable_dist_metrics: True     # Wasserstein-1 of gen-vs-GT stat distributions
   ged_enabled: True             # avg tree-edit distance (capped by node/pair count)
   ged_timeout: 5.0
   plot_angles: [[20, 30], [20, 120], [20, 210]]   # (elev, azim) around uhat
+  enable_ks: True               # KS alongside W1 (continuous features)
+  enable_morphometrics: True    # path/radial/contraction/order/strahler/asymmetry/sholl
+  enable_light_joint: True      # morpho + Euclidean-TMD MMD/Density/Coverage every val
+  enable_floor: True            # real-vs-real reference lines + headline excess
+  tmd_eval_filtration: radial_root
+  tmd_eval_bins: 16
+  tmd_pca_ncomp: 32             # PCA dim for TMD persistence-image embedding (eval)
+  dc_nearest_k: 5               # k for Density/Coverage
+  # Matched, TMD-conditioned pairwise fidelity: gen[i] vs its conditioning GT[i] (opt-in).
+  # Complements the distributional metrics with a per-conditioning signal. Only meaningful
+  # for conditioned runs (tmd_hidden_dim>0); leave off for unconditional runs.
+  enable_pairwise_metrics: True
+  tmd_cond_every: 5             # run every N-th validation (cost control); 1 = every validation
+  tmd_cond_max_pairs: 64        # cap matched pairs (PD Wasserstein dominates cost)
+  tmd_cond_pd_filtrations: [path, radial_root]  # per-pair persistence-diagram distance filtrations
+  tmd_cond_wasserstein: True    # PD Wasserstein (persim)
+  tmd_cond_bottleneck: False    # PD bottleneck (persim); off by default
+  tmd_cond_normalize: minmax    # filtration normalization for the paired diagrams
 
 testing: False # if True, only evaluate on test set
 
@@ -50,8 +63,9 @@ model:
   num_layers: 10
   feats_dim: 128
   m_dim: 128
-  tmd_in_dim: 768
-  tmd_hidden_dim: 64
+  tmd_hidden_dim: 64           # >0 enables TMD conditioning; tmd_in_dim is auto-derived (n_filtrations * tmd_bins**2)
+  tmd_filtrations: [path, height, rho]   # trees are z-up (so2_axis=z): height=z, rho=perp-to-z
+  tmd_bins: 16
   dropout: 0.1
   norm_feats: True
   global_linear_attn_every: 2
@@ -61,6 +75,12 @@ model:
   offset_head_hidden: 128
   use_global_fallback_frames: False
   so2_axis: [0., 0., 1.] # z-axis for trees, y-axis for neurons
+  # RBF edge-distance kernel (default OFF). Set rbf_k>0 to expand rho/du into Gaussian
+  # channels instead of raw scalars. Ranges are in pos_scale_factor-normalized units.
+  rbf_k: 0              # >0 = rbf_k Gaussian channels per distance (recommended 16); 0 = raw scalar
+  rbf_gamma: 10.0       # Gaussian width (shared by rho & du)
+  rbf_rho_max: 7.0      # in-plane radius span [0, rho_max] (tree scale 1/0.5, axis z)
+  rbf_du_max: 5.0       # axial span [-du_max, du_max]
 
 ema: # can adjust for more stable training, but I haven't had the chance to experiment with it much - working though
   betas: [1]

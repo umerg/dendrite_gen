@@ -48,7 +48,7 @@ def test_flow_forward_loss_finite():
     for time_dist in ("uniform", "beta"):
         diffusion = FlowMatchingModel(num_steps=4, time_dist=time_dist)
         method = gg.method.Expansion(
-            diffusion=diffusion, red_threshold=cfg.reduction.red_threshold,
+            diffusion=diffusion,
         )
         batch = next(iter(loader))
         res = method.get_loss(batch, model)
@@ -110,7 +110,7 @@ def test_anisotropic_prior_forward_runs():
     cfg, loader, model = _build_model_and_loader()
     diffusion = FlowMatchingModel(num_steps=4, prior_std_pos=[0.74, 0.61, 0.83])
     method = gg.method.Expansion(
-        diffusion=diffusion, red_threshold=cfg.reduction.red_threshold,
+        diffusion=diffusion,
     )
     res = method.get_loss(next(iter(loader)), model)
     if res is not None:

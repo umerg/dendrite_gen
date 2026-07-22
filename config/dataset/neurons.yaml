@@ -1,4 +1,4 @@
 name: neurons_dataset
-data_dir: /scratch/guptau/neurons_final
+data_dir: /scratch/guptau/neurons_final # change path to your local dataset path
 load: True
 pos_scale_factor: 45.1
