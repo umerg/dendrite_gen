@@ -131,6 +131,43 @@ matrix distinguishes pending, undefined, failed, and successfully computed
 pairs. A completed run containing failed cells exits nonzero and reports
 `complete_with_errors`.
 
+### Elastic SRVFT Slurm array
+
+Elastic SRVFT has a separate sharded runner because every relative angle runs
+the slow external alignment twice for mean symmetrization. The launcher first
+screens the complete test split, rejects trees that do not fit the backend's
+four-layer representation, and deterministically selects up to 20 compatible
+trees per class. It then submits one single-CPU array element per eight pairs
+and an `afterany` merge job:
+
+```bash
+bash visualization/metric_study/slurm/submit_elastic_srvft.sh
+```
+
+The default metric is the mean-symmetrized SO(2) quotient with a 36-angle grid,
+local refinement at `1e-3` radians, and `depth_policy="raise"`. With the current
+test split the expected plan is 113 trees, 6,328 pairs, and 791 array elements.
+The current preflight finds 470 compatible trees, 690 trees that would be
+truncated, and seven zero-edge failures among 1,167 test trees. For 23P, 4P,
+5P-ET, 5P-IT, 5P-NP, 6P-CT, and 6P-IT, the compatible counts are 26, 51, 3, 72,
+10, 130, and 178; the cap selects 20, 20, 3, 20, 10, 20, and 20. Filtering the
+earlier 248-tree cohort alone would retain 111 trees, with the substantially
+less even counts 1, 9, 3, 19, 10, 35, and 34.
+
+The rough estimate is 1.8 minutes per pair, 14 minutes per eight-pair shard,
+and 190 total CPU-hours. With the default limit of 100 concurrent jobs, expect
+about two hours of compute time, excluding queue delay and slow-tail effects.
+Each job requests two hours and 4 GB for its single CPU. Override
+`MAX_CONCURRENT`, `MAX_TREES_PER_CLASS`, `DATASET_ROOT`, `OUTPUT_ROOT`, or
+`RUN_NAME` through environment variables when needed.
+
+Preparation is skipped once `run.json` exists, and every pair is checkpointed
+inside its independently writable shard. Re-running the launcher therefore
+resumes unfinished work. Do not submit two arrays for the same output directory
+concurrently. This 113-tree manifest differs from the existing matrix runs; to
+compare metrics with `matrix_report`, rerun the faster metrics using Elastic's
+`selected_trees.csv` as their selection manifest so the row order matches.
+
 ## Run one pair
 
 From the directory containing `dendrite_gen/`:
