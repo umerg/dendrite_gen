@@ -137,8 +137,8 @@ Elastic SRVFT has a separate sharded runner because every relative angle runs
 the slow external alignment twice for mean symmetrization. The launcher first
 screens the complete test split, rejects trees that do not fit the backend's
 four-layer representation, and deterministically selects up to 20 compatible
-trees per class. It then submits one single-CPU array element per eight pairs
-and an `afterany` merge job:
+trees per class. Each array job requests eight CPUs and runs eight independent
+eight-pair shards concurrently, followed by an `afterany` merge job:
 
 ```bash
 bash visualization/metric_study/slurm/submit_elastic_srvft.sh
@@ -146,7 +146,7 @@ bash visualization/metric_study/slurm/submit_elastic_srvft.sh
 
 The default metric is the mean-symmetrized SO(2) quotient with a 36-angle grid,
 local refinement at `1e-3` radians, and `depth_policy="raise"`. With the current
-test split the expected plan is 113 trees, 6,328 pairs, and 791 array elements.
+test split the expected plan is 113 trees, 6,328 pairs, and 791 eight-pair shards.
 The current preflight finds 470 compatible trees, 690 trees that would be
 truncated, and seven zero-edge failures among 1,167 test trees. For 23P, 4P,
 5P-ET, 5P-IT, 5P-NP, 6P-CT, and 6P-IT, the compatible counts are 26, 51, 3, 72,
@@ -154,12 +154,13 @@ truncated, and seven zero-edge failures among 1,167 test trees. For 23P, 4P,
 earlier 248-tree cohort alone would retain 111 trees, with the substantially
 less even counts 1, 9, 3, 19, 10, 35, and 34.
 
-The rough estimate is 1.8 minutes per pair, 14 minutes per eight-pair shard,
-and 190 total CPU-hours. With the default limit of 100 concurrent jobs, expect
-about two hours of compute time, excluding queue delay and slow-tail effects.
-Each job requests two hours and 4 GB for its single CPU. Override
-`MAX_CONCURRENT`, `MAX_TREES_PER_CLASS`, `DATASET_ROOT`, `OUTPUT_ROOT`, or
-`RUN_NAME` through environment variables when needed.
+The 791 shards are grouped into 99 Slurm array jobs. By default at most 12 jobs
+run concurrently with eight CPUs each, for at most 96 CPUs in use. The rough
+estimate remains about 190 total CPU-hours and two hours of compute time,
+excluding queue delay and slow-tail effects. Each job requests two hours and 4
+GB per CPU. Override `CPUS_PER_JOB`, `MAX_CONCURRENT_JOBS`,
+`MAX_TREES_PER_CLASS`, `DATASET_ROOT`, `OUTPUT_ROOT`, or `RUN_NAME` through
+environment variables when needed.
 
 Preparation is skipped once `run.json` exists, and every pair is checkpointed
 inside its independently writable shard. Re-running the launcher therefore
