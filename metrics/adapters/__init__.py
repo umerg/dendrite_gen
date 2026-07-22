@@ -6,8 +6,10 @@ from .elastic_srvft import (
     ElasticSRVFTError,
     ElasticSRVFTNotConfigured,
     ElasticSRVFTResult,
+    ElasticSRVFTTreeDiagnostics,
     ElasticSRVFTUnsupportedTree,
     elastic_srvft_distance,
+    elastic_srvft_tree_diagnostics,
 )
 
 __all__ = [
@@ -16,6 +18,8 @@ __all__ = [
     "ElasticSRVFTError",
     "ElasticSRVFTNotConfigured",
     "ElasticSRVFTResult",
+    "ElasticSRVFTTreeDiagnostics",
     "ElasticSRVFTUnsupportedTree",
     "elastic_srvft_distance",
+    "elastic_srvft_tree_diagnostics",
 ]

@@ -363,6 +363,32 @@ def test_four_layer_truncation_raises_by_default_and_warns_when_requested(
     assert prepared.omitted_frontier_branches == 2
 
 
+def test_public_tree_diagnostics_supports_non_truncating_screening(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def truncated_comp(raw: np.ndarray) -> dict[str, Any]:
+        third = {"K_sideNum": 2, "beta_children": []}
+        second = {"K_sideNum": 1, "beta_children": [third]}
+        first = {"K_sideNum": 1, "beta_children": [second]}
+        return {"raw": raw.copy(), "beta_children": [first]}
+
+    api = _fake_api(tmp_path, comp_builder=truncated_comp)
+    monkeypatch.setattr(adapter, "_load_external_api", lambda _checkout=None: api)
+
+    diagnostics = adapter.elastic_srvft_tree_diagnostics(
+        _asymmetric_tree(), depth_policy="allow"
+    )
+
+    assert diagnostics.node_count == 5
+    assert diagnostics.terminal_leaf_count == 2
+    assert diagnostics.represented_branch_count == 4
+    assert diagnostics.omitted_frontier_branches == 2
+    assert diagnostics.depth_policy == "allow"
+    assert diagnostics.external_revision == "fake-revision"
+    assert diagnostics.external_checkout == str(tmp_path)
+
+
 def test_missing_checkout_has_actionable_error(tmp_path: Path) -> None:
     missing = tmp_path / "not-cloned"
 

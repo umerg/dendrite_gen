@@ -102,6 +102,20 @@ class ElasticSRVFTResult:
 
 
 @dataclass(frozen=True)
+class ElasticSRVFTTreeDiagnostics:
+    """Preparation-only diagnostics for one Elastic SRVFT input tree."""
+
+    node_count: int
+    terminal_leaf_count: int
+    represented_branch_count: int
+    omitted_frontier_branches: int
+    canonical_order_ties: int
+    depth_policy: DepthPolicy
+    external_revision: str
+    external_checkout: str
+
+
+@dataclass(frozen=True)
 class _ExternalAPI:
     compute_distance_energy: Callable[..., tuple[dict[str, Any], object, object]]
     comp_tree_from_swcdata_rad: Callable[..., dict[str, Any]]
@@ -666,6 +680,41 @@ def elastic_srvft_distance(
     )
 
 
+def elastic_srvft_tree_diagnostics(
+    tree: nx.Graph,
+    *,
+    checkout: str | Path | None = None,
+    depth_policy: DepthPolicy = "raise",
+    default_radius: float = 1.0,
+) -> ElasticSRVFTTreeDiagnostics:
+    """Prepare one tree and report fixed-depth compatibility without an energy call.
+
+    ``depth_policy='allow'`` is useful for screening: a nonzero
+    ``omitted_frontier_branches`` count then identifies a tree that must be
+    excluded from a full four-layer comparison.
+    """
+    if depth_policy not in {"raise", "warn", "allow"}:
+        raise ValueError("depth_policy must be 'raise', 'warn', or 'allow'.")
+    api = _load_external_api(checkout)
+    prepared = _prepare_external_tree(
+        tree,
+        api,
+        name="tree",
+        default_radius=default_radius,
+        depth_policy=depth_policy,
+    )
+    return ElasticSRVFTTreeDiagnostics(
+        node_count=prepared.node_count,
+        terminal_leaf_count=prepared.terminal_leaf_count,
+        represented_branch_count=prepared.represented_branch_count,
+        omitted_frontier_branches=prepared.omitted_frontier_branches,
+        canonical_order_ties=prepared.canonical_order_ties,
+        depth_policy=depth_policy,
+        external_revision=api.revision,
+        external_checkout=str(api.checkout),
+    )
+
+
 __all__ = [
     "DEFAULT_ELASTIC_SRVFT_CHECKOUT",
     "DepthPolicy",
@@ -673,7 +722,9 @@ __all__ = [
     "ElasticSRVFTError",
     "ElasticSRVFTNotConfigured",
     "ElasticSRVFTResult",
+    "ElasticSRVFTTreeDiagnostics",
     "ElasticSRVFTUnsupportedTree",
     "Symmetrization",
     "elastic_srvft_distance",
+    "elastic_srvft_tree_diagnostics",
 ]
