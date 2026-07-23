@@ -126,6 +126,26 @@ template. Override `PROJECT_ROOT`, `CONDA_ROOT`, `DATASET_ROOT`, or
 balanced sample capped at 50 neurons per class and resumes automatically when
 its output directory already contains a run.
 
+For the larger train-split study, the separate launcher below selects up to
+200 neurons from each class and submits every implemented family except Elastic
+SRVFT:
+
+```bash
+bash visualization/metric_study/slurm/submit_metric_families_train_200.sh
+```
+
+All seven train classes contain at least 200 neurons, so this selects 1,400
+trees and computes 979,300 distinct unordered pairs per metric. Chamfer and FGW
+request 30 CPUs each; barcode and distribution jobs request 8 each, and the
+morphometric-vector job requests 4. The default Slurm time limit is three days.
+The CPU counts and time limit can be overridden with the same environment
+variable pattern:
+
+```bash
+CHAMFER_CPUS=24 FGW_CPUS=24 TIME_LIMIT=4-00:00:00 \
+  bash visualization/metric_study/slurm/submit_metric_families_train_200.sh
+```
+
 After an interruption, repeat the exact scientific configuration with
 `--resume`; already terminal pairs are skipped. Add `--retry-errors` only when
 failed pairs should be attempted again. Resume also verifies the SWC contents,
