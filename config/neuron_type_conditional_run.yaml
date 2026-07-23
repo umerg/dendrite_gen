@@ -1,6 +1,6 @@
 defaults:
   - _self_
-  - dataset: neurons_conditional  # cleaned, class-labelled neurons (soma-rooted, binarized, cap=16)
+  - dataset: neurons_conditional_full  # cleaned, class-labelled neurons (soma-rooted, binarized, NO root-degree cap; MAX_CHILDREN=23). Override with dataset=neurons_conditional for the old cap=16 set.
   - diffusion: flow_v10
   - method: expansion
 

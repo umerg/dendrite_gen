@@ -37,7 +37,9 @@ from clean_trees import read_swc, clean_swc_tree, write_swc  # noqa: E402
 from utils.data_loading import CELL_CLASS_NAMES  # noqa: E402
 
 # Keep in lockstep with graph_generation/method/expansion.py::MAX_CHILDREN.
-MAX_CHILDREN = 16
+# 23 = max primary-dendrite count observed in the corpus, so `rdeg > MAX_CHILDREN`
+# drops nothing here (kept only as a guard against future higher-degree neurons).
+MAX_CHILDREN = 23
 
 # Cortical-layer-ordered class ids for the 7 kept pyramidal types. Derived from the
 # canonical CELL_CLASS_NAMES so the writer and the per-class metrics never desync.

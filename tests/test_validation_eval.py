@@ -220,7 +220,7 @@ def test_evaluate_per_class_plots_when_conditional(tmp_path):
     """With class_hidden_dim>0 the example grids switch to one labelled neuron per
     class (rows == distinct classes), replacing the first-8 grids."""
     cfg = _make_cfg()
-    cfg.model.feats_dim = 32  # feats_dim - cond_dim - class_hidden_dim >= MAX_CHILDREN+4
+    cfg.model.feats_dim = 48  # feats_dim - cond_dim - class_hidden_dim >= MAX_CHILDREN+4 (=27 at MAX_CHILDREN=23)
     trainer = _build_conditional_trainer(cfg, tmp_path, so2_axis=(0.0, 0.0, 1.0))
 
     results = trainer.evaluate(trainer.validation_graphs, beta=1)

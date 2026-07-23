@@ -98,9 +98,9 @@ def test_training_forward_with_cell_class():
     ds = _build_dataset(seeds=seeds, classes=classes)
     loader = DataLoader(ds, batch_size=8, shuffle=False, collate_fn=Batch.from_data_list)
 
-    # feats_dim budget: avail = feats_dim - cond_dim(2) - class_hidden(8) = 22 >= MAX_CHILDREN+4=20
+    # feats_dim budget: avail = feats_dim - cond_dim(2) - class_hidden(8) = 38 >= MAX_CHILDREN+4=27
     model = gg.model.SO2_EGNN_Network(
-        n_layers=2, feats_dim=32, pos_dim=3, m_dim=16, edge_attr_dim=1,
+        n_layers=2, feats_dim=48, pos_dim=3, m_dim=16, edge_attr_dim=1,
         num_classes=len(CELL_CLASS_NAMES), class_hidden_dim=8,
     )
     method = gg.method.Expansion(diffusion=DenoisingDiffusionModel(num_steps=1))
@@ -133,7 +133,7 @@ def test_teacher_forced_eval_fails_fast_under_class_conditioning():
     assert batches and not hasattr(batches[0], "cell_class"), "TF batch must NOT carry cell_class"
 
     model = gg.model.SO2_EGNN_Network(
-        n_layers=2, feats_dim=32, pos_dim=3, m_dim=16, edge_attr_dim=1,
+        n_layers=2, feats_dim=48, pos_dim=3, m_dim=16, edge_attr_dim=1,
         num_classes=len(CELL_CLASS_NAMES), class_hidden_dim=8,
     )
     method = gg.method.Expansion(diffusion=DenoisingDiffusionModel(num_steps=1))
@@ -146,7 +146,7 @@ def test_missing_cell_class_raises_when_conditioning_on():
     ds = _build_dataset(seeds=[0, 1, 2], classes=None)  # no classes
     loader = DataLoader(ds, batch_size=8, shuffle=False, collate_fn=Batch.from_data_list)
     model = gg.model.SO2_EGNN_Network(
-        n_layers=2, feats_dim=32, pos_dim=3, m_dim=16, edge_attr_dim=1,
+        n_layers=2, feats_dim=48, pos_dim=3, m_dim=16, edge_attr_dim=1,
         num_classes=len(CELL_CLASS_NAMES), class_hidden_dim=8,
     )
     method = gg.method.Expansion(diffusion=DenoisingDiffusionModel(num_steps=1))

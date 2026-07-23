@@ -1,6 +1,12 @@
 # K-Root Children Flow Trace: Training & Sampling
 
-> **Update 2026-07-06 — `MAX_CHILDREN` raised 10 → 16.** The root-children one-hot ordinal is now **16-wide** (a soma may have up to 16 primary dendrites; `expansion.py::MAX_CHILDREN = 16`, now a single module-level constant). The mechanism below is unchanged — only the width. The clamp is now `clamp(0, 15)`, and literal example vectors like `[1,0,0,0,0,0,0,0,0,0]` are illustrative at the old width 10; the real vector is 16-wide (zero-padded).
+> **Update 2026-07-23 — `MAX_CHILDREN` raised 16 → 23.** The root-degree cap was removed:
+> `expansion.py::MAX_CHILDREN = 23` = the max primary-dendrite count observed in the corpus, so no
+> neuron is filtered by soma degree (dataset `neurons_conditional_full`). The mechanism below is
+> unchanged — only the width. **Every "16" / `clamp(0, 15)` / "16-wide" / `[N, 16]` below is now 23 /
+> `clamp(0, 22)` / 23-wide / `[N, 23]`** (the in-trace numbers are illustrative and were not rewritten).
+>
+> _Prior update 2026-07-06 — `MAX_CHILDREN` raised 10 → 16 (now superseded by 23 above)._
 
 A comprehensive, line-by-line trace of how root nodes with k>2 children are handled across the entire pipeline — from data construction through geometry computation, diffusion noising/denoising, and loss/position recovery. Covers the design invariants (SO(2) equivariance, locked frames, ordinal features), the SO(2)-invariant ordering and relative-frame approach, and all edge cases for k=1, k=2, and k>2.
 

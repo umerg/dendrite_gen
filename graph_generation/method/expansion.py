@@ -10,10 +10,11 @@ logger = logging.getLogger(__name__)
 
 # Width of the one-hot ordinal encoding a root (soma) child's index among its
 # siblings. This bounds the number of primary dendrites the model can represent:
-# a child with rank >= MAX_CHILDREN would collide onto the last bit. The dataset
-# is pre-filtered to drop somata whose degree exceeds this (see
-# preprocessing/prepare_conditional_dataset.py and data_analysis/prepare_neurons_final.py).
-MAX_CHILDREN = 16
+# a child with rank >= MAX_CHILDREN would collide onto the last bit. Set to the
+# maximum primary-dendrite count observed in the corpus (23), so no neuron is
+# filtered by soma degree (see preprocessing/prepare_conditional_dataset.py and
+# data_analysis/prepare_neurons_final.py, kept in lockstep).
+MAX_CHILDREN = 23
 
 
 def _t(device: th.device) -> float:
@@ -449,7 +450,7 @@ class Expansion(Method):
             feats_used += 1
 
             if feats_used + MAX_CHILDREN <= avail_feats_dim:
-                # One-hot ordinal encoding (10D): child i lights up bit i
+                # One-hot ordinal encoding (MAX_CHILDREN-wide): child i lights up bit i
                 geo_idx = geo_feat_all.long().clamp(0, MAX_CHILDREN - 1)
                 geo_onehot = pos_new.new_zeros((N, MAX_CHILDREN))
                 # Set one-hot for actual children (geo_ordinal >= 0; sentinel is -1)
@@ -707,7 +708,7 @@ class Expansion(Method):
             features = [is_leaf]
             feats_used = 1
 
-            # One-hot ordinal encoding (10D): child i lights up bit i
+            # One-hot ordinal encoding (MAX_CHILDREN-wide): child i lights up bit i
             if feats_used + MAX_CHILDREN <= avail_feats_dim:
                 geo_ordinal = pre_geom_p0['geo_ordinal'].to(device=pos_gt.device, dtype=pos_gt.dtype)
                 geo_idx = geo_ordinal.long().clamp(0, MAX_CHILDREN - 1)
