@@ -24,11 +24,24 @@ flips, or reflections.
 - `distributions.py`: standalone morphology distributions and 1D Wasserstein
   distances.
 - `fused_gw.py`: standalone Fused Gromov-Wasserstein comparison using POT.
+- `morphometrics.py`: the 16-component tree descriptor and distances in a
+  reference-cohort-standardized descriptor space. Its extractor intentionally
+  duplicates the training-time validation implementation so this package does
+  not depend on `validation/`; parity is covered by tests.
 - `adapters/elastic_srvft.py`: optional project-facing wrapper for the external
   Elastic SRVFT implementation.
 - `external/elastic_srvft/`: expected ignored local checkout for that backend.
 
 The large legacy scripts in `validation/` are not dependencies of this package.
+
+The morphometric descriptor combines counts, axial/radial/total extents,
+Strahler order, partition asymmetry, branch/root geometry, and three Sholl
+summaries. Raw Euclidean distance is not used because these components mix units
+and scales. Fit a `MorphometricReference` once on a fixed ground-truth cohort,
+then use z-score Euclidean distance. The reference stores shared Sholl radii,
+feature means, and population standard deviations. The result is intrinsically
+SO(2)-invariant and needs no angular minimization, but it is a pseudometric on
+trees and remains sensitive to tracing density and physical scale.
 
 FGW loads POT only when requested. It uses cable-length node mass by default;
 the raw uniform-node mode is retained for sensitivity analysis because it is

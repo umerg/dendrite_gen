@@ -73,6 +73,7 @@ _IMPLEMENTATION_SOURCES = (
     "metrics/chamfer.py",
     "metrics/distributions.py",
     "metrics/fused_gw.py",
+    "metrics/morphometrics.py",
     "metrics/persistence.py",
     "metrics/so2.py",
     "utils/data_loading.py",
@@ -1053,8 +1054,8 @@ def build_parser() -> argparse.ArgumentParser:
         choices=METRIC_SELECTORS,
         required=True,
         help=(
-            "Family aliases or scalar variants. 'all' means all 12 current "
-            "non-Elastic outputs."
+            "Family aliases or scalar variants. 'all' means every current "
+            "non-Elastic output."
         ),
     )
     parser.add_argument("--so2-grid-size", type=_grid_size, default=72)
@@ -1144,6 +1145,8 @@ def _new_selection(args: argparse.Namespace) -> tuple[TreeRecord, ...]:
 def _build_metrics(
     names: Sequence[str],
     args: argparse.Namespace,
+    *,
+    reference_graphs: Sequence[nx.Graph] | None = None,
 ) -> tuple[PreparedMatrixMetric, ...]:
     return tuple(
         build_matrix_metric(
@@ -1152,6 +1155,7 @@ def _build_metrics(
             so2_refine=args.so2_refine,
             so2_refinement_tolerance=args.so2_refinement_tolerance,
             fgw_max_nodes=args.fgw_max_nodes,
+            reference_graphs=reference_graphs,
         )
         for name in names
     )
@@ -1265,6 +1269,9 @@ def _prepare_new_output_directory(output_dir: Path) -> None:
     # These are the only files that can be left before run.json commits a new
     # run. They contain no computed distances and are safe to reconstruct.
     recoverable_bootstrap = {
+        "progress.json",
+        "progress.json.tmp",
+        "run.log",
         "selected_trees.csv",
         "selected_trees.csv.tmp",
         "run.json.tmp",
@@ -1289,7 +1296,6 @@ def _run_locked(
     progress_path = output_dir / "progress.json"
     log_path = output_dir / "run.log"
     metric_names = expand_metric_selection(args.metrics)
-    metrics = _build_metrics(metric_names, args)
     workers, worker_source = _resolve_worker_count(args.workers)
 
     if args.resume:
@@ -1299,21 +1305,17 @@ def _run_locked(
             )
         records = _read_manifest(manifest_path)
         saved = _load_json(run_path)
-        _validate_resume(saved, records, metrics)
     else:
         _prepare_new_output_directory(output_dir)
         records = _new_selection(args)
         _write_manifest(manifest_path, records)
-        _write_json_atomic(
-            run_path,
-            _static_run_payload(args, records, metrics),
-        )
+        saved = None
 
     logger = _RunLogger(log_path)
     pair_count = len(records) * (len(records) - 1) // 2
     logger.write(
         f"Selected {len(records)} trees ({pair_count} strict upper-triangle "
-        f"pairs) for {len(metrics)} scalar metrics."
+        f"pairs) for {len(metric_names)} scalar metrics."
     )
     logger.write(
         f"Pair evaluation requested {workers} worker(s) from {worker_source}."
@@ -1331,6 +1333,7 @@ def _run_locked(
     remaining_budget = args.max_new_pairs
     overall_status = "running"
     current_metric: PreparedMatrixMetric | None = None
+    metrics: tuple[PreparedMatrixMetric, ...] = ()
     _write_json_atomic(
         progress_path,
         {
@@ -1373,6 +1376,19 @@ def _run_locked(
             transform_scientific_y_to_internal_z(load_swc_graph(record.swc_path))
             for record in records
         ]
+        metrics = _build_metrics(
+            metric_names,
+            args,
+            reference_graphs=graphs,
+        )
+        if args.resume:
+            assert saved is not None
+            _validate_resume(saved, records, metrics)
+        else:
+            _write_json_atomic(
+                run_path,
+                _static_run_payload(args, records, metrics),
+            )
         for metric in metrics:
             current_metric = metric
             if remaining_budget is not None and remaining_budget <= 0:

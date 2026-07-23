@@ -67,11 +67,17 @@ python -u -m visualization.metric_study.run_distance_matrices \
   --output-dir outputs/metric_study/matrices/balanced_test_10_seed0
 ```
 
-Add `fgw` to the metric list when the dense FGW cost is acceptable, or use
-`--metrics all` for all twelve current non-Elastic scalar outputs.
+Add `morphometrics` for the reference-z-scored 16-component descriptor and `fgw`
+when the dense FGW cost is acceptable, or use `--metrics all` for every current
+non-Elastic scalar output. The morphometric reference is fitted once on the
+selected ground-truth cohort; its shared Sholl radii, means, and population
+standard deviations are stored in `run.json`. It is intrinsically SO(2)-invariant
+and therefore uses no angular search. Because its normalization is cohort-fitted,
+matrices from different selected cohorts are not numerically interchangeable.
 `--no-so2-refine` disables local refinement after the grid search. The angular
 settings affect Chamfer and `xyz`-feature FGW; the current persistence and
-distribution variants are already invariant to the specified SO(2) action.
+distribution variants and the morphometric descriptor are already invariant to
+the specified SO(2) action.
 The runner first applies the proper coordinate change
 `(x, y, z) -> (x, -z, y)`, so its internal z-axis search implements the
 scientific y-axis quotient used in the submission.
@@ -96,15 +102,17 @@ exec python -u -m visualization.metric_study.run_distance_matrices \
 ### Slurm with multiple CPUs
 
 The Slurm folder contains one reusable job and a small launcher. Running the
-launcher without arguments submits four independent jobs: Chamfer, the three
-barcode distances, the seven distribution distances, and FGW.
+launcher without arguments submits five independent jobs: Chamfer, the three
+barcode distances, the seven distribution distances, the morphometric-vector
+distance, and FGW.
 
 ```bash
 bash visualization/metric_study/slurm/submit_metric_families.sh
 ```
 
 By default Chamfer requests 16 CPUs, barcode and distribution jobs request 8
-each, and FGW requests 16. These can be changed at submission time, and a
+each, morphometrics requests 4, and FGW requests 16. These can be changed at
+submission time, and a
 subset of jobs can be named explicitly:
 
 ```bash
@@ -250,9 +258,9 @@ coordinate change stated above. Chamfer and FGW's default `xyz` features then
 use the same relative SO(2) minimum. The optional FGW
 `--fgw-feature-mode axis` variant uses `(z, rho)` and is already invariant, but
 deliberately discards azimuthal information. The
-selected TMD filtrations and morphology distributions are intrinsically
-SO(2)-invariant. `--no-so2-quotient` is retained only as an explicit diagnostic
-variant.
+selected TMD filtrations, morphology distributions, and the morphometric vector
+are intrinsically SO(2)-invariant. `--no-so2-quotient` is retained only as an
+explicit diagnostic variant.
 
 Elastic SRVFT is likewise minimized externally over `R_z(theta)`. The audited
 backend itself performs no rotation optimization, and the adapter never

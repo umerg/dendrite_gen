@@ -29,6 +29,12 @@ try:
         fused_gromov_wasserstein_distance_prepared,
         prepare_fused_gw_tree,
     )
+    from dendrite_gen.metrics.morphometrics import (
+        MorphometricReference,
+        fit_morphometric_reference,
+        morphometric_euclidean_distance_prepared,
+        prepare_morphometric_tree,
+    )
     from dendrite_gen.metrics.persistence import compute_tmd_diagrams
     from dendrite_gen.metrics.so2 import minimize_over_so2, rotate_points_about_axis
     from dendrite_gen.visualization.tmd.distances import (
@@ -53,6 +59,12 @@ except ModuleNotFoundError as exc:
         PreparedFusedGWTree,
         fused_gromov_wasserstein_distance_prepared,
         prepare_fused_gw_tree,
+    )
+    from metrics.morphometrics import (  # type: ignore
+        MorphometricReference,
+        fit_morphometric_reference,
+        morphometric_euclidean_distance_prepared,
+        prepare_morphometric_tree,
     )
     from metrics.persistence import compute_tmd_diagrams  # type: ignore
     from metrics.so2 import (  # type: ignore
@@ -84,6 +96,9 @@ DISTRIBUTION_BRANCH_ORDER_WASSERSTEIN = (
     "distribution_branch_order_wasserstein"
 )
 FUSED_GROMOV_WASSERSTEIN = "fused_gromov_wasserstein"
+MORPHOMETRIC_VECTOR_ZSCORE_EUCLIDEAN = (
+    "morphometric_vector_zscore_euclidean"
+)
 
 PERSISTENCE_VARIANTS = (
     TMD_PATH_WASSERSTEIN,
@@ -103,12 +118,14 @@ ALL_MATRIX_METRICS = (
     CHAMFER,
     *PERSISTENCE_VARIANTS,
     *DISTRIBUTION_VARIANTS,
+    MORPHOMETRIC_VECTOR_ZSCORE_EUCLIDEAN,
     FUSED_GROMOV_WASSERSTEIN,
 )
 METRIC_FAMILIES: Mapping[str, tuple[str, ...]] = {
     "chamfer": (CHAMFER,),
     "persistence": PERSISTENCE_VARIANTS,
     "distributions": DISTRIBUTION_VARIANTS,
+    "morphometrics": (MORPHOMETRIC_VECTOR_ZSCORE_EUCLIDEAN,),
     "fgw": (FUSED_GROMOV_WASSERSTEIN,),
     "all": ALL_MATRIX_METRICS,
 }
@@ -367,6 +384,39 @@ class DistributionMatrixMetric:
 
 
 @dataclass(frozen=True)
+class MorphometricMatrixMetric:
+    """Euclidean distance in a reference-standardized 16D descriptor space."""
+
+    reference: MorphometricReference
+    name: str = MORPHOMETRIC_VECTOR_ZSCORE_EUCLIDEAN
+    display_name: str = "Reference-z-scored morphometric vector Euclidean"
+    family: str = "morphometric_descriptor"
+    symmetric: bool = True
+    allows_undefined: bool = False
+
+    @property
+    def configuration(self) -> Mapping[str, object]:
+        return {
+            **self.reference.configuration,
+            "distance": "euclidean",
+            "reference_scope": "selected_matrix_ground_truth_cohort",
+            "quotient_so2": False,
+            "intrinsically_so2_invariant": True,
+            "grid_size": 0,
+            "refine": False,
+        }
+
+    def prepare(self, graph: nx.Graph) -> np.ndarray:
+        return prepare_morphometric_tree(graph, self.reference)
+
+    def compare(self, prepared_a: object, prepared_b: object) -> float:
+        return morphometric_euclidean_distance_prepared(
+            np.asarray(prepared_a, dtype=np.float64),
+            np.asarray(prepared_b, dtype=np.float64),
+        )
+
+
+@dataclass(frozen=True)
 class FusedGWMatrixMetric:
     grid_size: int = 72
     refine: bool = True
@@ -432,6 +482,7 @@ def build_matrix_metric(
     so2_refine: bool,
     so2_refinement_tolerance: float,
     fgw_max_nodes: int,
+    reference_graphs: Sequence[nx.Graph] | None = None,
 ) -> PreparedMatrixMetric:
     """Build one fixed scalar metric configuration by canonical name."""
 
@@ -455,6 +506,18 @@ def build_matrix_metric(
             distribution_name=distribution_name,
             display_name=display_name,
         )
+    if name == MORPHOMETRIC_VECTOR_ZSCORE_EUCLIDEAN:
+        if reference_graphs is None:
+            raise ValueError(
+                "The morphometric z-score metric requires a fixed reference cohort."
+            )
+        return MorphometricMatrixMetric(
+            reference=fit_morphometric_reference(
+                reference_graphs,
+                axis=(0.0, 0.0, 1.0),
+                nonfinite_policy="raise",
+            )
+        )
     if name == FUSED_GROMOV_WASSERSTEIN:
         return FusedGWMatrixMetric(
             grid_size=so2_grid_size,
@@ -476,6 +539,8 @@ __all__ = [
     "FUSED_GROMOV_WASSERSTEIN",
     "METRIC_FAMILIES",
     "METRIC_SELECTORS",
+    "MORPHOMETRIC_VECTOR_ZSCORE_EUCLIDEAN",
+    "MorphometricMatrixMetric",
     "PERSISTENCE_VARIANTS",
     "PreparedMatrixMetric",
     "build_matrix_metric",

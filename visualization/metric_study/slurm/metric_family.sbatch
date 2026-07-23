@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-METRIC_FAMILY="${METRIC_FAMILY:?Set METRIC_FAMILY to chamfer, barcodes, distributions, or fgw}"
+METRIC_FAMILY="${METRIC_FAMILY:?Set METRIC_FAMILY to chamfer, barcodes, distributions, morphometrics, or fgw}"
 
 case "${METRIC_FAMILY}" in
   chamfer)
@@ -22,6 +22,9 @@ case "${METRIC_FAMILY}" in
     ;;
   distributions)
     METRICS=(distributions)
+    ;;
+  morphometrics)
+    METRICS=(morphometrics)
     ;;
   fgw)
     METRICS=(fgw)

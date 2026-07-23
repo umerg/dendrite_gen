@@ -19,6 +19,7 @@ from visualization.metric_study.matrix_metrics import (
     CHAMFER,
     ChamferMatrixMetric,
     METRIC_SELECTORS,
+    MORPHOMETRIC_VECTOR_ZSCORE_EUCLIDEAN,
     PERSISTENCE_VARIANTS,
     TMD_HEIGHT_WASSERSTEIN,
     TMD_PATH_WASSERSTEIN,
@@ -35,6 +36,7 @@ from visualization.metric_study.run_distance_matrices import (
     _load_json,
     _manifest_fingerprint,
     _open_metric_arrays,
+    _prepare_new_output_directory,
     _resolve_worker_count,
     _static_run_payload,
     _validate_resume,
@@ -252,7 +254,10 @@ def test_metric_aliases_expand_canonically_and_exclude_elastic() -> None:
         ("persistence", CHAMFER, TMD_PATH_WASSERSTEIN)
     ) == (CHAMFER, *PERSISTENCE_VARIANTS)
     assert expand_metric_selection(("all",)) == ALL_MATRIX_METRICS
-    assert len(ALL_MATRIX_METRICS) == 12
+    assert expand_metric_selection(("morphometrics",)) == (
+        MORPHOMETRIC_VECTOR_ZSCORE_EUCLIDEAN,
+    )
+    assert len(ALL_MATRIX_METRICS) == 13
     assert "elastic" not in METRIC_SELECTORS
     assert "elastic_srvft" not in METRIC_SELECTORS
 
@@ -285,6 +290,38 @@ def test_cached_chamfer_matches_pair_api() -> None:
     assert cached == pytest.approx(direct, abs=1e-12)
 
 
+def test_morphometric_metric_requires_and_records_reference_cohort() -> None:
+    tree_a = _geometric_tree()
+    tree_b = _geometric_tree()
+    for node in tree_b.nodes:
+        tree_b.nodes[node]["pos"] = 1.6 * np.asarray(tree_b.nodes[node]["pos"])
+
+    common = {
+        "so2_grid_size": 8,
+        "so2_refine": False,
+        "so2_refinement_tolerance": 1e-8,
+        "fgw_max_nodes": 100,
+    }
+    with pytest.raises(ValueError, match="requires a fixed reference cohort"):
+        build_matrix_metric(MORPHOMETRIC_VECTOR_ZSCORE_EUCLIDEAN, **common)
+
+    metric = build_matrix_metric(
+        MORPHOMETRIC_VECTOR_ZSCORE_EUCLIDEAN,
+        reference_graphs=(tree_a, tree_b),
+        **common,
+    )
+    configuration = metric.configuration
+    assert configuration["reference_scope"] == "selected_matrix_ground_truth_cohort"
+    assert configuration["reference_tree_count"] == 2
+    assert len(configuration["feature_names"]) == 16
+    assert len(configuration["reference_mean"]) == 16
+    assert len(configuration["reference_scale"]) == 16
+    assert len(configuration["sholl_radii"]) == 32
+    assert configuration["intrinsically_so2_invariant"] is True
+    assert metric.compare(metric.prepare(tree_a), metric.prepare(tree_a)) == 0.0
+    assert metric.compare(metric.prepare(tree_a), metric.prepare(tree_b)) > 0.0
+
+
 def test_manifest_fingerprint_changes_when_swc_bytes_change(tmp_path: Path) -> None:
     record = _record(0, 0, fixture_root=tmp_path)
     original = _manifest_fingerprint((record,))
@@ -298,6 +335,21 @@ def test_manifest_fingerprint_changes_when_swc_bytes_change(tmp_path: Path) -> N
     )
 
     assert _manifest_fingerprint((record,)) != original
+
+
+def test_failed_reference_fit_bootstrap_can_be_restarted(tmp_path: Path) -> None:
+    for filename in (
+        "selected_trees.csv",
+        "progress.json",
+        "progress.json.tmp",
+        "run.json.tmp",
+        "run.log",
+    ):
+        (tmp_path / filename).write_text("incomplete bootstrap\n", encoding="utf-8")
+
+    _prepare_new_output_directory(tmp_path)
+
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_resume_repairs_mirrors_and_clears_pending_distance_values(

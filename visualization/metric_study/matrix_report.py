@@ -57,6 +57,7 @@ METRIC_ORDER = (
     "distribution_height_wasserstein",
     "distribution_root_euclidean_wasserstein",
     "distribution_branch_order_wasserstein",
+    "morphometric_vector_zscore_euclidean",
     "fused_gromov_wasserstein",
 )
 
@@ -72,6 +73,7 @@ METRIC_LABELS = {
     "distribution_height_wasserstein": "Height",
     "distribution_root_euclidean_wasserstein": "Root Euclidean",
     "distribution_branch_order_wasserstein": "Branch order",
+    "morphometric_vector_zscore_euclidean": "Morphometric vector",
     "fused_gromov_wasserstein": "FGW",
 }
 
@@ -80,6 +82,7 @@ GEOMETRY_TOPOLOGY_METRICS = (
     "tmd_path_wasserstein",
     "tmd_height_wasserstein",
     "tmd_rho_wasserstein",
+    "morphometric_vector_zscore_euclidean",
     "fused_gromov_wasserstein",
 )
 DISTRIBUTION_METRICS = tuple(
@@ -89,6 +92,7 @@ EXAMPLE_METRICS = (
     "chamfer",
     "tmd_path_wasserstein",
     "distribution_sibling_angle_wasserstein",
+    "morphometric_vector_zscore_euclidean",
     "fused_gromov_wasserstein",
 )
 ALL_ASSETS = (

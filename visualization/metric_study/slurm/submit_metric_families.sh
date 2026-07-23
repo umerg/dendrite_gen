@@ -11,7 +11,7 @@ LOG_DIR="${LOG_DIR:-${PROJECT_ROOT}/log/metric_study}"
 mkdir -p "${LOG_DIR}"
 
 if [[ "$#" -eq 0 ]]; then
-  FAMILIES=(chamfer barcodes distributions fgw)
+  FAMILIES=(chamfer barcodes distributions morphometrics fgw)
 else
   FAMILIES=("$@")
 fi
@@ -26,6 +26,9 @@ for FAMILY in "${FAMILIES[@]}"; do
       ;;
     distributions)
       CPUS="${DISTRIBUTION_CPUS:-8}"
+      ;;
+    morphometrics)
+      CPUS="${MORPHOMETRIC_CPUS:-4}"
       ;;
     fgw)
       CPUS="${FGW_CPUS:-16}"
