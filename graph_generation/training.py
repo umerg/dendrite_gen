@@ -66,6 +66,9 @@ def build_wandb_config(cfg):
         "global_linear_attn_heads": "model_global_linear_attn_heads",
         "global_linear_attn_dim_head": "model_global_linear_attn_dim_head",
         "num_global_tokens": "model_num_global_tokens",
+        "edge_mlp_hidden": "model_edge_mlp_hidden",
+        "node_mlp_hidden": "model_node_mlp_hidden",
+        "global_linear_attn_ff_hidden": "model_global_linear_attn_ff_hidden",
     }
     for source_key, alias_key in model_aliases.items():
         _maybe_add_alias(alias_cfg, model_cfg, source_key, alias_key)

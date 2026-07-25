@@ -188,17 +188,21 @@ class GlobalLinearAttention_Sparse(nn.Module):
         *,
         dim,
         heads = 8,
-        dim_head = 64
+        dim_head = 64,
+        ff_hidden = None
     ):
         super().__init__()
+        # Both FFNs dominate this block's parameter count (~16*dim^2 of ~17.4*dim^2 at
+        # heads*dim_head << dim). None keeps the standard 4x transformer ratio.
+        self.ff_hidden = int(ff_hidden) if ff_hidden is not None else dim * 4
         self.norm_seq = PygLayerNorm(dim)
         self.norm_queries = PygLayerNorm(dim)
         self.attn1 = Attention_Sparse(dim=dim, heads=heads, dim_head=dim_head)
         self.attn2 = Attention_Sparse(dim=dim, heads=heads, dim_head=dim_head)
         self.ff_norm_x = PygLayerNorm(dim)
-        self.ff_x = nn.Sequential(nn.Linear(dim, dim*4), nn.GELU(), nn.Linear(dim*4, dim))
+        self.ff_x = nn.Sequential(nn.Linear(dim, self.ff_hidden), nn.GELU(), nn.Linear(self.ff_hidden, dim))
         self.ff_norm_q = PygLayerNorm(dim)
-        self.ff_q = nn.Sequential(nn.Linear(dim, dim*4), nn.GELU(), nn.Linear(dim*4, dim))
+        self.ff_q = nn.Sequential(nn.Linear(dim, self.ff_hidden), nn.GELU(), nn.Linear(self.ff_hidden, dim))
 
     def forward(self,
                 x: torch.Tensor,
@@ -259,6 +263,10 @@ class SO2_EGNN(MessagePassing):
         rbf_gamma: float = 10.0,
         rbf_rho_max: float = 5.0,
         rbf_du_max: float = 3.0,
+        # Per-layer MLP hidden widths. None => feats_dim (the contracted form used by the
+        # original EGNN, where phi_e projects the concatenated node pair DOWN to feats_dim).
+        edge_mlp_hidden: Optional[int] = None,
+        node_mlp_hidden: Optional[int] = None,
                  eps: float = 1e-8,
                  **kwargs
     ):
@@ -306,15 +314,22 @@ class SO2_EGNN(MessagePassing):
         if self.add_local_angles:
             base_scalar_dim += 3                               # cosψ, sinψ, cosθ
         self.edge_input_dim = (fourier_features * 2) + edge_attr_dim + base_scalar_dim + (feats_dim * 2) # features for both nodes connected by edge
+        # Resolve MLP hidden widths here: edge_input_dim is only known at this point, and
+        # `feats_dim` is already post-embedding (mutated by SO2_EGNN_Network before we are
+        # constructed). Pure arithmetic on purpose -- building a module here would shift the
+        # global RNG stream that self.apply(self.init_) draws from below.
+        # Legacy (pre-configurable) widths were 2*edge_input_dim and 2*feats_dim.
+        self.edge_mlp_hidden = int(edge_mlp_hidden) if edge_mlp_hidden is not None else feats_dim
+        self.node_mlp_hidden = int(node_mlp_hidden) if node_mlp_hidden is not None else feats_dim
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
 
         # EDGES
         self.edge_mlp = nn.Sequential(
-            nn.Linear(self.edge_input_dim, self.edge_input_dim * 2),
+            nn.Linear(self.edge_input_dim, self.edge_mlp_hidden),
             self.dropout,
             SiLU(),
-            nn.Linear(self.edge_input_dim * 2, m_dim),
+            nn.Linear(self.edge_mlp_hidden, m_dim),
             SiLU()
         )
 
@@ -327,10 +342,10 @@ class SO2_EGNN(MessagePassing):
         self.coors_norm = CoorsNorm(scale_init = norm_coors_scale_init) if norm_coors else nn.Identity()
 
         self.node_mlp = nn.Sequential(
-            nn.Linear(feats_dim + m_dim, feats_dim * 2),
+            nn.Linear(feats_dim + m_dim, self.node_mlp_hidden),
             self.dropout,
             SiLU(),
-            nn.Linear(feats_dim * 2, feats_dim),
+            nn.Linear(self.node_mlp_hidden, feats_dim),
         ) if update_feats else None
 
         # COORS
@@ -574,6 +589,11 @@ class SO2_EGNN_Network(nn.Module):
                  offset_head_hidden=128,
                  # root-child ordinal criterion: "first_edge" (legacy) | "axial_extent" (apical=ordinal 0)
                  root_child_order="first_edge",
+                 # Per-layer MLP hidden widths; None = each block's own default.
+                 # edge_mlp / node_mlp -> feats_dim (contracted); attention FFNs -> 4*feats_dim.
+                 edge_mlp_hidden=None,
+                 node_mlp_hidden=None,
+                 global_linear_attn_ff_hidden=None,
                  ):
         super().__init__()
 
@@ -639,6 +659,13 @@ class SO2_EGNN_Network(nn.Module):
         # Both conditioners reserve part of feats_dim; their combined width must fit.
         if self.tmd_hidden_dim + self.class_hidden_dim > self.feats_dim:
             raise ValueError("tmd_hidden_dim + class_hidden_dim cannot exceed feats_dim.")
+        # nn.Linear(x, 0) builds a degenerate zero-width layer without raising, so a typo'd
+        # 0 here would train silently to garbage. Reject it up front.
+        for _name, _width in (("edge_mlp_hidden", edge_mlp_hidden),
+                              ("node_mlp_hidden", node_mlp_hidden),
+                              ("global_linear_attn_ff_hidden", global_linear_attn_ff_hidden)):
+            if _width is not None and int(_width) <= 0:
+                raise ValueError(f"{_name} must be > 0 when set (omit it for the default).")
 
         self.tmd_mlp = None
         if self.tmd_hidden_dim > 0:
@@ -704,15 +731,18 @@ class SO2_EGNN_Network(nn.Module):
                 rbf_gamma = rbf_gamma,
                 rbf_rho_max = rbf_rho_max,
                 rbf_du_max = rbf_du_max,
+                edge_mlp_hidden = edge_mlp_hidden,
+                node_mlp_hidden = node_mlp_hidden,
                 eps = eps,
             )
 
             # global attention case
             is_global_layer = self.has_global_attn and ((i + 1) % self.global_linear_attn_every) == 0
             if is_global_layer:
-                attn_layer = GlobalLinearAttention_Sparse(dim=self.feats_dim, 
-                                                   heads = global_linear_attn_heads, 
-                                                   dim_head = global_linear_attn_dim_head)
+                attn_layer = GlobalLinearAttention_Sparse(dim=self.feats_dim,
+                                                   heads = global_linear_attn_heads,
+                                                   dim_head = global_linear_attn_dim_head,
+                                                   ff_hidden = global_linear_attn_ff_hidden)
                 self.mpnn_layers.append(nn.ModuleList([attn_layer, layer]))  # [ATTN, EGNN]
             # normal case
             else: 

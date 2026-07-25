@@ -63,6 +63,13 @@ def get_expansion_items(cfg: DictConfig, train_graphs, diffusion=None):
     rbf_gamma = float(getattr(cfg.model, "rbf_gamma", 10.0))
     rbf_rho_max = float(getattr(cfg.model, "rbf_rho_max", 5.0))
     rbf_du_max = float(getattr(cfg.model, "rbf_du_max", 3.0))
+    # Per-layer MLP hidden widths. None = the model's own default: feats_dim for
+    # edge_mlp/node_mlp (contracted, as in the original EGNN) and 4*feats_dim for the
+    # attention FFNs. Setting any of these changes state_dict shapes, so a checkpoint must
+    # be loaded with the same values it was trained with.
+    edge_mlp_hidden = getattr(cfg.model, "edge_mlp_hidden", None)
+    node_mlp_hidden = getattr(cfg.model, "node_mlp_hidden", None)
+    global_linear_attn_ff_hidden = getattr(cfg.model, "global_linear_attn_ff_hidden", None)
     print(f"Extracting adjacency and position matrices for {len(train_graphs)} training graphs...")
     adjs = []
     poses = []
@@ -146,6 +153,10 @@ def get_expansion_items(cfg: DictConfig, train_graphs, diffusion=None):
         print(f"TMD conditioning ON: filtrations={list(tmd_filtrations)}, bins={tmd_bins} -> tmd_in_dim={tmd_in_dim}")
     if rbf_k > 0:
         print(f"RBF edge features ON: k={rbf_k}, gamma={rbf_gamma}, rho in [0,{rbf_rho_max}], du in [+-{rbf_du_max}]")
+    if any(v is not None for v in (edge_mlp_hidden, node_mlp_hidden, global_linear_attn_ff_hidden)):
+        print(f"MLP hidden widths overridden: edge_mlp_hidden={edge_mlp_hidden}, "
+              f"node_mlp_hidden={node_mlp_hidden}, "
+              f"global_linear_attn_ff_hidden={global_linear_attn_ff_hidden} (None = default)")
     if cfg.model.name == "egnn":
         model = gg.model.SO2_EGNN_Network(
             n_layers=cfg.model.num_layers,
@@ -172,6 +183,9 @@ def get_expansion_items(cfg: DictConfig, train_graphs, diffusion=None):
             rbf_rho_max=rbf_rho_max,
             rbf_du_max=rbf_du_max,
             root_child_order=root_child_order,
+            edge_mlp_hidden=edge_mlp_hidden,
+            node_mlp_hidden=node_mlp_hidden,
+            global_linear_attn_ff_hidden=global_linear_attn_ff_hidden,
         )
     else:
         raise ValueError(f"Unknown model name: {cfg.model.name}")

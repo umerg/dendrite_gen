@@ -74,6 +74,22 @@ model:
   global_linear_attn_dim_head: 16
   num_global_tokens: 8
   offset_head_hidden: 256
+  # Per-layer MLP hidden widths. Leave UNSET for the defaults:
+  #   edge_mlp / node_mlp -> feats_dim (contracted, as in the original Satorras EGNN, where
+  #                          phi_e projects the concatenated node pair DOWN to feats_dim)
+  #   attention FFNs      -> 4*feats_dim (standard transformer ratio)
+  # edge_mlp is by far the largest parameter block (~12.2*feats_dim^2 of ~27*feats_dim^2 per
+  # layer at the legacy 2*edge_input_dim width), so it is the main size dial.
+  # WARNING: setting any of these changes state_dict shapes -> a checkpoint only loads with
+  # the same values it was trained with (load_state_dict is strict).
+  # Legacy widths for this config (pre-configurable behaviour, feats_dim=256, rbf_k=0):
+  #   edge_mlp_hidden: 1042   # = 2*edge_input_dim = 2*(2*256 + 4 + 5)
+  #   node_mlp_hidden: 512    # = 2*feats_dim
+  # Keep edge_mlp_hidden >= m_dim; below that the second Linear becomes an expansion, which
+  # is not what "contracted" is meant to mean.
+  # edge_mlp_hidden: null
+  # node_mlp_hidden: null
+  # global_linear_attn_ff_hidden: null
   use_global_fallback_frames: False
   so2_axis: [0., 1., 0.] # z-axis for trees, y-axis for neurons
   # RBF edge-distance kernel (default OFF). Set rbf_k>0 to expand rho/du into Gaussian

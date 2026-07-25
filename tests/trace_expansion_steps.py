@@ -52,6 +52,12 @@ def build_model_and_method(checkpoint_path: str, device: str = "cpu"):
         tmd_in_dim=tmd_in_dim,
         tmd_hidden_dim=tmd_hidden_dim,
         so2_axis=cfg.model.so2_axis,
+        # Must match whatever the checkpoint was trained with (load_state_dict is strict).
+        # Pre-configurable checkpoints used 2*edge_input_dim / 2*feats_dim / 4*feats_dim --
+        # set those in the config to load one.
+        edge_mlp_hidden=getattr(cfg.model, "edge_mlp_hidden", None),
+        node_mlp_hidden=getattr(cfg.model, "node_mlp_hidden", None),
+        global_linear_attn_ff_hidden=getattr(cfg.model, "global_linear_attn_ff_hidden", None),
     )
 
     # Build method + diffusion
