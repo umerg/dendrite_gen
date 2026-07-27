@@ -34,13 +34,13 @@ reduction:
   contract_root: False
 
 training:
-  batch_size: 512 # can adjust based on GPU memory
+  batch_size: 256 # can adjust based on GPU memory
   lr: 1e-4
   optimizer: adam      # adam | adamw (adamw = decoupled weight decay)
   weight_decay: 0.0     # AdamW decoupled weight decay; 0.01 = torch default. Tune (0 == plain Adam).
-  num_steps: 10000
+  num_steps: 20000
   max_num_workers: 0
-  log_interval: 10 # can make 5K as well
+  log_interval: 20 # can make 5K as well
   save_checkpoint: True
   resume: False # False, True (latest checkpoint), step number, or path to .pt file
   lr_scheduler: "cosine_annealing"
@@ -50,7 +50,7 @@ training:
 
 validation:
   batch_size: 64 # adjust according to GPU memory
-  interval: 100
+  interval: 200
   first_step: 0
   per_graph_size: False
   eval_mode: rollout               # rollout | teacher_forced | both. both = free-running metrics AND
