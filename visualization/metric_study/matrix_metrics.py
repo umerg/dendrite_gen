@@ -16,8 +16,10 @@ try:
     from dendrite_gen.metrics.distributions import (
         CRITICAL_BRANCH_CABLE_LENGTH,
         CRITICAL_BRANCH_CHORD_SIBLING_ANGLE_DEG,
+        CRITICAL_BRANCH_STRAHLER_ORDER,
         CRITICAL_NODE_BRANCH_ORDER,
         CRITICAL_NODE_ROOT_PATH_LENGTH,
+        SHOLL_INTERSECTION_CURVE,
         UNIFORM_CABLE_HEIGHT_Z,
         UNIFORM_CABLE_RADIAL_XY,
         UNIFORM_CABLE_ROOT_EUCLIDEAN,
@@ -47,8 +49,10 @@ except ModuleNotFoundError as exc:
     from metrics.distributions import (  # type: ignore
         CRITICAL_BRANCH_CABLE_LENGTH,
         CRITICAL_BRANCH_CHORD_SIBLING_ANGLE_DEG,
+        CRITICAL_BRANCH_STRAHLER_ORDER,
         CRITICAL_NODE_BRANCH_ORDER,
         CRITICAL_NODE_ROOT_PATH_LENGTH,
+        SHOLL_INTERSECTION_CURVE,
         UNIFORM_CABLE_HEIGHT_Z,
         UNIFORM_CABLE_RADIAL_XY,
         UNIFORM_CABLE_ROOT_EUCLIDEAN,
@@ -95,6 +99,10 @@ DISTRIBUTION_ROOT_EUCLIDEAN_WASSERSTEIN = (
 DISTRIBUTION_BRANCH_ORDER_WASSERSTEIN = (
     "distribution_branch_order_wasserstein"
 )
+DISTRIBUTION_STRAHLER_ORDER_WASSERSTEIN = (
+    "distribution_strahler_order_wasserstein"
+)
+DISTRIBUTION_SHOLL_CURVE_WASSERSTEIN = "distribution_sholl_curve_wasserstein"
 FUSED_GROMOV_WASSERSTEIN = "fused_gromov_wasserstein"
 MORPHOMETRIC_VECTOR_ZSCORE_EUCLIDEAN = (
     "morphometric_vector_zscore_euclidean"
@@ -113,6 +121,8 @@ DISTRIBUTION_VARIANTS = (
     DISTRIBUTION_HEIGHT_WASSERSTEIN,
     DISTRIBUTION_ROOT_EUCLIDEAN_WASSERSTEIN,
     DISTRIBUTION_BRANCH_ORDER_WASSERSTEIN,
+    DISTRIBUTION_STRAHLER_ORDER_WASSERSTEIN,
+    DISTRIBUTION_SHOLL_CURVE_WASSERSTEIN,
 )
 ALL_MATRIX_METRICS = (
     CHAMFER,
@@ -323,6 +333,14 @@ _DISTRIBUTION_CONFIG = {
         CRITICAL_NODE_BRANCH_ORDER,
         "Critical-node branch-order W1",
     ),
+    DISTRIBUTION_STRAHLER_ORDER_WASSERSTEIN: (
+        CRITICAL_BRANCH_STRAHLER_ORDER,
+        "Length-weighted critical-branch Strahler-order W1",
+    ),
+    DISTRIBUTION_SHOLL_CURVE_WASSERSTEIN: (
+        SHOLL_INTERSECTION_CURVE,
+        "Root-centred Sholl-curve W1",
+    ),
 }
 
 
@@ -338,7 +356,7 @@ class DistributionMatrixMetric:
 
     @property
     def configuration(self) -> Mapping[str, object]:
-        return {
+        configuration: dict[str, object] = {
             "distribution_name": self.distribution_name,
             "sample_spacing": self.spacing,
             "wasserstein_order": 1.0,
@@ -346,6 +364,33 @@ class DistributionMatrixMetric:
             "grid_size": 0,
             "refine": False,
         }
+        if self.distribution_name == CRITICAL_BRANCH_STRAHLER_ORDER:
+            configuration.update(
+                {
+                    "observation_unit": "maximal_critical_branch",
+                    "order_assignment": "downstream_subtree_strahler",
+                    "multifurcation_rule": (
+                        "max_plus_one_if_maximum_child_order_occurs_at_least_twice"
+                    ),
+                    "observation_weight": "critical_branch_cable_length",
+                    "weight_normalization": "per_tree_probability_mass",
+                }
+            )
+        elif self.distribution_name == SHOLL_INTERSECTION_CURVE:
+            configuration.update(
+                {
+                    "observation_unit": "root_centered_spherical_shell",
+                    "curve_value": "edge_intersection_count",
+                    "crossing_rule": (
+                        "min_endpoint_radius_lt_shell_le_max_endpoint_radius"
+                    ),
+                    "boundary_relative_tolerance": 1e-12,
+                    "observation_weight": "sholl_intersection_count",
+                    "radius_normalization": "none",
+                    "weight_normalization": "per_tree_probability_mass",
+                }
+            )
+        return configuration
 
     def prepare(self, graph: nx.Graph) -> EmpiricalTreeDistribution:
         return tree_distribution(

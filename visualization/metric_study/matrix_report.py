@@ -57,6 +57,8 @@ METRIC_ORDER = (
     "distribution_height_wasserstein",
     "distribution_root_euclidean_wasserstein",
     "distribution_branch_order_wasserstein",
+    "distribution_strahler_order_wasserstein",
+    "distribution_sholl_curve_wasserstein",
     "morphometric_vector_zscore_euclidean",
     "fused_gromov_wasserstein",
 )
@@ -73,6 +75,8 @@ METRIC_LABELS = {
     "distribution_height_wasserstein": "Height",
     "distribution_root_euclidean_wasserstein": "Root Euclidean",
     "distribution_branch_order_wasserstein": "Branch order",
+    "distribution_strahler_order_wasserstein": "Strahler order",
+    "distribution_sholl_curve_wasserstein": "Sholl curve",
     "morphometric_vector_zscore_euclidean": "Morphometric vector",
     "fused_gromov_wasserstein": "FGW",
 }

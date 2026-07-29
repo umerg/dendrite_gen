@@ -18,6 +18,9 @@ from visualization.metric_study.matrix_metrics import (
     ALL_MATRIX_METRICS,
     CHAMFER,
     ChamferMatrixMetric,
+    DISTRIBUTION_SHOLL_CURVE_WASSERSTEIN,
+    DISTRIBUTION_STRAHLER_ORDER_WASSERSTEIN,
+    DISTRIBUTION_VARIANTS,
     METRIC_SELECTORS,
     MORPHOMETRIC_VECTOR_ZSCORE_EUCLIDEAN,
     PERSISTENCE_VARIANTS,
@@ -257,7 +260,16 @@ def test_metric_aliases_expand_canonically_and_exclude_elastic() -> None:
     assert expand_metric_selection(("morphometrics",)) == (
         MORPHOMETRIC_VECTOR_ZSCORE_EUCLIDEAN,
     )
-    assert len(ALL_MATRIX_METRICS) == 13
+    assert expand_metric_selection(("distributions",)) == DISTRIBUTION_VARIANTS
+    assert (
+        DISTRIBUTION_STRAHLER_ORDER_WASSERSTEIN
+        in expand_metric_selection(("distributions",))
+    )
+    assert (
+        DISTRIBUTION_SHOLL_CURVE_WASSERSTEIN
+        in expand_metric_selection(("distributions",))
+    )
+    assert len(ALL_MATRIX_METRICS) == 15
     assert "elastic" not in METRIC_SELECTORS
     assert "elastic_srvft" not in METRIC_SELECTORS
 
@@ -288,6 +300,57 @@ def test_cached_chamfer_matches_pair_api() -> None:
     ).value
 
     assert cached == pytest.approx(direct, abs=1e-12)
+
+
+def test_strahler_wasserstein_matrix_metric_is_registered_and_invariant() -> None:
+    tree = _geometric_tree()
+    metric = build_matrix_metric(
+        DISTRIBUTION_STRAHLER_ORDER_WASSERSTEIN,
+        so2_grid_size=8,
+        so2_refine=False,
+        so2_refinement_tolerance=1e-8,
+        fgw_max_nodes=100,
+    )
+
+    prepared = metric.prepare(tree)
+
+    assert metric.configuration["distribution_name"] == (
+        "critical_branch_strahler_order"
+    )
+    assert metric.configuration["observation_weight"] == (
+        "critical_branch_cable_length"
+    )
+    assert metric.configuration["weight_normalization"] == (
+        "per_tree_probability_mass"
+    )
+    assert metric.configuration["grid_size"] == 0
+    assert metric.compare(prepared, prepared) == pytest.approx(0.0)
+
+
+def test_sholl_curve_wasserstein_matrix_metric_is_registered_and_invariant() -> None:
+    tree = _geometric_tree()
+    metric = build_matrix_metric(
+        DISTRIBUTION_SHOLL_CURVE_WASSERSTEIN,
+        so2_grid_size=8,
+        so2_refine=False,
+        so2_refinement_tolerance=1e-8,
+        fgw_max_nodes=100,
+    )
+
+    prepared = metric.prepare(tree)
+
+    assert metric.configuration["distribution_name"] == (
+        "sholl_intersection_curve"
+    )
+    assert metric.configuration["observation_weight"] == (
+        "sholl_intersection_count"
+    )
+    assert metric.configuration["radius_normalization"] == "none"
+    assert metric.configuration["weight_normalization"] == (
+        "per_tree_probability_mass"
+    )
+    assert metric.configuration["grid_size"] == 0
+    assert metric.compare(prepared, prepared) == pytest.approx(0.0)
 
 
 def test_morphometric_metric_requires_and_records_reference_cohort() -> None:

@@ -190,7 +190,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--distribution-spacing",
         type=_positive_float,
         default=1.0,
-        help="Midpoint-quadrature spacing for cable distributions.",
+        help=(
+            "Midpoint-quadrature spacing for cable distributions and target "
+            "radial shell spacing for the Sholl curve."
+        ),
     )
     distributions.add_argument(
         "--distribution-empty-policy",

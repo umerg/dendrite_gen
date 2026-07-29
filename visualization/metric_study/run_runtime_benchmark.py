@@ -31,8 +31,10 @@ try:
     from dendrite_gen.metrics.distributions import (
         CRITICAL_BRANCH_CABLE_LENGTH,
         CRITICAL_BRANCH_CHORD_SIBLING_ANGLE_DEG,
+        CRITICAL_BRANCH_STRAHLER_ORDER,
         CRITICAL_NODE_BRANCH_ORDER,
         CRITICAL_NODE_ROOT_PATH_LENGTH,
+        SHOLL_INTERSECTION_CURVE,
         UNIFORM_CABLE_HEIGHT_Z,
         UNIFORM_CABLE_RADIAL_XY,
         UNIFORM_CABLE_ROOT_EUCLIDEAN,
@@ -52,8 +54,10 @@ except ModuleNotFoundError as exc:
     from metrics.distributions import (  # type: ignore
         CRITICAL_BRANCH_CABLE_LENGTH,
         CRITICAL_BRANCH_CHORD_SIBLING_ANGLE_DEG,
+        CRITICAL_BRANCH_STRAHLER_ORDER,
         CRITICAL_NODE_BRANCH_ORDER,
         CRITICAL_NODE_ROOT_PATH_LENGTH,
+        SHOLL_INTERSECTION_CURVE,
         UNIFORM_CABLE_HEIGHT_Z,
         UNIFORM_CABLE_RADIAL_XY,
         UNIFORM_CABLE_ROOT_EUCLIDEAN,
@@ -164,6 +168,16 @@ _DISTRIBUTIONS: tuple[tuple[str, str, str], ...] = (
         "distribution_branch_order_wasserstein",
         "Critical-node branch-order W1",
         CRITICAL_NODE_BRANCH_ORDER,
+    ),
+    (
+        "distribution_strahler_order_wasserstein",
+        "Length-weighted critical-branch Strahler-order W1",
+        CRITICAL_BRANCH_STRAHLER_ORDER,
+    ),
+    (
+        "distribution_sholl_curve_wasserstein",
+        "Root-centred Sholl-curve W1",
+        SHOLL_INTERSECTION_CURVE,
     ),
 )
 
@@ -710,7 +724,7 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="+",
         choices=ALL_METRIC_NAMES,
         default=list(ALL_METRIC_NAMES),
-        help="Scalar metric variants to time; the default selects all 13.",
+        help="Scalar metric variants to time; the default selects all 15.",
     )
     parser.add_argument("--so2-grid-size", type=_grid_size, default=72)
     parser.add_argument(

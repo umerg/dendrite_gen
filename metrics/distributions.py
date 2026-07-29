@@ -25,6 +25,16 @@ The canonical distribution names are deliberately explicit:
 ``critical_node_branch_order``
     Centrifugal order of every non-root critical node.  Primary branches have
     order one and the order increases after each downstream bifurcation.
+``critical_branch_strahler_order``
+    Bottom-up Strahler order of every maximal critical branch.  Terminal
+    branches have order one; an upstream order increases when at least two
+    equally maximal child orders meet.  Observations are weighted by physical
+    branch cable length.
+``sholl_intersection_curve``
+    Root-centred Sholl intersection count as a function of physical sphere
+    radius.  Shell radii are observations and their intersection counts are
+    probability-mass weights.  As in the existing validation implementation,
+    an edge crosses a shell when its endpoint radii straddle that shell.
 
 The three ``uniform_cable_*`` distributions use midpoint quadrature on every
 edge.  Each sample is weighted by the amount of cable it represents, so raw
@@ -54,6 +64,8 @@ UNIFORM_CABLE_RADIAL_XY = "uniform_cable_radial_xy"
 UNIFORM_CABLE_HEIGHT_Z = "uniform_cable_height_z"
 UNIFORM_CABLE_ROOT_EUCLIDEAN = "uniform_cable_root_euclidean"
 CRITICAL_NODE_BRANCH_ORDER = "critical_node_branch_order"
+CRITICAL_BRANCH_STRAHLER_ORDER = "critical_branch_strahler_order"
+SHOLL_INTERSECTION_CURVE = "sholl_intersection_curve"
 
 DEFAULT_DISTRIBUTIONS: tuple[str, ...] = (
     CRITICAL_BRANCH_CABLE_LENGTH,
@@ -63,6 +75,8 @@ DEFAULT_DISTRIBUTIONS: tuple[str, ...] = (
     UNIFORM_CABLE_HEIGHT_Z,
     UNIFORM_CABLE_ROOT_EUCLIDEAN,
     CRITICAL_NODE_BRANCH_ORDER,
+    CRITICAL_BRANCH_STRAHLER_ORDER,
+    SHOLL_INTERSECTION_CURVE,
 )
 """Canonical distribution names used by the default comparison panel."""
 
@@ -87,9 +101,11 @@ class EmpiricalTreeDistribution:
     """One empirical distribution and optional probability-mass weights.
 
     ``weights`` is ``None`` for equally weighted structural observations.  For
-    cable-sampled distributions, each weight is the physical cable length
-    represented by the corresponding midpoint sample.  SciPy normalizes these
-    positive weights when evaluating the 1-Wasserstein distance.
+    cable-sampled distributions and the critical-branch Strahler profile, each
+    weight is the physical cable length represented by the corresponding
+    observation.  For the Sholl curve, weights are intersection counts at the
+    stored physical radii.  SciPy normalizes positive weights when evaluating
+    the 1-Wasserstein distance.
     """
 
     name: str
@@ -310,6 +326,96 @@ def _critical_node_branch_orders(tree: _RootedGeometry) -> np.ndarray:
     )
 
 
+def _node_strahler_orders(tree: _RootedGeometry) -> dict[Hashable, int]:
+    """Return bottom-up Strahler order for every node in one rooted tree."""
+    orders: dict[Hashable, int] = {}
+    for node in reversed(tree.traversal):
+        child_orders = [orders[child] for child in tree.children[node]]
+        if not child_orders:
+            orders[node] = 1
+            continue
+        maximum = max(child_orders)
+        orders[node] = maximum + int(child_orders.count(maximum) >= 2)
+    return orders
+
+
+def _critical_branch_strahler_distribution(
+    tree: _RootedGeometry,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return branch Strahler orders and their physical cable-length weights."""
+    node_orders = _node_strahler_orders(tree)
+    observations = [
+        (float(node_orders[end]), float(length))
+        for _start, end, length in _critical_branches(tree)
+        if length > _LENGTH_EPS
+    ]
+    if not observations:
+        empty = np.zeros((0,), dtype=np.float64)
+        return empty, empty.copy()
+    values, weights = zip(*observations)
+    return (
+        np.asarray(values, dtype=np.float64),
+        np.asarray(weights, dtype=np.float64),
+    )
+
+
+def _sholl_intersection_curve(
+    tree: _RootedGeometry,
+    *,
+    sample_spacing: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return physical shell radii and root-centred edge-crossing counts."""
+    root_position = tree.positions[tree.root]
+    root_distances = {
+        node: float(np.linalg.norm(position - root_position))
+        for node, position in tree.positions.items()
+    }
+    maximum = max(root_distances.values(), default=0.0)
+    if maximum <= 0.0 or tree.graph.number_of_edges() == 0:
+        empty = np.zeros((0,), dtype=np.float64)
+        return empty, empty.copy()
+
+    shell_count = _stable_bin_count(maximum, sample_spacing)
+    radii = np.linspace(
+        0.0,
+        maximum,
+        shell_count + 1,
+        dtype=np.float64,
+    )[1:]
+
+    # Each edge contributes one to all shells in (min(radius_u, radius_v),
+    # max(radius_u, radius_v)].  A difference array avoids an
+    # O(number_of_edges * number_of_shells) loop.
+    count_differences = np.zeros(shell_count + 1, dtype=np.int64)
+    boundary_tolerance = 1e-12 * max(1.0, maximum)
+    for node_a, node_b in tree.graph.edges:
+        lower, upper = sorted(
+            (root_distances[node_a], root_distances[node_b])
+        )
+        start = int(
+            np.searchsorted(
+                radii,
+                lower + boundary_tolerance,
+                side="right",
+            )
+        )
+        stop = int(
+            np.searchsorted(
+                radii,
+                upper + boundary_tolerance,
+                side="right",
+            )
+        )
+        if stop <= start:
+            continue
+        count_differences[start] += 1
+        count_differences[stop] -= 1
+
+    counts = np.cumsum(count_differences[:-1]).astype(np.float64)
+    positive = counts > 0.0
+    return radii[positive], counts[positive]
+
+
 def _stable_bin_count(length: float, spacing: float) -> int:
     # The small relative tolerance prevents an exact spacing boundary from
     # changing bin count under roundoff introduced by an SO(2) rotation.
@@ -378,7 +484,8 @@ def tree_distribution(
         Root node identifier.  If omitted, ``graph.graph['root']`` is required.
     sample_spacing:
         Maximum midpoint-quadrature bin length for ``uniform_cable_*``
-        distributions, in the same physical units as node positions.
+        distributions and target radial shell spacing for the Sholl curve, in
+        the same physical units as node positions.
     """
     if name not in DISTRIBUTION_NAMES:
         supported = ", ".join(DISTRIBUTION_NAMES)
@@ -394,6 +501,15 @@ def tree_distribution(
         values = _critical_node_root_path_lengths(tree)
     elif name == CRITICAL_NODE_BRANCH_ORDER:
         values = _critical_node_branch_orders(tree)
+    elif name == CRITICAL_BRANCH_STRAHLER_ORDER:
+        values, weights = _critical_branch_strahler_distribution(tree)
+        return EmpiricalTreeDistribution(name=name, values=values, weights=weights)
+    elif name == SHOLL_INTERSECTION_CURVE:
+        values, weights = _sholl_intersection_curve(
+            tree,
+            sample_spacing=spacing,
+        )
+        return EmpiricalTreeDistribution(name=name, values=values, weights=weights)
     elif name in _CABLE_DISTRIBUTIONS:
         values, weights = _uniform_cable_samples(
             tree,
@@ -535,6 +651,7 @@ def all_default_distribution_wasserstein_distances(
 __all__ = [
     "CRITICAL_BRANCH_CABLE_LENGTH",
     "CRITICAL_BRANCH_CHORD_SIBLING_ANGLE_DEG",
+    "CRITICAL_BRANCH_STRAHLER_ORDER",
     "CRITICAL_NODE_BRANCH_ORDER",
     "CRITICAL_NODE_ROOT_PATH_LENGTH",
     "DEFAULT_DISTRIBUTIONS",
@@ -542,6 +659,7 @@ __all__ = [
     "DistributionStatus",
     "DistributionWassersteinResult",
     "EmpiricalTreeDistribution",
+    "SHOLL_INTERSECTION_CURVE",
     "UNIFORM_CABLE_HEIGHT_Z",
     "UNIFORM_CABLE_RADIAL_XY",
     "UNIFORM_CABLE_ROOT_EUCLIDEAN",

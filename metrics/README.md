@@ -22,7 +22,8 @@ flips, or reflections.
 - `persistence.py`: temporary metric wrapper around the existing TMD code; the
   reusable persistence distance remains under `visualization/tmd/`.
 - `distributions.py`: standalone morphology distributions and 1D Wasserstein
-  distances.
+  distances, including a cable-length-weighted critical-branch Strahler-order
+  profile.
 - `fused_gw.py`: standalone Fused Gromov-Wasserstein comparison using POT.
 - `morphometrics.py`: the 16-component tree descriptor and distances in a
   reference-cohort-standardized descriptor space. Its extractor intentionally
@@ -42,6 +43,25 @@ then use z-score Euclidean distance. The reference stores shared Sholl radii,
 feature means, and population standard deviations. The result is intrinsically
 SO(2)-invariant and needs no angular minimization, but it is a pseudometric on
 trees and remains sensitive to tracing density and physical scale.
+
+The Strahler distribution assigns each maximal critical branch the bottom-up
+order of its downstream subtree and weights it by physical cable length.
+Wasserstein normalizes these weights separately for each tree, so this variant
+compares the fraction of cable at each order rather than total cable length or
+branch count. It is an SO(2)-invariant pseudometric on trees and is distinct
+from the centrifugal branch-order distribution.
+
+The Sholl-curve distribution uses physical radii of root-centred spherical
+shells as observations and their edge-intersection counts as weights.
+Wasserstein again normalizes the weights per tree, so it compares where along
+the radius the Sholl curve carries its mass while discarding the curve's total
+area and peak magnitude. Radii are not normalized by tree extent. The crossing
+rule matches the existing validation code: an edge crosses a shell when its
+endpoint radii straddle it. Consequently, subdivision invariance holds for
+radially monotone edges, not arbitrary edges that turn toward and away from the
+root. A relative boundary tolerance of \(10^{-12}\) prevents rigid-coordinate
+transformations from changing whether numerically tied endpoint radii cross a
+shell.
 
 FGW loads POT only when requested. It uses cable-length node mass by default;
 the raw uniform-node mode is retained for sensitivity analysis because it is

@@ -9,9 +9,11 @@ import pytest
 from metrics.distributions import (
     CRITICAL_BRANCH_CABLE_LENGTH,
     CRITICAL_BRANCH_CHORD_SIBLING_ANGLE_DEG,
+    CRITICAL_BRANCH_STRAHLER_ORDER,
     CRITICAL_NODE_BRANCH_ORDER,
     CRITICAL_NODE_ROOT_PATH_LENGTH,
     DEFAULT_DISTRIBUTIONS,
+    SHOLL_INTERSECTION_CURVE,
     UNIFORM_CABLE_HEIGHT_Z,
     UNIFORM_CABLE_RADIAL_XY,
     UNIFORM_CABLE_ROOT_EUCLIDEAN,
@@ -20,6 +22,7 @@ from metrics.distributions import (
     distribution_wasserstein_result,
     tree_distribution,
 )
+from validation.structural_metrics import sholl_intersection_profile
 
 
 def _branched_tree() -> nx.Graph:
@@ -75,6 +78,12 @@ def test_named_distributions_have_explicit_geometric_definitions() -> None:
     branch_order = tree_distribution(
         chain, CRITICAL_NODE_BRANCH_ORDER, sample_spacing=13.0
     )
+    strahler_order = tree_distribution(
+        chain, CRITICAL_BRANCH_STRAHLER_ORDER, sample_spacing=13.0
+    )
+    sholl_curve = tree_distribution(
+        chain, SHOLL_INTERSECTION_CURVE, sample_spacing=13.0
+    )
     radial = tree_distribution(chain, UNIFORM_CABLE_RADIAL_XY, sample_spacing=13.0)
     height = tree_distribution(chain, UNIFORM_CABLE_HEIGHT_Z, sample_spacing=13.0)
     euclidean = tree_distribution(
@@ -84,6 +93,10 @@ def test_named_distributions_have_explicit_geometric_definitions() -> None:
     np.testing.assert_allclose(branch_length.values, [13.0])
     np.testing.assert_allclose(root_path.values, [13.0])
     np.testing.assert_allclose(branch_order.values, [1.0])
+    np.testing.assert_allclose(strahler_order.values, [1.0])
+    np.testing.assert_allclose(strahler_order.weights, [13.0])
+    np.testing.assert_allclose(sholl_curve.values, [13.0])
+    np.testing.assert_allclose(sholl_curve.weights, [1.0])
     np.testing.assert_allclose(radial.values, [2.5])
     np.testing.assert_allclose(height.values, [6.0])
     np.testing.assert_allclose(euclidean.values, [6.5])
@@ -99,6 +112,12 @@ def test_critical_branches_collapse_degree_two_paths_and_use_chords() -> None:
     ).values
     path_lengths = tree_distribution(tree, CRITICAL_NODE_ROOT_PATH_LENGTH).values
     orders = tree_distribution(tree, CRITICAL_NODE_BRANCH_ORDER).values
+    strahler = tree_distribution(tree, CRITICAL_BRANCH_STRAHLER_ORDER)
+    sholl_curve = tree_distribution(
+        tree,
+        SHOLL_INTERSECTION_CURVE,
+        sample_spacing=1.0,
+    )
 
     np.testing.assert_allclose(np.sort(lengths), np.sort([2.0, np.sqrt(2), np.sqrt(2)]))
     np.testing.assert_allclose(angles, [90.0])
@@ -106,6 +125,124 @@ def test_critical_branches_collapse_degree_two_paths_and_use_chords() -> None:
         np.sort(path_lengths), np.sort([2.0, 2.0 + np.sqrt(2), 2.0 + np.sqrt(2)])
     )
     np.testing.assert_allclose(np.sort(orders), [1.0, 2.0, 2.0])
+    np.testing.assert_allclose(strahler.values, [2.0, 1.0, 1.0])
+    np.testing.assert_allclose(strahler.weights, [2.0, np.sqrt(2), np.sqrt(2)])
+    expected_radii = np.sqrt(10.0) * np.arange(1.0, 5.0) / 4.0
+    np.testing.assert_allclose(sholl_curve.values, expected_radii)
+    np.testing.assert_allclose(sholl_curve.weights, [1.0, 1.0, 2.0, 2.0])
+
+
+def test_strahler_wasserstein_has_known_value_and_ignores_degree_two_sampling() -> None:
+    chain = _chain(end=(0.0, 0.0, 1.0))
+    branched = _branched_tree()
+
+    distance = distribution_wasserstein_distance(
+        chain,
+        branched,
+        CRITICAL_BRANCH_STRAHLER_ORDER,
+    )
+    expected = 2.0 / (2.0 + 2.0 * np.sqrt(2.0))
+    assert distance == pytest.approx(expected)
+
+    collapsed = branched.copy()
+    collapsed.remove_node(1)
+    collapsed.add_edge(0, 2)
+    assert distribution_wasserstein_distance(
+        branched,
+        collapsed,
+        CRITICAL_BRANCH_STRAHLER_ORDER,
+    ) == pytest.approx(0.0, abs=1e-12)
+
+
+def test_strahler_order_handles_multifurcations_without_binary_resolution() -> None:
+    tree = nx.Graph()
+    positions = {
+        0: np.array([0.0, 0.0, 0.0]),
+        1: np.array([0.0, 0.0, 1.0]),
+        2: np.array([-1.0, 0.0, 2.0]),
+        3: np.array([0.0, 0.0, 2.0]),
+        4: np.array([1.0, 0.0, 2.0]),
+    }
+    tree.add_nodes_from(
+        (node, {"pos": position}) for node, position in positions.items()
+    )
+    tree.add_edges_from(((0, 1), (1, 2), (1, 3), (1, 4)))
+    tree.graph["root"] = 0
+
+    profile = tree_distribution(tree, CRITICAL_BRANCH_STRAHLER_ORDER)
+
+    np.testing.assert_allclose(profile.values, [2.0, 1.0, 1.0, 1.0])
+
+
+def test_sholl_curve_wasserstein_known_value_and_radially_monotone_subdivision() -> None:
+    short = _chain(end=(0.0, 0.0, 1.0))
+    long = _chain(end=(0.0, 0.0, 2.0))
+
+    distance = distribution_wasserstein_distance(
+        short,
+        long,
+        SHOLL_INTERSECTION_CURVE,
+        sample_spacing=0.5,
+    )
+    assert distance == pytest.approx(0.5)
+
+    subdivided = nx.Graph()
+    subdivided.add_node(0, pos=np.array([0.0, 0.0, 0.0]))
+    subdivided.add_node(1, pos=np.array([0.0, 0.0, 1.0]))
+    subdivided.add_node(2, pos=np.array([0.0, 0.0, 2.0]))
+    subdivided.add_edges_from(((0, 1), (1, 2)))
+    subdivided.graph["root"] = 0
+    assert distribution_wasserstein_distance(
+        long,
+        subdivided,
+        SHOLL_INTERSECTION_CURVE,
+        sample_spacing=0.5,
+    ) == pytest.approx(0.0, abs=1e-12)
+
+
+def test_sholl_curve_matches_existing_endpoint_crossing_definition() -> None:
+    tree = nx.Graph()
+    positions = {
+        0: np.array([0.0, 0.0, 0.0]),
+        1: np.array([2.0, 0.0, 0.0]),
+        2: np.array([1.0, 1.0, 0.0]),
+        3: np.array([1.0, -1.0, 0.0]),
+    }
+    tree.add_nodes_from(
+        (node, {"pos": position}) for node, position in positions.items()
+    )
+    tree.add_edges_from(((0, 1), (1, 2), (1, 3)))
+    tree.graph["root"] = 0
+
+    curve = tree_distribution(
+        tree,
+        SHOLL_INTERSECTION_CURVE,
+        sample_spacing=0.5,
+    )
+    radii, counts = sholl_intersection_profile(tree, radii=curve.values)
+
+    np.testing.assert_allclose(curve.values, [0.5, 1.0, 1.5, 2.0])
+    np.testing.assert_allclose(curve.values, radii)
+    np.testing.assert_allclose(curve.weights, counts)
+    np.testing.assert_allclose(curve.weights, [1.0, 1.0, 3.0, 3.0])
+
+
+def test_sholl_curve_wasserstein_normalizes_intersection_magnitude() -> None:
+    chain = _chain(end=(2.0, 0.0, 0.0))
+    star = nx.Graph()
+    star.add_node(0, pos=np.zeros(3))
+    star.add_node(1, pos=np.array([2.0, 0.0, 0.0]))
+    star.add_node(2, pos=np.array([-2.0, 0.0, 0.0]))
+    star.add_node(3, pos=np.array([0.0, 2.0, 0.0]))
+    star.add_edges_from(((0, 1), (0, 2), (0, 3)))
+    star.graph["root"] = 0
+
+    assert distribution_wasserstein_distance(
+        chain,
+        star,
+        SHOLL_INTERSECTION_CURVE,
+        sample_spacing=0.5,
+    ) == pytest.approx(0.0, abs=1e-12)
 
 
 def test_all_distances_are_identity_so2_translation_and_relabel_invariant() -> None:

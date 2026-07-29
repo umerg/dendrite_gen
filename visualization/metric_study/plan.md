@@ -69,7 +69,7 @@ The initial single-pair foundation is implemented:
 | --- | --- | --- |
 | Chamfer | uniform arc-length cable samples in `metrics/chamfer.py` | relative rotation minimum around `z` |
 | TMD barcode Wasserstein | wrapper in `metrics/persistence.py`; canonical diagram distance remains in `visualization/tmd/distances.py` | path, height, and `rho` filtrations are intrinsically invariant |
-| Distribution Wasserstein | seven named morphology distributions in `metrics/distributions.py` | all current distributions are intrinsically invariant |
+| Distribution Wasserstein | nine named morphology distributions in `metrics/distributions.py` | all current distributions are intrinsically invariant |
 | Fused Gromov-Wasserstein | opt-in POT-backed implementation with cable-length node mass in `metrics/fused_gw.py` | `xyz` features use the relative rotation minimum by default; `(z, rho)` is a cheaper information-discarding ablation |
 | Elastic SRVFT | opt-in adapter around an ignored local checkout; canonical rooted SWC to the upstream fixed-depth q-tree; reports alignment energy `E` | audited Python backend has no rotation optimizer; adapter applies an external relative `R_z` minimum with a coarse reported grid and optional refinement |
 
