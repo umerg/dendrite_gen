@@ -21,6 +21,7 @@ case "${METRIC_FAMILY}" in
     METRICS=(persistence)
     ;;
   distributions)
+    # Includes the Strahler-order and Sholl-curve Wasserstein variants.
     METRICS=(distributions)
     ;;
   morphometrics)
@@ -49,8 +50,14 @@ SEED="${SEED:-0}"
 SO2_GRID_SIZE="${SO2_GRID_SIZE:-72}"
 SO2_REFINEMENT_TOLERANCE="${SO2_REFINEMENT_TOLERANCE:-1e-8}"
 FGW_MAX_NODES="${FGW_MAX_NODES:-1000}"
+MAX_NEW_PAIRS="${MAX_NEW_PAIRS:-}"
 RUN_NAME="${RUN_NAME:-balanced_${SPLIT}_${PER_CLASS}_seed${SEED}}"
 OUTPUT_DIR="${OUTPUT_ROOT}/${RUN_NAME}/${METRIC_FAMILY}"
+
+if [[ -n "${MAX_NEW_PAIRS}" && ! "${MAX_NEW_PAIRS}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "MAX_NEW_PAIRS must be a positive integer, got: ${MAX_NEW_PAIRS}" >&2
+  exit 2
+fi
 
 source "${CONDA_ROOT}/bin/activate" "${CONDA_ENVIRONMENT}"
 cd "${REPOSITORY_DIR}"
@@ -74,12 +81,18 @@ COMMAND=(
   --output-dir "${OUTPUT_DIR}"
 )
 
+if [[ -n "${MAX_NEW_PAIRS}" ]]; then
+  COMMAND+=(--max-new-pairs "${MAX_NEW_PAIRS}")
+fi
+
 if [[ -f "${OUTPUT_DIR}/run.json" ]]; then
   COMMAND+=(--resume)
 fi
 
 echo "Metric family: ${METRIC_FAMILY}"
 echo "CPUs: ${SLURM_CPUS_PER_TASK:-1}"
+echo "Array task: ${SLURM_ARRAY_TASK_ID:-not an array}"
+echo "New-pair budget: ${MAX_NEW_PAIRS:-unlimited}"
 echo "Output: ${OUTPUT_DIR}"
 
 srun "${COMMAND[@]}"

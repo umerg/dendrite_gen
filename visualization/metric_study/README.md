@@ -52,7 +52,7 @@ The selection modes are:
 - `all`: use every tree remaining after the split and class filters.
 - `manifest --selection-manifest FILE`: use the listed `tree_id` values in order.
 
-For example, this runs Chamfer, all three persistence variants, and all seven
+For example, this runs Chamfer, all three persistence variants, and all nine
 distribution-Wasserstein variants on ten test trees per class:
 
 ```bash
@@ -103,7 +103,7 @@ exec python -u -m visualization.metric_study.run_distance_matrices \
 
 The Slurm folder contains one reusable job and a small launcher. Running the
 launcher without arguments submits five independent jobs: Chamfer, the three
-barcode distances, the seven distribution distances, the morphometric-vector
+barcode distances, the nine distribution distances, the morphometric-vector
 distance, and FGW.
 
 ```bash
@@ -136,15 +136,35 @@ bash visualization/metric_study/slurm/submit_metric_families_train_200.sh
 
 All seven train classes contain at least 200 neurons, so this selects 1,400
 trees and computes 979,300 distinct unordered pairs per metric. Chamfer and FGW
-request 30 CPUs each; barcode and distribution jobs request 8 each, and the
-morphometric-vector job requests 4. The default Slurm time limit is three days.
-The CPU counts and time limit can be overridden with the same environment
-variable pattern:
+are each submitted as a 25-task Slurm array. Every task requests 8 CPUs for
+8 hours and advances at most 40,000 previously pending pairs. The array limit
+`%1` keeps its tasks sequential because they resume the same checkpointed
+matrix. The final useful task consumes the remaining pairs; no shard merge is
+needed.
+
+The faster families remain single jobs: barcodes use 4 CPUs for 4 hours,
+distributions use 4 CPUs for 6 hours, and morphometrics uses 1 CPU for 2 hours.
+The distribution job includes all nine variants, including the new
+Strahler-order and Sholl-curve Wasserstein distances. Resource requests and
+chunk sizes can be overridden at submission time:
 
 ```bash
-CHAMFER_CPUS=24 FGW_CPUS=24 TIME_LIMIT=4-00:00:00 \
-  bash visualization/metric_study/slurm/submit_metric_families_train_200.sh
+CHAMFER_CPUS=6 \
+CHAMFER_TIME_LIMIT=06:00:00 \
+CHAMFER_MAX_NEW_PAIRS=25000 \
+CHAMFER_CHUNKS=40 \
+  bash visualization/metric_study/slurm/submit_metric_families_train_200.sh chamfer
 ```
+
+FGW has the corresponding `FGW_*` variables. The one-job families use
+`BARCODE_*`, `DISTRIBUTION_*`, and `MORPHOMETRIC_*` CPU and time-limit
+variables. `TIME_LIMIT` still provides a common time-limit override.
+
+Do not submit two arrays for the same family and output directory
+simultaneously. If a task times out before reaching its pair budget, let the
+array finish and run the launcher for that family again; it resumes the
+remaining cells, while a fully completed family exits without recomputing
+pairs.
 
 After an interruption, repeat the exact scientific configuration with
 `--resume`; already terminal pairs are skipped. Add `--retry-errors` only when
@@ -222,7 +242,7 @@ The default command evaluates:
 - arc-length-sampled symmetric Chamfer distance
 - TMD persistence-diagram Wasserstein distances for path, height, and radial
   (`rho`) filtrations
-- 1-Wasserstein distances between seven explicit morphology distributions
+- 1-Wasserstein distances between nine explicit morphology distributions
 
 Persistence uses the conventional Chebyshev/L-infinity ground norm by default;
 `--persistence-ground-norm euclidean` selects the explicitly reported L2-ground
