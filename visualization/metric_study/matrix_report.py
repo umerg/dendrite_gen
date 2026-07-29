@@ -441,6 +441,7 @@ def _plot_matrix_atlas(
             interpolation="nearest",
             aspect="equal",
         )
+        ax.grid(False)
         if matrix.shape[0] == len(study.manifest):
             for boundary in boundaries[1:-1]:
                 ax.axhline(boundary - 0.5, color="white", linewidth=0.55)
