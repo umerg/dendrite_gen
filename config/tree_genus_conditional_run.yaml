@@ -1,0 +1,114 @@
+defaults:
+  - dataset: trees          # depth-10 genus-labelled trees. Override with dataset=trees_genus_d15
+                            # or dataset=trees_genus_d20 for the deeper corpora.
+  - diffusion: flow_v10
+  - method: expansion
+  - _self_                  # LAST on purpose: lets the diffusion block below override
+                            # flow_v10.yaml's neuron-tuned prior_std_pos default.
+
+# prior_std_pos must match the dataset's pos_scale_factor, so it is pinned to the d10 values
+# here. WHEN YOU SWITCH DATASETS YOU MUST ALSO SWITCH THIS (table in config/diffusion/flow_v10.yaml
+# and docs/TREE_DATASET_STATS.md §4):
+# (quote the list -- zsh globs bare brackets):
+#   d15: python main.py -cn tree_genus_conditional_run dataset=trees_genus_d15 \
+#          'diffusion.prior_std_pos=[0.76,0.66,1.62]' training.batch_size=128
+#   d20: python main.py -cn tree_genus_conditional_run dataset=trees_genus_d20 \
+#          'diffusion.prior_std_pos=[0.84,0.74,1.46]' training.batch_size=64
+diffusion:
+  prior_std_pos: [0.62, 0.54, 1.85]   # trees_genus_d10, pos_scale_factor 0.45 (axis z)
+
+reduction:
+  type: "depth"
+  mode: "deterministic"
+  cherry_p: 1.0
+  ensure_progress: True
+  root: 0
+  contract_root: False
+
+training:
+  batch_size: 256       # d10 (~95 nodes/tree). Reduce for d15 (~2.8x) and d20 (~5.9x nodes.
+  lr: 1e-4
+  optimizer: adam       # adam | adamw (adamw = decoupled weight decay)
+  weight_decay: 0.0
+  num_steps: 20000
+  max_num_workers: 0
+  log_interval: 20
+  save_checkpoint: True
+  resume: False         # False, True (latest checkpoint), step number, or path to .pt file
+  lr_scheduler: "cosine_annealing"
+  scheduler_T_max: ${training.num_steps}
+  scheduler_eta_min: 1e-6
+  grad_clip_norm: 1.0   # max global grad-norm; null disables. Pre-clip norm logged as training/grad_norm
+
+validation:
+  batch_size: 64
+  interval: 200
+  first_step: 0
+  per_graph_size: False
+  eval_mode: rollout            # rollout | teacher_forced | both
+  tf_max_graphs: 64             # cap GT trees for TF eval (full ODE per reduction level per graph)
+  tf_min_depth: 0               # restrict pooled TF metrics to leaves at tree depth >= this
+  enable_plots: True            # 3D multi-azimuth views (orbiting uhat) of gen + GT
+  enable_dist_metrics: True     # Wasserstein-1 of gen-vs-GT stat distributions
+  ged_enabled: False            # avg tree-edit distance (capped by node/pair count)
+  ged_timeout: 5.0
+  plot_angles: [[20, 30], [20, 120], [20, 210]]   # (elev, azim) around uhat
+  enable_ks: False              # KS alongside W1 (continuous features)
+  enable_morphometrics: True    # path/radial/contraction/order/strahler/asymmetry/sholl
+  enable_light_joint: True      # morpho + Euclidean-TMD MMD/Density/Coverage every val
+  enable_floor: False           # real-vs-real reference lines + headline excess
+  tmd_eval_filtration: radial_root
+  tmd_eval_bins: 16
+  tmd_pca_ncomp: 64
+  dc_nearest_k: 5               # k for Density/Coverage
+  # Per-genus stratified distribution metrics. The tree corpus is 88% Fagus, so only Fagus
+  # (298 val trees) and Quercus (18) clear a usable threshold; Acer/Carpinus/Fraxinus/Betula
+  # have <=7 val trees each and are skipped. That is a corpus limit, not a config bug --
+  # see docs/TREE_DATASET_STATS.md §6.
+  per_cell_class: True
+  per_cell_class_min_count: 15   # 15 (not the neuron default 20) so Quercus is included
+
+testing: False
+
+model:
+  name: egnn
+  num_layers: 12
+  feats_dim: 128
+  m_dim: 256
+  tmd_hidden_dim: 0            # >0 enables TMD conditioning; tmd_in_dim auto-derived
+  tmd_filtrations: [path, height, rho]   # trees are z-up (so2_axis=z): height=z, rho=perp-to-z
+  tmd_bins: 16
+  # Genus (class) conditioning: one-hot(num_classes) -> Linear(class_hidden_dim), always-on.
+  num_classes: 6              # 6 kept genera (utils.data_loading.TREE_GENUS_NAMES)
+  class_hidden_dim: 16        # >0 enables genus conditioning; reserved slice of feats_dim
+  dropout: 0.1
+  norm_feats: True
+  global_linear_attn_every: 2
+  global_linear_attn_heads: 4
+  global_linear_attn_dim_head: 16
+  num_global_tokens: 8
+  offset_head_hidden: 256
+  use_global_fallback_frames: False
+  so2_axis: [0., 0., 1.]      # z-axis for trees (y-axis for neurons)
+  # root_child_order is left at its 'first_edge' default. Root out-degree is 1 for 3,347 of
+  # the 3,368 trees (the trunk base has a single child), so ordinal 0 is usually the only
+  # ordinal and the axial_extent apical-pinning criterion has nothing to reorder. It differs
+  # only for the 21 trees that fork at the base (10 with degree 2, 11 with degree 3), and
+  # trees have no apical-dendrite analogue to pin, so the neuron default does not carry over.
+  rbf_k: 0              # >0 = rbf_k Gaussian channels per distance (recommended 16); 0 = raw scalar
+  rbf_gamma: 10.0
+  # rbf_rho_max / rbf_du_max are in pos_scale_factor-normalized units, so they must be
+  # re-derived per depth dataset if rbf_k is ever turned on.
+
+ema:
+  betas: [0.999]        # 1 = no EMA, 0.99 = fast, 0.999 = slow
+  gamma: 1.0
+  power: 1.0
+
+name: tree_genus_conditional_d10
+debugging: False
+debugging_max_batches: 50
+debugging_dir: "trees_debug"
+
+wandb:
+  logging: True

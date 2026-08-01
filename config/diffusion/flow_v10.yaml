@@ -6,11 +6,22 @@ name: "flow_v"      # V-prediction (velocity) flow-matching: VFlowMatchingModel.
 num_steps: 10        # straight paths need fewer steps than diffusion's 64
 prior_std: 1.0       # Gaussian prior scale; tune to local-frame C_0 magnitude
 prior_std_pos: [0.74, 0.61, 0.83]  # per-axis prior std [forward, sideways, axial] of C_0 in scaled space;
-                     # null -> isotropic prior_std. Dataset-specific (do NOT hardcode here).
-                     # Neuron values (÷45.1, ~800 graphs): [0.74, 0.61, 0.83] -- set via CLI
-                     # override 'diffusion.prior_std_pos=[0.74,0.61,0.83]' for neuron runs.
-                     # Tree values (÷0.5, ~1000 graphs, z-axis): [0.57, 0.51, 1.70] -- override
-                     # 'diffusion.prior_std_pos=[0.57,0.51,1.70]' for tree runs.
+                     # null -> isotropic prior_std. Dataset-specific (do NOT hardcode here) --
+                     # it must match the dataset's pos_scale_factor, so ALWAYS override it when
+                     # switching datasets. Measured with tests/analyse_c0_distribution.py.
+                     #
+                     #   dataset (axis)              pos_scale   prior_std_pos
+                     #   neurons_conditional_full (y)   45.1     [0.74, 0.61, 0.83]   <- default above
+                     #   trees / trees_genus_d10 (z)     0.45    [0.62, 0.54, 1.85]
+                     #   trees_genus_d15 (z)             0.34    [0.76, 0.66, 1.62]
+                     #   trees_genus_d20 (z)             0.29    [0.84, 0.74, 1.46]
+                     #   small_trees, LEGACY (z)         0.5     [0.57, 0.51, 1.70]
+                     #
+                     # e.g. 'diffusion.prior_std_pos=[0.76,0.66,1.62]' with dataset=trees_genus_d15.
+                     # Trees are far more axially anisotropic than neurons, and less so the deeper
+                     # the cap (ratio 3.4 -> 2.4 -> 2.0 for d10 -> d15 -> d20): a shallow cap keeps
+                     # only the long trunk/major-branch jumps, while deeper caps add short, more
+                     # isotropic twig offsets. See docs/TREE_DATASET_STATS.md §4.
 time_dist: "uniform" # "uniform" | "beta"
 beta_a: 2.0
 beta_b: 1.0

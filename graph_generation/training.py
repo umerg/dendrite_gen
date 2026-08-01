@@ -121,6 +121,13 @@ class Trainer:
         self.validation_graphs = validation_graphs
         self.test_graphs = test_graphs
         self.cfg = cfg
+        # Class-id -> display-name map for the per-class metrics and plot titles. Datasets
+        # declare their own names via `dataset.class_names` (e.g. TREE_GENUS_NAMES for the
+        # tree corpus); neuron configs omit the key and fall back to the pyramidal types.
+        # Ids outside the list still degrade to "id<N>" at the call sites.
+        self.class_names = list(
+            getattr(getattr(cfg, "dataset", None), "class_names", None) or CELL_CLASS_NAMES
+        )
 
         self.rng = np.random.default_rng(0)
         # Per-eval-set caches for the distribution metrics: the GT-fit objects
@@ -839,7 +846,7 @@ class Trainer:
                 })
                 for c in classes_present:
                     idx = [i for i, g in enumerate(eval_graphs) if g.graph.get("cell_class") == c]
-                    cname = CELL_CLASS_NAMES[c] if 0 <= c < len(CELL_CLASS_NAMES) else f"id{c}"
+                    cname = self.class_names[c] if 0 <= c < len(self.class_names) else f"id{c}"
                     if len(idx) < min_count:
                         self.logger.info(
                             "[per_cell_class] skip %s (n=%d < min_count=%d)", cname, len(idx), min_count
@@ -918,7 +925,7 @@ class Trainer:
                         continue
                     sel_idx.append(i)
                     class_labels.append(
-                        CELL_CLASS_NAMES[c] if 0 <= c < len(CELL_CLASS_NAMES) else f"id{c}"
+                        self.class_names[c] if 0 <= c < len(self.class_names) else f"id{c}"
                     )
                 gen_graphs = [results["pred_graphs"][i] for i in sel_idx]
                 gt_graphs = [eval_graphs[i] for i in sel_idx]

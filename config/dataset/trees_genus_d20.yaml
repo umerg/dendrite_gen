@@ -1,0 +1,17 @@
+name: tree_dataset
+# Genus-labelled biological trees at depth cap 20 -- same 3,368 trees and same official split
+# as config/dataset/trees.yaml (the depth-10 set), retaining the most branching structure of
+# the three: mean 445 nodes/tree vs 84 (5.3x), p95 1,203, max 3,056, realized depth <= 26.
+# Produced by preprocessing/prepare_tree_dataset.py --max-depth 20.
+# NOTE: reduce training.batch_size relative to the d10 configs -- reduction sequences scale
+# with node count and PrecomputedRedDataset materialises all of them up front.
+# See docs/TREE_DATASET_STATS.md.
+data_dir: /scratch/guptau/trees_genus_d20
+load: True
+pos_scale_factor: 0.29  # = mean of the raw per-axis C_0 offset std [0.243, 0.214, 0.424];
+                        # /0.29 -> [0.84, 0.74, 1.46], mean 1.012, offset-norm |C| mean 1.095.
+                        # Measured by tests/analyse_c0_distribution.py --axis z on the
+                        # 2,695-tree train split (N_GRAPHS=400; d20 trees are ~5x d10 cost).
+                        # Pair with diffusion.prior_std_pos=[0.84,0.74,1.46].
+num_classes: 6          # must match model.num_classes (utils.data_loading.TREE_GENUS_NAMES)
+class_names: [Fagus, Quercus, Acer, Carpinus, Fraxinus, Betula]

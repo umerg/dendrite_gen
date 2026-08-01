@@ -1,7 +1,25 @@
 name: tree_dataset
-data_dir: /scratch/guptau/small_trees # add path to tree dataset
+# Genus-labelled biological trees (BioDiv-3DTrees QSMs) at depth cap 10: base-rooted,
+# strictly binary away from the root, radii kept, genus integer embedded as a
+# '# cell_class N' header. 3,368 trees on the OFFICIAL labels.csv split (80/10/10,
+# species-stratified): 2,695 train / 337 val / 336 test. Produced by
+# preprocessing/prepare_tree_dataset.py --max-depth 10. Local staging path is
+# /Users/umer/Documents/trees_genus_d10; set data_dir to the rsync'd cluster copy.
+# See docs/TREE_DATASET_STATS.md. Deeper variants: dataset=trees_genus_d15 / trees_genus_d20.
+data_dir: /scratch/guptau/trees_genus_d10
 load: True
-pos_scale_factor: 0.5  # ÷0.5 (×2) brings mean per-axis C_0 offset std to ~0.93 (≈unit). z-axis symmetry.
-                       # Derived from data_analysis/so2_geometry_stats.py --axis z and
-                       # tests/analyse_c0_distribution.py --axis z on the 3656-tree train split
-                       # (raw per-axis std [0.285, 0.256, 0.851], mean 0.464 -> /0.5 = [0.57,0.51,1.70]).
+pos_scale_factor: 0.45  # = mean of the raw per-axis C_0 offset std [0.278, 0.244, 0.833];
+                        # /0.45 -> [0.62, 0.54, 1.85], mean 1.005, offset-norm |C| mean 1.001.
+                        # Measured by tests/analyse_c0_distribution.py --axis z on the
+                        # 2,695-tree train split (N_GRAPHS=1000).
+                        # Pair with diffusion.prior_std_pos=[0.62,0.54,1.85].
+num_classes: 6          # must match model.num_classes (utils.data_loading.TREE_GENUS_NAMES)
+class_names: [Fagus, Quercus, Acer, Carpinus, Fraxinus, Betula]
+
+# LEGACY (kept for A/B only, do NOT use for new results): /scratch/guptau/small_trees with
+#   pos_scale_factor: 0.5   # raw per-axis std [0.285, 0.256, 0.851] -> [0.57, 0.51, 1.70]
+# That set was built by clean_trees.py --max-depth 10 --root-mode parent --drop-attrs. It has
+# no class labels, an unusable split (train 3,656 / val 406 / test 1), 22% of its treeIDs are
+# absent from labels.csv (it came from an earlier dataset release), and --drop-attrs zeroed all
+# radii BEFORE binarization, so its >=4-way junction prune kept an arbitrary pair rather than
+# the two thickest children. It is not a like-for-like baseline for this dataset.

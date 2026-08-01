@@ -11,6 +11,16 @@ from pathlib import Path
 # test-only rare classes (WM-P, MC, BPC) are intentionally absent.
 CELL_CLASS_NAMES = ["23P", "4P", "5P-IT", "5P-ET", "5P-NP", "6P-IT", "6P-CT"]
 
+# Canonical genus classes for the biological-tree corpus (BioDiv-3DTrees QSMs), ordered
+# by corpus frequency. Same role as CELL_CLASS_NAMES: the integer id is the list index,
+# and it is the single source of truth shared by the dataset writer
+# (preprocessing/prepare_tree_dataset.py) and the per-class validation metrics
+# (graph_generation/training.py, which reads it via `dataset.class_names` in the config).
+# The rare tail genera (Tilia 13, Prunus 2, Ulmus 1) are intentionally absent -- see
+# docs/TREE_DATASET_STATS.md. Only broadleaf trees have QSM reconstructions, so the
+# broadleaf/conifer 'type' column carries no signal and is not used as a class axis.
+TREE_GENUS_NAMES = ["Fagus", "Quercus", "Acer", "Carpinus", "Fraxinus", "Betula"]
+
 
 def load_swc_graph(path):
     """
