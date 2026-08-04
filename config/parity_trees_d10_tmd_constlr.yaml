@@ -1,0 +1,146 @@
+# EXPERIMENT -- trees d10, TMD CONDITIONAL, CONSTANT LR
+#
+# Single-variable fork of parity_trees_d10_tmd.yaml: the ONLY change is
+# lr_scheduler cosine_annealing -> null (no scheduler => constant lr 1e-4 for all 34,100
+# steps). Everything else -- budget, batch, conditioning, model, EMA, validation -- is
+# byte-identical, so any difference vs the parity run is attributable to the schedule alone.
+#
+# Why: SemlaFlow's baseline uses a CONSTANT LR (with a 10k-step warm-up), while our runs
+# anneal cosine to eta_min 1e-6. Under cosine the weights barely move at the end, so the EMA
+# and the raw model nearly coincide there; under constant LR the EMA is doing real work at
+# the end of training. This arm isolates that. NOTE: the trainer has no warm-up path
+# (training.py:158-168 only builds CosineAnnealingLR), so this is constant LR from step 1 --
+# not identical to SemlaFlow's warm-up + constant.
+#
+# Budget-parity protocol "Option C" (docs/BUDGET_PARITY_SEMLAFLOW.md §5.2): keep the batch
+# size, set num_steps so both methods see E = 300 epochs, where one epoch = every node
+# position denoised exactly once (the N-1 identity, §2). Report the step ratio.
+#
+#   items/epoch = 29,080 (2,695 trees x 10.79 reduction levels, measured §3)
+#   num_steps   = 300 * 29080 / 256 -> 34100  (E = 300.2)
+#   SemlaFlow at 300 epochs = 60,600 steps  ->  we take 0.56x its updates (disclose this)
+#   ~8,900 nodes/step
+#
+# The model block is identical across all 12 parity/depth configs except the two conditioning
+# switches and the per-dataset geometry fields (so2_axis, num_classes, prior_std_pos), so any
+# difference BETWEEN arms is attributable to the thing being varied.
+# Conditioning here: TMD persistence-image vector only (tmd_hidden_dim = 128).
+
+defaults:
+  - dataset: trees                    # genus-labelled trees, depth cap 10
+  - diffusion: flow_v10
+  - method: expansion
+  - _self_                              # LAST on purpose: pins diffusion.prior_std_pos below
+
+diffusion:
+  # Pinned explicitly so a dataset swap can never silently inherit the wrong prior (the
+  # footgun documented in config/diffusion/flow_v10.yaml and docs/TREE_DATASET_STATS.md §4).
+  prior_std_pos: [0.62, 0.54, 1.85]   # trees_genus_d10, pos_scale_factor 0.45 (axis z)
+
+reduction:
+  type: "depth"
+  mode: "deterministic"
+  cherry_p: 1.0
+  ensure_progress: True
+  root: 0
+  contract_root: False
+
+training:
+  batch_size: 256
+  lr: 1e-4
+  optimizer: adam      # adam | adamw (adamw = decoupled weight decay)
+  weight_decay: 0.0
+  num_steps: 34100
+  max_num_workers: 0
+  log_interval: 100    # 341 log rows over the run
+  save_checkpoint: True
+  resume: False        # False, True (latest checkpoint), step number, or path to .pt file
+  lr_scheduler: null   # <-- THE ONLY CHANGE vs parity_trees_d10_tmd.yaml.
+                       # Anything not in ("cosine", "cosine_annealing") leaves
+                       # self.scheduler = None (training.py:160-168) => constant LR.
+  scheduler_T_max: ${training.num_steps}   # inert while lr_scheduler is null
+  scheduler_eta_min: 1e-6                  # inert while lr_scheduler is null
+  grad_clip_norm: 1.0
+
+validation:
+  batch_size: 64
+  # ~97 validations over the run. NOTE: a full step_N.pt (model + EMA + Adam state,
+  # ~310 MB at this model size) is written at EVERY validation with no pruning -> ~30 GB.
+  interval: 350
+  first_step: 0
+  per_graph_size: False
+  eval_mode: rollout               # rollout | teacher_forced | both
+  tf_max_graphs: 64
+  tf_min_depth: 0
+  enable_plots: True
+  enable_dist_metrics: True
+  ged_enabled: False
+  ged_timeout: 5.0
+  plot_angles: [[20, 30], [20, 120], [20, 210]]
+  enable_ks: False
+  enable_morphometrics: True
+  enable_light_joint: True
+  enable_floor: False
+  tmd_eval_filtration: radial_root
+  tmd_eval_bins: 16
+  tmd_pca_ncomp: 64
+  dc_nearest_k: 5
+  # No class conditioning here; per_cell_class is gated on class_hidden_dim>0 in the trainer
+  # anyway, but set False so the intent is explicit.
+  per_cell_class: False
+  per_cell_class_min_count: 15
+  # Matched TMD-conditioned pairwise fidelity: gen[i] vs its conditioning GT[i]. This is the
+  # metric that shows the conditioning is actually used; only meaningful when tmd_hidden_dim>0.
+  enable_pairwise_metrics: True
+  tmd_cond_every: 5             # run every N-th validation (cost control); 1 = every validation
+  tmd_cond_max_pairs: 64        # cap matched pairs (PD Wasserstein dominates cost)
+  tmd_cond_pd_filtrations: [path, radial_root]
+  tmd_cond_wasserstein: True
+  tmd_cond_bottleneck: False
+  tmd_cond_normalize: minmax
+
+testing: False
+
+model:
+  name: egnn
+  num_layers: 12
+  feats_dim: 256
+  m_dim: 256
+  # --- conditioning switches (the ONLY model difference between the arms) ---
+  tmd_hidden_dim: 128          # >0 = TMD conditioning ON (MLP over the persistence image)
+  class_hidden_dim: 0          # 0 = cell-type conditioning OFF
+  # --------------------------------------------------------------------------
+  tmd_filtrations: [path, height, radial_root]   # 3 x 16^2 -> tmd_in_dim 768 (derived, never hand-set)
+  tmd_bins: 16
+  num_classes: 6               # 6 kept genera (utils.data_loading.TREE_GENUS_NAMES)
+  dropout: 0.1
+  norm_feats: True
+  global_linear_attn_every: 2
+  global_linear_attn_heads: 4
+  global_linear_attn_dim_head: 16
+  num_global_tokens: 8
+  offset_head_hidden: 256
+  # Legacy widths for feats_dim=256, rbf_k=0 (see neuron_type_conditional_run.yaml).
+  # WARNING: changing these changes state_dict shapes -> checkpoints stop loading.
+  edge_mlp_hidden: 1042   # = 2*edge_input_dim = 2*(2*256 + 4 + 5)
+  node_mlp_hidden: 512    # = 2*feats_dim
+  use_global_fallback_frames: False
+  so2_axis: [0., 0., 1.]        # z-axis for trees
+  root_child_order: axial_extent  # sampling must use the same mode the checkpoint trained in
+  rbf_k: 0
+  rbf_gamma: 10.0
+  rbf_rho_max: 4.0
+  rbf_du_max: 4.0
+
+ema:
+  betas: [0.999]
+  gamma: 1.0
+  power: 1.0
+
+name: parity_trees_d10_tmd_constlr
+debugging: False
+debugging_max_batches: 50
+debugging_dir: "trees_debug"
+
+wandb:
+  logging: True
