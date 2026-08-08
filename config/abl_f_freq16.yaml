@@ -79,6 +79,13 @@ validation:
   tmd_eval_bins: 16
   tmd_pca_ncomp: 64             # N~2000: 256-d is fine; PCA mostly de-noises
   dc_nearest_k: 5               # k for Density/Coverage
+  # Reporting tier for the distribution metrics: headline | standard | full.
+  # PURELY a wandb filter -- every metric is still computed and still written to
+  # validation/step_*.pkl, so switching tiers is free and changes no number.
+  metric_report_level: standard
+  # ZCA-whiten the standardized morpho vector before the MMD/Density/Coverage kernel.
+  # Off by default; the pruned MORPHO_KEYS already removes most correlation distortion.
+  morpho_whiten: False
   # Per-cell-class stratified distribution metrics (curated subset; tree-edit/KS skipped).
   per_cell_class: True
   per_cell_class_min_count: 20   # skip classes with fewer val graphs (degenerate PCA/kNN)

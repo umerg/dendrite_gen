@@ -12,6 +12,15 @@ We answer it for the two embeddings used by the in-loop validation metrics
 - **`morpho`** — the 16-d hand-engineered morphometric vector (`assemble_morpho_vector`):
   counts, extents, Strahler, partition asymmetry, mean branch length / angle /
   path-to-root / radial-to-root / contraction, and three Sholl summaries.
+
+  > **⚠️ Measured on `MORPHO_VERSION 1`.** `MORPHO_KEYS` was pruned to **9-D** on 2026-08-08,
+  > largely *because* of the redundancy this analysis quantified (see "What the morpho
+  > manifold's axes mean" below and `docs/VALIDATION_METRICS_AUDIT.md`). The manifold
+  > conclusions are unaffected — the intrinsic dimension is a property of the morphology, not
+  > of the encoding, and the v1 effective rank of 8.3/16 is exactly what motivated dropping
+  > the seven redundant coordinates. Re-running `data_analysis/morpho_manifold.py` today
+  > reports a 9-d ambient space; expect the *ambient* numbers to change and the *intrinsic*
+  > ones not to.
 - **`tmd`** — the 256-d Euclidean-from-root (`radial_root`) TMD persistence image
   (`compute_tmd_embedding`); 201 of 256 bins are non-empty across the dataset.
 

@@ -74,24 +74,35 @@ SHOLL_N_SHELLS = 32
 TMD_N_BINS = 16
 
 # Fixed-order morphometric feature vector used for the joint MMD/Density-Coverage.
+#
+# v2 (9-D). The v1 16-D vector was rank-deficient: `node_count`/`leaf_count`/
+# `bifurcation_count` correlated at r = 1.000 (they are the same number on strictly binary
+# trees), `axial_extent`/`total_extent` at 0.999, `mean_path_to_root`/`mean_radial_to_root`
+# at 0.996. Because the RBF kernel runs on raw z-scores -- which equalise per-feature
+# variance but NOT correlation -- each such block contributed ~m x to the squared distance,
+# so size and reach dominated while the shape features got 1 x each. Pruning to the
+# independent core measurably improves defect detection; see docs/VALIDATION_METRICS_AUDIT.md.
+#
+# Two deliberate, non-redundancy choices:
+#   - `node_count` is EXCLUDED so mmd/density/coverage_morpho are a shape-only comparison
+#     against baselines that are handed the node count. Size is still reported separately as
+#     the `node_count_w1` marginal.
+#   - `max_branch_order` replaces `strahler`. See _max_branch_order for what it measures.
 MORPHO_KEYS = (
-    "node_count",
-    "leaf_count",
-    "bifurcation_count",
     "axial_extent",
     "radial_span",
-    "total_extent",
-    "strahler",
+    "max_branch_order",
     "partition_asymmetry",
     "mean_branch_length",
     "mean_bifurcation_angle",
-    "mean_path_to_root",
     "mean_radial_to_root",
     "mean_contraction",
-    "sholl_peak",
     "sholl_critical_radius",
-    "sholl_auc",
 )
+
+# Bump whenever MORPHO_KEYS changes. mmd_morpho / density_morpho / coverage_morpho are NOT
+# comparable across versions -- runs either side of a bump must not share a plot axis.
+MORPHO_VERSION = 2
 
 # Discrete (integer-valued, heavily-tied) features: report W1 only, never KS in-loop.
 _DISCRETE_POOLED = {"branch_order"}
@@ -133,6 +144,68 @@ def _safe_mean(arr: np.ndarray) -> float:
     return float(arr.mean()) if arr.size else float("nan")
 
 
+def _nan_frac(mat: np.ndarray) -> float:
+    """Fraction of non-finite entries in a (N, d) morpho matrix; nan if empty."""
+    mat = np.asarray(mat, dtype=np.float64)
+    if mat.size == 0:
+        return float("nan")
+    return float(np.mean(~np.isfinite(mat)))
+
+
+def _degenerate_frac(graphs: list[nx.Graph], uhat) -> float:
+    """Fraction of trees that are structurally or spatially degenerate.
+
+    Degenerate = no bifurcation at all (a path or a single node, so partition asymmetry and
+    bifurcation angle are undefined) OR zero spatial extent (all nodes coincident, so every
+    geometric feature collapses). These are exactly the cases whose nan features get imputed
+    to the GT mean by ``standardize_vectors`` and would otherwise be invisible.
+    """
+    if not graphs:
+        return float("nan")
+    bad = 0
+    for G in graphs:
+        root = _root_of(G)
+        if root is None or G.number_of_nodes() < 2:
+            bad += 1
+            continue
+        _parent, children = _root_tree(G, root)
+        if not any(len(ch) >= 2 for ch in children.values()):
+            bad += 1
+            continue
+        ext = _size_extent(G, uhat)
+        if not (float(ext.get("total_extent", 0.0) or 0.0) > 0.0):
+            bad += 1
+    return float(bad / len(graphs))
+
+
+def _fit_whiten(Z: np.ndarray, *, eps: float = 1e-3):
+    """Fit a ZCA whitening matrix on the standardized GT morpho matrix.
+
+    Equalises the *directions* of the feature space, not just the per-axis variances that
+    z-scoring already handles -- correlated feature groups otherwise contribute ~m x to the
+    squared distance in the RBF kernel.
+
+    ``eps`` is a hard requirement, not a tunable: on a rank-deficient vector, whitening
+    amplifies null directions by 1/sqrt(eps). Measured on the old 16-D vector (which had four
+    exactly-zero eigenvalues), eps=1e-6 produced MMD = 0.35 against a floor of 0.001 -- a ~300x
+    artifact. Pruning MORPHO_KEYS to its independent core is what makes this safe.
+    """
+    Z = np.asarray(Z, dtype=np.float64)
+    if Z.ndim != 2 or Z.shape[0] < 2 or Z.shape[1] == 0:
+        return None
+    cov = np.cov(Z.T)
+    cov = np.atleast_2d(cov)
+    lam, V = np.linalg.eigh(cov)
+    return V @ np.diag(1.0 / np.sqrt(np.maximum(lam, eps))) @ V.T
+
+
+def _apply_whiten(Z: np.ndarray, W) -> np.ndarray:
+    if W is None:
+        return Z
+    Z = np.asarray(Z, dtype=np.float64)
+    return Z @ W if Z.size else Z
+
+
 # --- per-graph statistic extractors --------------------------------------------------
 
 
@@ -150,13 +223,44 @@ def _bifurcation_angles(G: nx.Graph) -> np.ndarray:
         return np.zeros((0,), dtype=np.float64)
 
 
-def _tmd_bar_lengths(G: nx.Graph) -> np.ndarray:
-    """|death - birth| for each persistence interval (raw scale, no per-graph norm)."""
+def _max_branch_order(G: nx.Graph) -> float:
+    """Deepest branch order in the tree (per-tree scalar); nan on a degenerate graph.
+
+    NOTE ON WHAT THIS ACTUALLY MEASURES. ``branch_order_values`` increments only at non-root
+    nodes of undirected degree >= 3. Our datasets are strictly binary away from the root with
+    ZERO degree-2 non-root nodes, so every non-root internal node has degree 3 and increments
+    -- i.e. on this data ``branch_order == hop_depth - 1`` exactly (verified 300/300 graphs on
+    trees d10, trees d20 and neurons), and this scalar is simply TREE DEPTH - 1. It is kept
+    under the "branch order" name because that is what the function computes in general; on a
+    graph with degree-2 chain nodes the two would diverge.
+
+    Caveat for the depth-capped tree sets: `trees_genus_d{10,15,20}` are trimmed to a depth
+    cap in preprocessing, so this feature is heavily concentrated there (97% of d10 trees fall
+    in {9,10,11}) and partly measures "did the generator reach the dataset's depth ceiling"
+    rather than free morphological depth. It is well spread on neurons (19 distinct values).
+    """
+    vals = branch_order_values(G)
+    return float(vals.max()) if vals.size else float("nan")
+
+
+def _tmd_bar_lengths(
+    G: nx.Graph, *, filtration: str = "radial_root", uhat=(0.0, 0.0, 1.0)
+) -> np.ndarray:
+    """|death - birth| for each persistence interval (raw scale, no per-graph norm).
+
+    ``filtration`` must be threaded from ``cfg.validation.tmd_eval_filtration`` so this shares
+    one source of truth with the joint TMD embedding. It previously took
+    ``compute_tmd_barcode_diagram``'s default (``"path"``) while the joint block used
+    ``radial_root``, so ``tmd_barlen_w1`` was silently in different units from every other TMD
+    metric. ``uhat`` matters only for the axis-dependent filtrations (``height``, ``rho``).
+    """
     root = _root_of(G)
     if root is None:
         return np.zeros((0,), dtype=np.float64)
     try:
-        _barcode, diagram = compute_tmd_barcode_diagram(G, normalize_mode="none")
+        _barcode, diagram = compute_tmd_barcode_diagram(
+            G, filtration=filtration, normalize_mode="none", uhat=uhat
+        )
     except Exception:
         return np.zeros((0,), dtype=np.float64)
     pairs = np.asarray(diagram.as_pairs(), dtype=np.float64).reshape(-1, 2)
@@ -232,6 +336,7 @@ def assemble_morpho_vector(G: nx.Graph, *, uhat, radii=None) -> np.ndarray:
         "radial_span": ext["radial_span"],
         "total_extent": ext["total_extent"],
         "strahler": strahler_number(G),
+        "max_branch_order": _max_branch_order(G),
         "partition_asymmetry": partition_asymmetry(G),
         "mean_branch_length": _safe_mean(branch_length_values(G)),
         "mean_bifurcation_angle": _safe_mean(_bifurcation_angles(G)),
@@ -284,7 +389,12 @@ def _effective_rank(X: np.ndarray) -> float:
 
 
 def _sholl_radii_from_graphs(graphs: Iterable[nx.Graph], n_shells: int) -> np.ndarray | None:
-    """Shared Sholl shell radii: evenly spaced over (0, max radial extent across GT]."""
+    """Shared Sholl shell radii: evenly spaced over (0, max radial extent across GT].
+
+    NOT used by the three per-tree Sholl summaries any more -- they use per-tree shells (see
+    the note in ``compute_distribution_metrics``). Kept, and still cached by ``build_gt_cache``,
+    because a mean-Sholl-profile PLOT (gen vs GT on one x-axis) does need a common grid.
+    """
     max_r = 0.0
     for G in graphs:
         vals = radial_distance_to_root_values(G)
@@ -317,6 +427,7 @@ def build_gt_cache(
     embed_fn: Callable[[nx.Graph], np.ndarray] | None = None,
     tmd_pca_ncomp: int | None = 32,
     sholl_n_shells: int = SHOLL_N_SHELLS,
+    morpho_whiten: bool = False,
 ) -> dict:
     """
     Precompute the GT-derived objects the joint metrics need, ONCE on the fixed GT
@@ -324,6 +435,10 @@ def build_gt_cache(
     and the TMD persistence-image PCA + reduced GT embeddings + bandwidth.
 
     Reusing these across training steps keeps the MMD trajectory comparable.
+
+    ``morpho_whiten`` additionally fits a ZCA transform on the standardized GT morpho matrix
+    (see ``_fit_whiten``). Off by default; the pruned MORPHO_KEYS already removes most of the
+    correlation distortion whitening would fix.
     """
     if embed_fn is None:
         embed_fn = compute_tmd_embedding
@@ -331,7 +446,7 @@ def build_gt_cache(
     sholl_radii = _sholl_radii_from_graphs(gt_graphs, sholl_n_shells)
 
     morpho = np.stack(
-        [assemble_morpho_vector(G, uhat=uhat, radii=sholl_radii) for G in gt_graphs], axis=0
+        [assemble_morpho_vector(G, uhat=uhat, radii=None) for G in gt_graphs], axis=0
     ) if gt_graphs else np.zeros((0, len(MORPHO_KEYS)), dtype=np.float64)
     morpho_mean = np.nanmean(morpho, axis=0) if morpho.shape[0] else np.zeros(len(MORPHO_KEYS))
     morpho_std = np.nanstd(morpho, axis=0) if morpho.shape[0] else np.ones(len(MORPHO_KEYS))
@@ -341,6 +456,12 @@ def build_gt_cache(
     # turn any deviation into a huge z-score and dominate the MMD kernel.
     morpho_std = np.where(morpho_std < 1e-8, 1.0, morpho_std)
     morpho_z = standardize_vectors(morpho, mean=morpho_mean, std=morpho_std)
+    # Sanity record: this should be 0.0 on any healthy dataset. A non-zero value means some
+    # GT trees are themselves degenerate, which would invalidate reading gen-side
+    # `morpho_nan_frac` as a pure generator-failure signal.
+    morpho_gt_nan_frac = _nan_frac(morpho)
+    whiten = _fit_whiten(morpho_z) if morpho_whiten else None
+    morpho_z = _apply_whiten(morpho_z, whiten)
     morpho_sigma = median_heuristic_bandwidth(morpho_z) if morpho_z.shape[0] > 1 else 1.0
 
     tmd_raw = _embed_matrix(gt_graphs, embed_fn)
@@ -356,6 +477,9 @@ def build_gt_cache(
         "morpho_std": morpho_std,
         "morpho_z": morpho_z,
         "morpho_sigma": morpho_sigma,
+        "morpho_whiten": whiten,
+        "morpho_gt_nan_frac": morpho_gt_nan_frac,
+        "morpho_version": MORPHO_VERSION,
         "embed_fn": embed_fn,
         "pca": pca,
         "tmd_reduced": tmd_reduced,
@@ -407,6 +531,8 @@ def compute_distribution_metrics(
     tmd_pca_ncomp: int | None = 32,
     dc_k: int = 5,
     sholl_n_shells: int = SHOLL_N_SHELLS,
+    tmd_filtration: str = "radial_root",  # must match cfg.validation.tmd_eval_filtration
+    morpho_whiten: bool = False,
 ) -> dict[str, float]:
     """
     Compare distributions of summary statistics between generated and GT trees.
@@ -417,12 +543,13 @@ def compute_distribution_metrics(
     """
     metrics: dict[str, float] = {}
 
-    if gt_cache is not None:
-        sholl_radii = gt_cache.get("sholl_radii")
-    elif enable_morphometrics or enable_light_joint:
-        sholl_radii = _sholl_radii_from_graphs(gt_graphs, sholl_n_shells)
-    else:
-        sholl_radii = None
+    # Sholl summaries use PER-TREE shells (radii=None -> 32 shells over each tree's own
+    # support), never the shared GT grid. Crossing counts are inherently scale-invariant, but
+    # a fixed grid breaks that by undersampling small trees: on one tree scaled x1/x1.5/x3 the
+    # shared grid gave sholl_peak 7/13/13 where per-tree shells give 14/14/14. That made a
+    # small generated tree and a large GT tree OF IDENTICAL SHAPE score differently -- a W1
+    # signal that was pure grid artifact. Nothing here compares profiles pointwise, so the
+    # shared grid bought nothing. See docs/VALIDATION_METRICS_AUDIT.md.
 
     def _pool(graphs: Iterable[nx.Graph], fn) -> np.ndarray:
         arrs = [np.asarray(fn(G), dtype=np.float64).reshape(-1) for G in graphs]
@@ -437,7 +564,8 @@ def compute_distribution_metrics(
     pooled_features = [
         ("branch_length", _branch_lengths),
         ("bifurcation_angle", _bifurcation_angles),
-        ("tmd_barlen", _tmd_bar_lengths),
+        # Closure, not a bare reference: the filtration and axis have to reach it.
+        ("tmd_barlen", lambda G: _tmd_bar_lengths(G, filtration=tmd_filtration, uhat=uhat)),
     ]
     if enable_morphometrics:
         pooled_features += [
@@ -458,8 +586,8 @@ def compute_distribution_metrics(
             pooled_norms.append(w1 / scale)
 
     # Per-tree scalar statistics (one value per tree -> distribution over trees).
-    gen_ext = [_per_tree_scalars(G, uhat, radii=sholl_radii) for G in gen_graphs]
-    gt_ext = [_per_tree_scalars(G, uhat, radii=sholl_radii) for G in gt_graphs]
+    gen_ext = [_per_tree_scalars(G, uhat, radii=None) for G in gen_graphs]
+    gt_ext = [_per_tree_scalars(G, uhat, radii=None) for G in gt_graphs]
     pertree_keys = ["node_count", "leaf_count", "bifurcation_count", "axial_extent", "radial_span", "total_extent"]
     if enable_morphometrics:
         pertree_keys += ["strahler", "partition_asymmetry", "sholl_peak", "sholl_critical_radius", "sholl_auc"]
@@ -479,6 +607,16 @@ def compute_distribution_metrics(
     if pertree_norms:
         metrics["w1_pertree_mean_normalized"] = float(np.mean(pertree_norms))
 
+    # Degeneracy disclosure. `standardize_vectors` imputes non-finite morpho entries to 0 =
+    # the GT mean, so a generated tree with zero forks is scored as having PERFECTLY AVERAGE
+    # branching asymmetry and fork angle -- the imputation neutralises exactly the dimensions
+    # that would have flagged it. We keep that imputation (it keeps mmd_morpho interpretable)
+    # and surface the degeneracy on its own line instead. On real GT the nan-fraction is 0.000
+    # for every feature on both datasets, so a non-zero value here is always a generator
+    # failure, never a data property.
+    if gen_graphs:
+        metrics["gen_degenerate_frac"] = _degenerate_frac(gen_graphs, uhat)
+
     # Joint-distribution metrics on two cheap per-tree embeddings (morpho vector +
     # Euclidean-from-root TMD persistence image). Standardization/PCA/bandwidth come
     # from the GT-fit cache so the MMD is comparable across steps.
@@ -490,16 +628,19 @@ def compute_distribution_metrics(
                 embed_fn=embed_fn,
                 tmd_pca_ncomp=tmd_pca_ncomp,
                 sholl_n_shells=sholl_n_shells,
+                morpho_whiten=morpho_whiten,
             )
         ef = embed_fn or gt_cache.get("embed_fn") or compute_tmd_embedding
         k = int(dc_k)
 
         # Morphometric-vector joint
         gen_morpho = (
-            np.stack([assemble_morpho_vector(G, uhat=uhat, radii=gt_cache["sholl_radii"]) for G in gen_graphs], axis=0)
+            np.stack([assemble_morpho_vector(G, uhat=uhat, radii=None) for G in gen_graphs], axis=0)
             if gen_graphs else np.zeros((0, len(MORPHO_KEYS)))
         )
+        metrics["morpho_nan_frac"] = _nan_frac(gen_morpho)
         gen_morpho_z = standardize_vectors(gen_morpho, mean=gt_cache["morpho_mean"], std=gt_cache["morpho_std"])
+        gen_morpho_z = _apply_whiten(gen_morpho_z, gt_cache.get("morpho_whiten"))
         metrics.update(
             joint_metrics_from_vectors(
                 gen_morpho_z, gt_cache["morpho_z"], prefix="morpho", sigma=gt_cache["morpho_sigma"], k=k

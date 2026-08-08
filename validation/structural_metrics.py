@@ -419,9 +419,16 @@ def sholl_summary(
     """
     Reduce a Sholl profile to three per-tree scalars:
       - sholl_peak            : maximum intersection count
-      - sholl_critical_radius : radius of the peak, normalised by max radial extent
+      - sholl_critical_radius : radius of the peak, normalised by THIS TREE's max radial extent
       - sholl_auc             : area under the profile (trapezoid)
     nan-filled on degenerate trees.
+
+    The critical radius divides by the tree's own radial extent, NOT by ``r.max()`` (the
+    outer edge of the shell grid). The two coincide when ``radii is None`` (per-tree shells
+    span exactly (0, own_rmax]), but diverge when a SHARED grid is passed: there the grid's
+    outer edge is the whole GT set's max, which turned the ratio into an absolute-size
+    feature rather than the documented shape fraction. Dividing by the tree's own extent
+    keeps ``sholl_critical_radius`` scale-invariant under either grid choice.
     """
     out = {
         "sholl_peak": float("nan"),
@@ -432,9 +439,13 @@ def sholl_summary(
     if r.size == 0 or counts.size == 0 or float(counts.max()) <= 0.0:
         return out
     peak_idx = int(np.argmax(counts))
-    rmax = float(r.max())
+    # This tree's own radial extent. Empty for a single-node graph -> nan (not a raise).
+    own = radial_distance_to_root_values(G, root=root)
+    own_rmax = float(own.max()) if own.size else 0.0
     out["sholl_peak"] = float(counts.max())
-    out["sholl_critical_radius"] = float(r[peak_idx] / rmax) if rmax > 0 else float("nan")
+    out["sholl_critical_radius"] = (
+        float(r[peak_idx] / own_rmax) if own_rmax > 0 else float("nan")
+    )
     _trapezoid = getattr(np, "trapezoid", np.trapz)
     out["sholl_auc"] = float(_trapezoid(counts, r))
     return out

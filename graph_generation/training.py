@@ -41,6 +41,39 @@ except Exception:  # pragma: no cover
 from .model import EMA, EMA1
 
 
+# --- wandb reporting tiers (see Trainer._metric_allowlist) --------------------------------
+#
+# `cfg.validation.metric_report_level` selects how much of the distribution-metric suite
+# reaches the dashboard. This is a REPORTING filter only -- every metric is still computed,
+# still returned, and still written to validation/step_*.pkl, so switching tiers is free and
+# reversible. Membership is chosen by measured detection power against a real-vs-real noise
+# floor, not by taste; the numbers are in docs/VALIDATION_METRICS_AUDIT.md.
+#
+# Only the `dist`, `floor` and per-class blocks are tiered. `tmd_cond` and `teacher_forced`
+# have their own key vocabularies (none of which appear below) and are already opt-in and
+# cost-gated, so filtering them here would silently delete them rather than thin them.
+_HEADLINE_METRICS = (
+    "mmd_morpho", "density_morpho", "coverage_morpho",
+    "w1_pooled_mean_normalized", "w1_pertree_mean_normalized",
+    "radial_span_w1",            # best single marginal on both datasets
+    "branch_length_w1",
+    "branch_order_w1",           # the only marginal that sees leaf pruning on trees
+    "partition_asymmetry_w1",    # the topology detector on neurons
+    "gen_degenerate_frac",
+    "headline_excess_mmd_morpho",
+)
+
+_STANDARD_EXTRA_METRICS = (
+    "tmd_barlen_w1", "mmd_tmd", "node_count_w1", "axial_extent_w1",
+    "radial_to_root_w1", "contraction_w1", "bifurcation_angle_w1",
+    "sholl_critical_radius_w1", "morpho_nan_frac",
+)
+
+# Prefix fragments identifying a tiered block. "/dist/" also matches the teacher-forced
+# sub-block, which is why _metric_allowed short-circuits on "/teacher_forced/" first.
+_TIERED_BLOCKS = ("/dist/", "/floor/", "/class_")
+
+
 def _maybe_add_alias(alias_cfg: dict, source_obj, source_key: str, alias_key: str):
     if source_obj is None or not hasattr(source_obj, source_key):
         return
@@ -485,11 +518,36 @@ class Trainer:
         # cause a linear RSS leak over long runs.
         plt.close('all')
 
-    def _eval_embed_fn(self):
-        """Euclidean-from-root TMD persistence-image embedding used for joint metrics."""
+    def _eval_embed_fn(self, uhat=None):
+        """Euclidean-from-root TMD persistence-image embedding used for joint metrics.
+
+        `uhat` MUST be threaded: `compute_tmd_embedding` defaults it to z, so an axis-dependent
+        filtration (`height`, `rho`) would silently use the wrong axis on neurons, where
+        so2_axis is y. Harmless for the default `radial_root` (and for `path`), both of which
+        are axis-agnostic -- but that made the bug invisible rather than absent.
+        """
         tmd_bins = getattr(self.cfg.validation, "tmd_eval_bins", 16)
         filtration = getattr(self.cfg.validation, "tmd_eval_filtration", "radial_root")
-        return lambda G: compute_tmd_embedding(G, filtration=filtration, n_bins=tmd_bins)
+        u = self._uhat_tuple(uhat)
+        return lambda G: compute_tmd_embedding(G, filtration=filtration, n_bins=tmd_bins, uhat=u)
+
+    def _uhat_tuple(self, uhat=None) -> tuple:
+        """Model SO(2) axis as a plain 3-tuple, falling back to cfg.model.so2_axis then z."""
+        if uhat is None:
+            uhat = getattr(self.cfg.model, "so2_axis", (0.0, 0.0, 1.0))
+        return tuple(np.asarray(uhat, dtype=float).reshape(3).tolist())
+
+    def _dist_metric_kwargs(self) -> dict:
+        """Config-derived kwargs shared by every compute_distribution_metrics call.
+
+        Keeping these in one place is what stops the pooled `tmd_barlen` filtration drifting
+        away from the joint TMD embedding's again.
+        """
+        v = self.cfg.validation
+        return dict(
+            tmd_filtration=getattr(v, "tmd_eval_filtration", "radial_root"),
+            morpho_whiten=bool(getattr(v, "morpho_whiten", False)),
+        )
 
     def _gt_cache_for(self, eval_graphs: list[nx.Graph], uhat_np: np.ndarray) -> dict:
         """Build (once, then cache) the GT-fit objects for the distribution metrics."""
@@ -498,12 +556,40 @@ class Trainer:
         if cache is None:
             cache = build_gt_cache(
                 eval_graphs,
-                uhat=tuple(np.asarray(uhat_np, dtype=float).reshape(3).tolist()),
-                embed_fn=self._eval_embed_fn(),
+                uhat=self._uhat_tuple(uhat_np),
+                embed_fn=self._eval_embed_fn(uhat_np),
                 tmd_pca_ncomp=getattr(self.cfg.validation, "tmd_pca_ncomp", 32),
+                morpho_whiten=bool(getattr(self.cfg.validation, "morpho_whiten", False)),
             )
             self._eval_cache[key] = cache
+            self._log_gt_cache_constants(cache)
         return cache
+
+    def _log_gt_cache_constants(self, cache: dict) -> None:
+        """Push the GT-cache constants to wandb config, ONCE, instead of every validation.
+
+        The MMD bandwidths, the TMD effective rank and the GT nan-fraction are all fitted on
+        the fixed GT set and never change during a run -- as time series they were three flat
+        lines on the dashboard. They are still worth recording: `morpho_gt_nan_frac` in
+        particular should be 0.0, and a non-zero value invalidates reading the gen-side
+        `morpho_nan_frac` as a pure generator-failure signal.
+        """
+        if not (getattr(self.cfg.wandb, "logging", False) and self.wandb_run is not None
+                and wandb is not None):
+            return
+        try:
+            self.wandb_run.config.update(
+                {
+                    "mmd_bandwidth_morpho": float(cache.get("morpho_sigma", float("nan"))),
+                    "mmd_bandwidth_tmd": float(cache.get("tmd_sigma", float("nan"))),
+                    "tmd_eff_rank": float(cache.get("tmd_eff_rank", float("nan"))),
+                    "morpho_gt_nan_frac": float(cache.get("morpho_gt_nan_frac", float("nan"))),
+                    "morpho_version": int(cache.get("morpho_version", 0)),
+                },
+                allow_val_change=True,
+            )
+        except Exception as e:  # pragma: no cover - metadata is best-effort
+            print(f"[wandb gt-cache constants skipped] {e}")
 
     def _floor_for(self, eval_graphs: list[nx.Graph], cache: dict, uhat_np: np.ndarray) -> dict:
         """Real-vs-real floor: a train subset (matched to N) vs the eval/GT set, cached once."""
@@ -526,13 +612,14 @@ class Trainer:
                     eval_graphs,
                     uhat=uhat_np,
                     gt_cache=cache,
-                    embed_fn=self._eval_embed_fn(),
+                    embed_fn=self._eval_embed_fn(uhat_np),
                     ged_enabled=False,
                     enable_ks=getattr(self.cfg.validation, "enable_ks", True),
                     enable_morphometrics=getattr(self.cfg.validation, "enable_morphometrics", True),
                     enable_light_joint=getattr(self.cfg.validation, "enable_light_joint", True),
                     dc_k=getattr(self.cfg.validation, "dc_nearest_k", 5),
                     tmd_pca_ncomp=getattr(self.cfg.validation, "tmd_pca_ncomp", 32),
+                    **self._dist_metric_kwargs(),
                 )
             self._floor_cache[key] = floor
         return floor
@@ -813,9 +900,10 @@ class Trainer:
                 enable_morphometrics=getattr(self.cfg.validation, "enable_morphometrics", True),
                 enable_light_joint=getattr(self.cfg.validation, "enable_light_joint", True),
                 gt_cache=gt_cache,
-                embed_fn=self._eval_embed_fn(),
+                embed_fn=self._eval_embed_fn(uhat_np),
                 dc_k=getattr(self.cfg.validation, "dc_nearest_k", 5),
                 tmd_pca_ncomp=getattr(self.cfg.validation, "tmd_pca_ncomp", 32),
+                **self._dist_metric_kwargs(),
             )
             # Real-vs-real floor as reference lines + a single headline excess used
             # for checkpoint selection (gen MMD above the achievable real-vs-real floor).
@@ -858,9 +946,10 @@ class Trainer:
                     dc_k = max(1, min(getattr(self.cfg.validation, "dc_nearest_k", 5), len(eval_c) - 1))
                     gt_cache_c = build_gt_cache(
                         eval_c,
-                        uhat=tuple(np.asarray(uhat_np, dtype=float).reshape(3).tolist()),
-                        embed_fn=self._eval_embed_fn(),
+                        uhat=self._uhat_tuple(uhat_np),
+                        embed_fn=self._eval_embed_fn(uhat_np),
                         tmd_pca_ncomp=ncomp,
+                        morpho_whiten=bool(getattr(self.cfg.validation, "morpho_whiten", False)),
                     )
                     results[f"class_{cname}"] = compute_distribution_metrics(
                         pred_c,
@@ -871,9 +960,10 @@ class Trainer:
                         enable_morphometrics=True,  # per-tree W1 (extents, Strahler, Sholl)
                         enable_light_joint=True,    # joint MMD/density-coverage (morpho & TMD)
                         gt_cache=gt_cache_c,
-                        embed_fn=self._eval_embed_fn(),
+                        embed_fn=self._eval_embed_fn(uhat_np),
                         dc_k=dc_k,
                         tmd_pca_ncomp=ncomp,
+                        **self._dist_metric_kwargs(),
                     )
                 self.logger.info(
                     "[evaluate beta=%s] per_cell_class metrics: %d classes",
@@ -1023,21 +1113,64 @@ class Trainer:
             payload["train_step"] = self.step
             self.wandb_run.log(payload, step=self.step)
 
+    def _metric_allowlist(self) -> set | None:
+        """Leaf names allowed onto the wandb dashboard, or None for "everything".
+
+        Purely a REPORTING filter: nothing here changes what is computed, returned, or
+        pickled into validation/step_*.pkl, so it is fully reversible by config and no
+        downstream analysis script or test is affected. See docs/VALIDATION_METRICS_AUDIT.md
+        for the measured detection power behind each tier's membership.
+        """
+        level = str(getattr(self.cfg.validation, "metric_report_level", "standard")).lower()
+        if level == "full":
+            return None
+        allow = set(_HEADLINE_METRICS)
+        if level != "headline":
+            allow |= set(_STANDARD_EXTRA_METRICS)
+        return allow
+
+    @staticmethod
+    def _metric_allowed(prefix: str, key: str, allow: set | None) -> bool:
+        """Whether one leaf survives the reporting tier."""
+        if allow is None:
+            return True
+        # Teacher-forced eval has its own key vocabulary (turning_angle_w1, pos_mse/*, exp/*)
+        # and is already opt-in via eval_mode; tiering it would delete it, not thin it.
+        if "/teacher_forced/" in prefix:
+            return True
+        if not any(block in prefix for block in _TIERED_BLOCKS):
+            return True
+        return key in allow
+
     def _collect_log(self, log_dict: dict, payload: dict, wandb_enabled: bool,
-                     prefix: str = "", indent: int = 0):
-        """Recursively print a nested dict and collect wandb leaves into `payload`."""
+                     prefix: str = "", indent: int = 0, allow: set | None = None,
+                     _top: bool = True):
+        """Recursively print a nested dict and collect wandb leaves into `payload`.
+
+        Console/file logging is always complete; only the wandb payload is filtered, and only
+        under the `validation/`, `test/` and `floor/` subtrees (training losses, timings and
+        the like are never tiered).
+        """
+        if _top:
+            allow = self._metric_allowlist()
         for key, value in log_dict.items():
             if isinstance(value, dict):
                 print(f"{'   ' * indent}{key}:")
                 self._collect_log(value, payload, wandb_enabled,
-                                  prefix=f"{prefix}{key}/", indent=indent + 1)
-            elif isinstance(value, float):
+                                  prefix=f"{prefix}{key}/", indent=indent + 1,
+                                  allow=allow, _top=False)
+            # `int` is deliberately included: it was excluded before, which silently dropped
+            # every integer leaf from wandb -- notably the teacher-forced `n_leaves`/`min_depth`,
+            # i.e. the sample size behind every TF number. `bool` stays excluded (it is an int
+            # subclass, and flags like `metrics_disabled` are not metrics).
+            elif isinstance(value, (int, float)) and not isinstance(value, bool):
+                value = float(value)
                 log_msg = f"{'   ' * indent}{key}: {value}"
                 print(log_msg)
                 # Also log to file
                 if hasattr(self, 'logger'):
                     self.logger.info(f"{prefix}{key}: {value}")
-                if wandb_enabled:
+                if wandb_enabled and self._metric_allowed(prefix, key, allow):
                     payload[f"{prefix}{key}"] = value
             elif isinstance(value, Figure):
                 if wandb_enabled:

@@ -23,9 +23,10 @@ The in-loop monitor already provides the building blocks the offline protocol wr
   `validation/dist_metrics.py`.
 - Per-tree morphometric vector + standardization: `assemble_morpho_vector`,
   `standardize_vectors`, `build_gt_cache`.
-- Joint embeddings: standardized 16-d morphometric vector and the PCA-reduced
-  Euclidean-from-root TMD persistence image (`utils.tmd.compute_tmd_embedding`,
-  filtration `radial_root`).
+- Joint embeddings: the standardized morphometric vector (**9-d as of `MORPHO_VERSION 2`**,
+  2026-08-08; 16-d before that — the two are not comparable, so a paper table must not mix
+  runs from either side of the change) and the PCA-reduced Euclidean-from-root TMD
+  persistence image (`utils.tmd.compute_tmd_embedding`, filtration `radial_root`).
 - Kernels/estimators in `utils/dist_helper.py`: `gaussian_rbf`,
   `median_heuristic_bandwidth`, `mmd2_unbiased` (unbiased, unclipped),
   `density_coverage`.

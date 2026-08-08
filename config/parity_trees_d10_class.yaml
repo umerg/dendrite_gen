@@ -71,6 +71,13 @@ validation:
   tmd_eval_bins: 16
   tmd_pca_ncomp: 64
   dc_nearest_k: 5
+  # Reporting tier for the distribution metrics: headline | standard | full.
+  # PURELY a wandb filter -- every metric is still computed and still written to
+  # validation/step_*.pkl, so switching tiers is free and changes no number.
+  metric_report_level: standard
+  # ZCA-whiten the standardized morpho vector before the MMD/Density/Coverage kernel.
+  # Off by default; the pruned MORPHO_KEYS already removes most correlation distortion.
+  morpho_whiten: False
   # Per-class stratified distribution metrics (gated on class_hidden_dim>0 in the trainer).
   per_cell_class: True
   per_cell_class_min_count: 15

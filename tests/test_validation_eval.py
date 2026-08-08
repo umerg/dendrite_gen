@@ -108,9 +108,20 @@ def test_evaluate_emits_dist_metrics_and_3d_plots(tmp_path):
         "branch_length_w1", "tmd_barlen_w1", "node_count_w1", "tree_edit_dist_mean",
         "contraction_w1", "strahler_w1", "branch_length_ks",
         "mmd_morpho", "coverage_morpho", "mmd_tmd",
+        # Degeneracy disclosure: nan morpho entries are imputed to the GT mean, so these
+        # are the only signal that a generated tree was structurally degenerate.
+        "gen_degenerate_frac", "morpho_nan_frac",
     ):
         assert key in dist, f"missing dist key {key}"
         assert isinstance(dist[key], float)
+
+    # The GT-fit cache records the morpho version + the GT-side nan rate. The latter should
+    # be 0 on any healthy dataset; if it is not, gen-side `morpho_nan_frac` can no longer be
+    # read as a pure generator-failure signal.
+    gt_cache = trainer._eval_cache[id(trainer.validation_graphs)]
+    assert gt_cache["morpho_version"] == 2
+    assert gt_cache["morpho_gt_nan_frac"] == 0.0
+    assert gt_cache["morpho_whiten"] is None  # default off
 
     # Floor reference lines + headline excess for checkpoint selection
     assert "floor" in results and isinstance(results["floor"], dict)

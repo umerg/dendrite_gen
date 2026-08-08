@@ -28,15 +28,24 @@ import graph_generation.training as training_mod
 from graph_generation.training import Trainer
 
 
-def _make_logger_stub(step: int, wandb_run):
-    """Minimal object with just the attributes log()/_collect_log() touch."""
+def _make_logger_stub(step: int, wandb_run, level: str = "full"):
+    """Minimal object with just the attributes log()/_collect_log() touch.
+
+    Defaults to the `full` reporting tier so the batching/figure tests exercise flattening
+    without also being coupled to tier membership; the tier itself is tested separately.
+    """
     obj = SimpleNamespace(
-        cfg=SimpleNamespace(wandb=SimpleNamespace(logging=True)),
+        cfg=SimpleNamespace(
+            wandb=SimpleNamespace(logging=True),
+            validation=SimpleNamespace(metric_report_level=level),
+        ),
         wandb_run=wandb_run,
         step=step,
     )
     obj.log = MethodType(Trainer.log, obj)
     obj._collect_log = MethodType(Trainer._collect_log, obj)
+    obj._metric_allowlist = MethodType(Trainer._metric_allowlist, obj)
+    obj._metric_allowed = Trainer._metric_allowed  # staticmethod
     return obj
 
 
@@ -133,6 +142,80 @@ def test_log_noop_when_wandb_disabled(monkeypatch):
     obj.log({"training": {"loss": 0.5}})
 
     run.log.assert_not_called()
+
+
+def test_metric_report_level_filters_only_the_dashboard(monkeypatch):
+    """`standard` drops the demoted dist keys; `full` keeps everything."""
+    monkeypatch.setattr(training_mod, "wandb", MagicMock())
+    block = {
+        "validation": {"ema_1": {"dist": {
+            "mmd_morpho": 0.1,          # headline
+            "node_count_w1": 2.0,       # standard
+            "sholl_peak_w1": 3.0,       # demoted to full (detects nothing)
+            "coverage_tmd": 0.97,       # demoted to full (measured dead)
+            "mmd_bandwidth_morpho": 5.0,  # per-run constant, now wandb-config only
+        }}}
+    }
+
+    run_std = MagicMock()
+    _make_logger_stub(step=1, wandb_run=run_std, level="standard").log(block)
+    payload = run_std.log.call_args[0][0]
+    assert payload["validation/ema_1/dist/mmd_morpho"] == 0.1
+    assert payload["validation/ema_1/dist/node_count_w1"] == 2.0
+    for dropped in ("sholl_peak_w1", "coverage_tmd", "mmd_bandwidth_morpho"):
+        assert f"validation/ema_1/dist/{dropped}" not in payload
+
+    run_full = MagicMock()
+    _make_logger_stub(step=1, wandb_run=run_full, level="full").log(block)
+    full_payload = run_full.log.call_args[0][0]
+    for k in ("mmd_morpho", "node_count_w1", "sholl_peak_w1", "coverage_tmd",
+              "mmd_bandwidth_morpho"):
+        assert f"validation/ema_1/dist/{k}" in full_payload
+
+
+def test_headline_tier_keeps_branch_order_w1(monkeypatch):
+    """branch_order_w1 is the only marginal that detects leaf pruning on trees."""
+    monkeypatch.setattr(training_mod, "wandb", MagicMock())
+    run = MagicMock()
+    _make_logger_stub(step=1, wandb_run=run, level="headline").log(
+        {"validation": {"ema_1": {"dist": {"branch_order_w1": 1.0, "axial_extent_w1": 2.0}}}}
+    )
+    payload = run.log.call_args[0][0]
+    assert payload["validation/ema_1/dist/branch_order_w1"] == 1.0
+    # axial_extent_w1 is `standard`, not `headline`.
+    assert "validation/ema_1/dist/axial_extent_w1" not in payload
+
+
+def test_teacher_forced_and_timing_are_never_tiered(monkeypatch):
+    """TF has its own key vocabulary; tiering it would delete it rather than thin it."""
+    monkeypatch.setattr(training_mod, "wandb", MagicMock())
+    run = MagicMock()
+    _make_logger_stub(step=1, wandb_run=run, level="headline").log({
+        "validation": {"ema_1": {
+            "teacher_forced": {"dist": {"turning_angle_w1": 4.0}, "exp": {"auc": 0.9}},
+            "timing": {"sampling_s": 12.0},
+        }},
+    })
+    payload = run.log.call_args[0][0]
+    assert payload["validation/ema_1/teacher_forced/dist/turning_angle_w1"] == 4.0
+    assert payload["validation/ema_1/teacher_forced/exp/auc"] == 0.9
+    assert payload["validation/ema_1/timing/sampling_s"] == 12.0
+
+
+def test_int_leaves_reach_wandb_but_bools_do_not(monkeypatch):
+    """Integer leaves were silently dropped, losing the TF sample size (`n_leaves`)."""
+    monkeypatch.setattr(training_mod, "wandb", MagicMock())
+    run = MagicMock()
+    _make_logger_stub(step=1, wandb_run=run).log({
+        "validation": {"ema_1": {
+            "teacher_forced": {"n_leaves": 1234, "min_depth": 0},
+            "metrics_disabled": True,
+        }},
+    })
+    payload = run.log.call_args[0][0]
+    assert payload["validation/ema_1/teacher_forced/n_leaves"] == 1234.0
+    assert payload["validation/ema_1/teacher_forced/min_depth"] == 0.0
+    assert "validation/ema_1/metrics_disabled" not in payload
 
 
 if __name__ == "__main__":

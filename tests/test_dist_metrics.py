@@ -296,3 +296,134 @@ def test_degenerate_single_node_is_nan_safe():
     # and the full pipeline tolerates a degenerate graph in the set
     m = compute_distribution_metrics([G], [_toy_tree(1.0, 0)], ged_enabled=False)
     assert "branch_length_w1" in m
+
+
+# --- MORPHO_KEYS v2 ------------------------------------------------------------------
+
+
+def test_morpho_keys_v2_composition():
+    from validation.dist_metrics import MORPHO_KEYS, MORPHO_VERSION, assemble_morpho_vector
+
+    assert MORPHO_VERSION == 2
+    assert len(MORPHO_KEYS) == 9
+    # `max_branch_order` replaced `strahler`; `node_count` is excluded so mmd_morpho is a
+    # shape-only comparison against baselines that are handed the node count.
+    assert "max_branch_order" in MORPHO_KEYS
+    assert "strahler" not in MORPHO_KEYS
+    assert "node_count" not in MORPHO_KEYS
+    # No arithmetic duplicates: leaves/bifurcations are node_count on a binary tree.
+    for dup in ("leaf_count", "bifurcation_count", "total_extent", "mean_path_to_root"):
+        assert dup not in MORPHO_KEYS
+    v = assemble_morpho_vector(_toy_tree(1.0, 0), uhat=(0.0, 0.0, 1.0))
+    assert v.shape == (9,)
+
+
+def test_max_branch_order_is_nan_safe_on_single_node():
+    from validation.dist_metrics import _max_branch_order
+
+    G = nx.Graph()
+    G.add_node(0, pos=np.zeros(3))
+    G.graph["root"] = 0
+    # branch_order_values returns an empty array here, so a bare .max() would raise.
+    assert np.isnan(_max_branch_order(G))
+
+
+def test_branch_order_equals_hop_depth_on_binary_tree():
+    """Pins what `max_branch_order` actually measures on our datasets: tree depth.
+
+    `branch_order_values` increments only at non-root nodes of undirected degree >= 3. Our
+    data is strictly binary away from the root with no degree-2 nodes, so every non-root
+    internal node increments and branch_order == hop_depth - 1 exactly. If either the
+    degree-rule or the binarization guarantee ever changes, this fails loudly.
+    """
+    from validation.structural_metrics import branch_order_values
+
+    G = nx.balanced_tree(2, 3)  # strictly binary, root has degree 2
+    for n in G.nodes():
+        G.nodes[n]["pos"] = np.array([float(n), 0.0, 0.0])
+    G.graph["root"] = 0
+    depth = nx.single_source_shortest_path_length(G, 0)
+    order = dict(zip([n for n in G.nodes() if n != 0], branch_order_values(G)))
+    assert order, "expected non-root nodes"
+    for n, o in order.items():
+        assert o == depth[n] - 1, f"node {n}: branch_order {o} != hop_depth-1 {depth[n]-1}"
+
+
+# --- Sholl critical radius (A2) ------------------------------------------------------
+
+
+def test_sholl_critical_radius_is_scale_invariant():
+    """The property the old `r.max()` divisor lacked, under either shell grid.
+
+    Crossing counts are inherently scale-invariant; dividing the peak radius by the tree's
+    OWN radial extent makes the ratio scale-invariant too.
+    """
+    from validation.structural_metrics import sholl_summary
+
+    G = _toy_tree(1.0, 3)
+    big = _scale_along(G, np.array([1.0, 0.0, 0.0]), 1.0)  # deep copy, no distortion
+    for n in big.nodes():
+        big.nodes[n]["pos"] = np.asarray(big.nodes[n]["pos"], dtype=float) * 4.0
+
+    a = sholl_summary(G)["sholl_critical_radius"]
+    b = sholl_summary(big)["sholl_critical_radius"]
+    assert np.isfinite(a) and np.isfinite(b)
+    assert a == pytest.approx(b, abs=1e-9)
+    assert 0.0 < a <= 1.0
+
+
+def test_sholl_summary_nan_safe_on_tiny_graphs():
+    from validation.structural_metrics import sholl_summary
+
+    for n_nodes in (1, 2):
+        G = nx.path_graph(n_nodes)
+        for i in G.nodes():
+            G.nodes[i]["pos"] = np.zeros(3)  # zero extent -> own_rmax == 0
+        G.graph["root"] = 0
+        s = sholl_summary(G)  # must not raise on the empty radial array
+        assert set(s.keys()) == {"sholl_peak", "sholl_critical_radius", "sholl_auc"}
+        assert np.isnan(s["sholl_critical_radius"])
+
+
+# --- degeneracy disclosure (A5) ------------------------------------------------------
+
+
+def test_gen_degenerate_frac_flags_degenerate_generated_trees():
+    gt = [_toy_tree(1.0, i) for i in range(5)]
+
+    clean = compute_distribution_metrics(list(gt), gt, ged_enabled=False)
+    assert clean["gen_degenerate_frac"] == 0.0
+    assert clean["morpho_nan_frac"] == 0.0
+
+    path = nx.path_graph(4)  # no bifurcation -> asymmetry/angle undefined
+    for i in path.nodes():
+        path.nodes[i]["pos"] = np.array([0.0, 0.0, float(i)])
+    path.graph["root"] = 0
+
+    dirty = compute_distribution_metrics([path] + list(gt), gt, ged_enabled=False)
+    assert dirty["gen_degenerate_frac"] == pytest.approx(1.0 / 6.0)
+    # The nan entries are still imputed to the GT mean, which is exactly why the explicit
+    # disclosure metrics are needed: mmd_morpho alone would not reveal this.
+    assert dirty["morpho_nan_frac"] > 0.0
+
+
+# --- tmd_barlen filtration (A3) ------------------------------------------------------
+
+
+def test_tmd_barlen_follows_the_configured_filtration():
+    """Previously hardcoded to `path` while the joint TMD block used `radial_root`."""
+    gen = [_toy_tree(1.3, i) for i in range(4)]
+    gt = [_toy_tree(1.0, 10 + i) for i in range(4)]
+    kw = dict(ged_enabled=False, enable_light_joint=False)
+    a = compute_distribution_metrics(gen, gt, tmd_filtration="path", **kw)["tmd_barlen_w1"]
+    b = compute_distribution_metrics(gen, gt, tmd_filtration="radial_root", **kw)["tmd_barlen_w1"]
+    assert np.isfinite(a) and np.isfinite(b)
+    assert a != pytest.approx(b, abs=1e-9)
+
+
+def test_morpho_whiten_is_off_by_default_and_changes_mmd_when_on():
+    from validation.dist_metrics import build_gt_cache
+
+    gt = [_toy_tree(1.0, i) for i in range(12)]
+    assert build_gt_cache(gt, tmd_pca_ncomp=2)["morpho_whiten"] is None
+    assert build_gt_cache(gt, tmd_pca_ncomp=2, morpho_whiten=True)["morpho_whiten"] is not None
