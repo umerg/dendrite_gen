@@ -83,7 +83,7 @@ model:
   feats_dim: 256
   m_dim: 256
   tmd_hidden_dim: 128            # >0 enables TMD conditioning; tmd_in_dim auto-derived
-  tmd_filtrations: [path, height, radial_root]   # trees are z-up (so2_axis=z): height=z, rho=perp-to-z
+  tmd_filtrations: [path, radial_root]   # path + radial_root are both axis-agnostic (no so2_axis dependence)
   tmd_bins: 16
   # Genus (class) conditioning: one-hot(num_classes) -> Linear(class_hidden_dim), always-on.
   num_classes: 6              # 6 kept genera (utils.data_loading.TREE_GENUS_NAMES)

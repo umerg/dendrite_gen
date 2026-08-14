@@ -100,7 +100,7 @@ model:
   tmd_hidden_dim: 0            # 0 = TMD conditioning OFF
   class_hidden_dim: 0          # 0 = cell-type conditioning OFF
   # --------------------------------------------------------------------------
-  tmd_filtrations: [path, height, radial_root]   # inert while tmd_hidden_dim == 0
+  tmd_filtrations: [path, radial_root]   # inert while tmd_hidden_dim == 0
   tmd_bins: 16
   num_classes: 6               # 6 kept genera (utils.data_loading.TREE_GENUS_NAMES)
   dropout: 0.1

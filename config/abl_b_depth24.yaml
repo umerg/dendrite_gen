@@ -85,7 +85,7 @@ model:
   feats_dim: 256
   m_dim: 128                  # thin message (Semla ratio 0.33); fan-in is 3, so 256 was generous
   tmd_hidden_dim: 0            # >0 enables TMD conditioning; tmd_in_dim is auto-derived (n_filtrations * tmd_bins**2)
-  tmd_filtrations: [path, height, radial_root]   # radial_root = Euclidean-from-soma (axis-agnostic); path/height key off so2_axis (y for neurons)
+  tmd_filtrations: [path, radial_root]   # path + radial_root are both axis-agnostic; height/rho dropped so an E(3) baseline can consume the same conditioning
   tmd_bins: 16                 # persistence-image grid per filtration
   # Cell-type (class) conditioning: one-hot(num_classes) -> Linear(class_hidden_dim), always-on.
   num_classes: 7              # 7 kept pyramidal types (utils.data_loading.CELL_CLASS_NAMES)

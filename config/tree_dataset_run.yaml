@@ -71,7 +71,8 @@ model:
   feats_dim: 128
   m_dim: 128
   tmd_hidden_dim: 64           # >0 enables TMD conditioning; tmd_in_dim is auto-derived (n_filtrations * tmd_bins**2)
-  tmd_filtrations: [path, height, rho]   # trees are z-up (so2_axis=z): height=z, rho=perp-to-z
+  tmd_filtrations: [path, rho]   # NOTE: rho is AXIS-AWARE (perp-to-so2_axis). Kept as an internal ablation;
+                                 # not usable for the E(3)-equivariant baseline comparison.
   tmd_bins: 16
   dropout: 0.1
   norm_feats: True

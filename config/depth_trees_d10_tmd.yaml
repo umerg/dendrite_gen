@@ -106,7 +106,7 @@ model:
   tmd_hidden_dim: 64           # >0 = TMD conditioning ON (MLP over the persistence image)
   class_hidden_dim: 0          # 0 = cell-type conditioning OFF
   # --------------------------------------------------------------------------
-  tmd_filtrations: [path, height, radial_root]   # 3 x 16^2 -> tmd_in_dim 768 (derived, never hand-set)
+  tmd_filtrations: [path, radial_root]   # 2 x 16^2 -> tmd_in_dim 512 (derived, never hand-set)
   tmd_bins: 16
   num_classes: 6               # 6 kept genera (utils.data_loading.TREE_GENUS_NAMES)
   dropout: 0.1

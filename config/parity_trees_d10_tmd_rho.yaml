@@ -1,14 +1,18 @@
 # EXPERIMENT -- trees d10, TMD CONDITIONAL, rho FILTRATION
 #
 # Single-variable fork of parity_trees_d10_tmd.yaml: the ONLY change is the conditioning
-# filtration set, [path, height, radial_root] -> [path, height, rho]. tmd_in_dim is
-# unchanged (3 filtrations x 16^2 = 768), so the parameter count is identical.
+# filtration set, [path, radial_root] -> [path, rho]. tmd_in_dim is
+# unchanged (2 filtrations x 16^2 = 512), so the parameter count is identical.
 #
-# Why: with so2_axis = z, `height` is the z-projection and `rho` is the perpendicular-to-z
-# radius, so [path, height, rho] is the axis-aligned (cylindrical) decomposition used by
-# config/tree_dataset_run.yaml, whereas `radial_root` is the axis-agnostic Euclidean distance
-# from the root and is partly redundant with height+rho. This arm tests which conditioning
-# basis the model uses better.
+# Why: with so2_axis = z, `rho` is the perpendicular-to-z radius, so [path, rho] is the
+# axis-aligned (cylindrical) decomposition, whereas `radial_root` is the axis-agnostic
+# Euclidean distance from the root. This arm tests which conditioning basis the model
+# uses better.
+#
+# CAVEAT (2026-08-14): `rho` is AXIS-AWARE, so this arm cannot be run against the
+# E(3)-equivariant baseline -- that baseline has no access to so2_axis and so cannot
+# consume the same conditioning. `height` was dropped from every other config for this
+# reason. Keep this fork only as an internal ablation, not as a parity arm.
 #
 # The EVALUATION side is deliberately NOT changed (validation.tmd_eval_filtration stays
 # radial_root and tmd_cond_pd_filtrations stays [path, radial_root]) so both arms are scored
@@ -117,9 +121,9 @@ model:
   tmd_hidden_dim: 128          # >0 = TMD conditioning ON (MLP over the persistence image)
   class_hidden_dim: 0          # 0 = cell-type conditioning OFF
   # --------------------------------------------------------------------------
-  tmd_filtrations: [path, height, rho]   # <-- THE ONLY CHANGE vs parity_trees_d10_tmd.yaml.
+  tmd_filtrations: [path, rho]   # <-- THE ONLY CHANGE vs parity_trees_d10_tmd.yaml.
                                          # rho = perpendicular-to-so2_axis radius; still
-                                         # 3 x 16^2 -> tmd_in_dim 768, so params are identical.
+                                         # 2 x 16^2 -> tmd_in_dim 512, so params are identical.
   tmd_bins: 16
   num_classes: 6               # 6 kept genera (utils.data_loading.TREE_GENUS_NAMES)
   dropout: 0.1
