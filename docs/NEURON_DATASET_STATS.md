@@ -161,3 +161,11 @@ preprocessed sample of this dataset: local-frame child offsets are nearly identi
 - Config: `config/dataset/neurons_conditional_full.yaml`; used by `config/neuron_type_conditional_run.yaml`. Run via `python main.py -cn neuron_type_conditional_run` (override `dataset=neurons_conditional` for the old cap=16 set).
 - Cell-class conditioning is wired end-to-end (one-hot → Linear in `egnn_so2.py`, budget subtracted from `avail_feats_dim`); see the model config's `num_classes`/`class_hidden_dim` and `docs/` conditional-generation notes.
 - Verified: full pytest suite green at `MAX_CHILDREN=23` (`tests/test_so2_invariance.py`, forward/dataset/validation tests), cap-free regeneration (26,469 written, 0 soma-degree drops), and structural re-check on the output (0 multifurcations, root degree ≤ 23, splits preserved).
+- **SemlaFlow side** (added 2026-08-15): registered as `neurons_conditional_full` in
+  `semla-flow/semlaflow/scriptutil.py::DATASET_CONFIGS` with `coord_std=66.1040` (measured over the
+  train split post per-tree zero-CoM), `max_nodes=537`, `bucket_limits=[40, 56, 72, 96, 128, 160,
+  200, 256, 537]`. Its `.smol` is built uncapped (`--max_atoms 537` drops nothing) and **with TMD
+  descriptors** (`--compute_tmd --tmd_filtrations path radial_root`), so one `smol/` serves
+  unconditional, class-conditioned and TMD-conditioned runs. `MAX_CHILDREN` is irrelevant there —
+  SemlaFlow's `swc_to_geometric_mol` reads only x/y/z and adjacency, no root-child ordinal. Runbook:
+  `semla-flow/RUN.md` §1.
