@@ -18,8 +18,12 @@ morphologies in nature**, not just neurons.
   — base-rooted, strictly binary away from the root, radii kept, genus integer embedded (local
   staging; rsync to `/scratch/guptau/trees_genus_d{10,15,20}`; configs
   `config/dataset/trees.yaml` (=d10), `trees_genus_d15.yaml`, `trees_genus_d20.yaml`).
+- **Capped variants:** `/Users/umer/Documents/trees_genus_d{10,15,20}_capped/` — the same corpora
+  minus a 199-tree node-count tail, sample-matched across depths. Added 2026-08-14 for SemlaFlow's
+  O(N²) memory cost; see [§7](#7-the-capped-variants--trees_genus_d101520_capped).
 - **Reproduce:**
   - Build all three: `conda run -n NEURO2 python preprocessing/prepare_tree_dataset.py --max-depth 10 15 20`
+  - Capped variants: `conda run -n NEURO2 python preprocessing/make_capped_tree_corpora.py --expect-kept 3169 --expect-dropped 199`
   - Verify output: `... prepare_tree_dataset.py --verify /Users/umer/Documents/trees_genus_d10`
   - C₀ scale: `N_GRAPHS=1000 conda run -n NEURO2 python tests/analyse_c0_distribution.py --data-dir /Users/umer/Documents/trees_genus_d10/train --pos-scale 1.0 --axis z`
 
@@ -135,6 +139,10 @@ The 1,543 conifers and 23 QSM failures are unavailable upstream, not discarded b
 | unlabelled / unknown genus | 0 | 100% join coverage |
 | disconnected / broken | 0 | every graph is a single connected tree |
 | errors | 0 | — |
+| *(capped variants only)* node-count cap | *199* | *d20 nodes > 1110; see [§7](#7-the-capped-variants--trees_genus_d101520_capped)* |
+
+The 199 apply **only** to the `*_capped` corpora, taking their sample loss to
+**217 / 3,386 = 6.41%** (kept 3,169 = 93.59%). The uncapped corpora are unchanged at 0.53%.
 
 Net: 16 + 5 − 3 = **18 dropped**. The 2 non-tail blank-split trees are `AEW42_G_240`
 (Acer_campestre) and `AEW47_G_192` (Quercus_rubra).
@@ -195,6 +203,8 @@ more often than dendrites.
 | depth cap (d10 / d15 / d20) | nodes | 11.65 M / 11.16 M / 10.40 M | 97.6% / 93.6% / 87.2% of skeleton |
 | multifurcation prune (d10/d15/d20) | nodes | 12,332 / 33,516 / 68,228 | 4.35% / 4.44% / 4.55% of kept |
 | **Net trainable corpus** | **trees** | **3,368 kept** | **99.47%** |
+| node-count cap, `*_capped` only | trees | 199 | 5.91% of 3,368 |
+| **Net capped corpus** | **trees** | **3,169 kept** | **93.59%** of 3,386 |
 
 ---
 
@@ -273,4 +283,79 @@ Two properties worth noting for the flow prior:
   deliberately **not** bit-identical to it.
 - **Only broadleaf trees exist in this corpus**, so no conifer-vs-broadleaf generalisation claim
   can be made from it.
-- **The C₀ scale factors are depth-specific** and must be re-measured if the cap changes.
+- **The C₀ scale factors are depth-specific** and must be re-measured if the cap changes. This
+  includes the capped variants of §7: dropping the largest trees changes the raw per-axis stds, so
+  `pos_scale_factor` / `prior_std_pos` **have not been measured for them** and must be before any
+  dendrite_gen run on a `*_capped` corpus.
+- **The capped variants truncate the size distribution**, not just the node count — see §7.
+
+---
+
+## 7. The capped variants — `trees_genus_d{10,15,20}_capped`
+
+**Added 2026-08-14.** Node-count-capped, **sample-matched** duplicates of the three corpora above,
+built for SemlaFlow, whose activation memory is O(N²) (~57 KB per node-pair in fp32, 28.5 KB in
+bf16, 4.0 KB with gradient checkpointing) against a 40 GB A100. The d20 tail put training at ~38.5 GB
+of that card with no headroom.
+
+**The rule.** Drop every tree whose **d20** node count exceeds **1110** — 199 treeIDs — and remove
+that same ID set from *all three* depths. One shared ID set is the point: all three then hold the
+same 3,169 trees, so a d10-vs-d15-vs-d20 comparison stays a depth ablation and is not confounded by
+composition. It costs nothing extra to do, because d15's own tail above 785 nodes is a strict subset
+of d20's above 1110 (d10's max is 378, so nothing there exceeds any candidate cap — d10 loses trees
+*only* to stay matched).
+
+Reproduce: `python preprocessing/make_capped_tree_corpora.py --expect-kept 3169 --expect-dropped 199`.
+The script reads the uncapped corpora read-only and writes sibling `*_capped/` directories, each with
+a filtered `dataset_stats.csv`, a `DROPPED_IDS.csv`, and a `BUILD_MANIFEST.json` recording the rule,
+the counts and the measured constants. Structure re-checked with
+`prepare_tree_dataset.py --verify` — all three pass: 0 non-root multifurcations, 0 degree-2 nodes,
+single root everywhere, root degree ≤ 2, `cell_class` in 0..5.
+
+### Why the tail is cheap to drop
+
+- The top 5% of trees hold ~18% of the nodes but **~39% of the N² compute**.
+- The tail is **96% Fagus** — the genus already at 88.2% — so capping *lowers* the imbalance.
+- `corr(nodes, realized_depth)` is only **0.37** at d20 (0.43 at d15): the tail is **wide, not
+  deep**, so the depth distribution barely moves.
+
+### At a glance (3,169 trees each: 2,538 train / 316 val / 315 test)
+
+| | d10_capped | d15_capped | d20_capped |
+|---|---|---|---|
+| nodes/file: mean / median / p95 / max | 78 / 70 / 158 / **268** | 195 / 168 / 438 / **666** | 378 / 312 / 903 / **1110** |
+| max depth: mean / p95 / max | 10.8 / 12 / 14 | 16.0 / 18 / 20 | 21.2 / 23 / 26 |
+| — uncapped was | 10.8 / 12 / 14 | 16.1 / 18 / 20 | 21.2 / 23 / 26 |
+| total nodes | 245,603 | 619,095 | 1,196,363 |
+| ΣN² vs uncapped | 75.3% | 63.0% | 57.2% |
+| SemlaFlow `coord_std` | 1.6346 | 1.7935 | 1.9658 |
+| — uncapped was | 1.6417 | 1.8062 | 1.9999 |
+
+Depth is essentially untouched; what changes is size. Node-count medians fall 72→70, 178→168,
+338→312, and max falls 378→268, 1456→666, 3056→1110.
+
+### Genus composition (identical at all three depths)
+
+| genus | id | train | val | test | total | % | Δ% |
+|---|---|---|---|---|---|---|---|
+| Fagus | 0 | 2,377 → **2,226** | 298 → **277** | 295 → **275** | **2,778** | 87.66 | −0.52 |
+| Quercus | 1 | 142 → **142** | 18 → **18** | 18 → **18** | **178** | 5.62 | +0.34 |
+| Acer | 2 | 57 → **52** | 7 → **7** | 8 → **7** | **66** | 2.08 | −0.06 |
+| Carpinus | 3 | 52 → **51** | 6 → **6** | 7 → **7** | **64** | 2.02 | +0.09 |
+| Fraxinus | 4 | 47 → **47** | 6 → **6** | 6 → **6** | **59** | 1.86 | +0.11 |
+| Betula | 5 | 20 → **20** | 2 → **2** | 2 → **2** | **24** | 0.76 | +0.05 |
+| **all** | | **2,538** | **316** | **315** | **3,169** | 100 | |
+
+Dropped: **192 Fagus, 6 Acer, 1 Carpinus** (157 train / 21 val / 21 test). **No rare-genus
+validation tree is lost** — every val count outside Fagus is unchanged — so the §6 limitation on
+per-genus metrics carries over verbatim, neither better nor worse.
+
+### What this costs, stated honestly
+
+The cap is a **compute decision, not a data-quality one**, and it is not neutral: the dropped trees
+are the largest, tallest, most-branched individuals — the mature canopy beeches. At d20 their median
+height is **22.9 m against 16.1 m** for the kept trees, and their median node count 1,464 against
+320. So the capped corpora under-represent mature large trees, and any extent, height or
+branch-count distribution measured on them describes a narrower population than the source QSMs.
+Report it as a cap, quote the 5.91% sample loss (§3.1), and do not compare extent metrics across
+capped and uncapped corpora.
