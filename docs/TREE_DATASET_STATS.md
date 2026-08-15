@@ -216,13 +216,26 @@ depth reduction → `precompute_full_geometry` → `global_to_local`). Rule:
 
 | depth | raw per-axis std | `pos_scale_factor` | `prior_std_pos` | mean axis std | \|C\| mean | anisotropy |
 |---|---|---|---|---|---|---|
-| d10 | [0.278, 0.244, 0.833] | **0.45** | **[0.62, 0.54, 1.85]** | 1.005 | 1.001 | 3.41 |
-| d15 | [0.257, 0.226, 0.550] | **0.34** | **[0.76, 0.66, 1.62]** | 1.013 | 1.046 | 2.44 |
-| d20 | [0.243, 0.214, 0.424] | **0.29** | **[0.84, 0.74, 1.46]** | 1.012 | 1.095 | 1.99 |
+| **d10 capped** | [0.2835, 0.2526, 0.8478] | **0.46** | **[0.62, 0.55, 1.84]** | 1.003 | 1.015 | 3.36 |
+| **d15 capped** | [0.2678, 0.2348, 0.5765] | **0.36** | **[0.74, 0.65, 1.60]** | 0.999 | 1.039 | 2.45 |
+| **d20 capped** | [0.2530, 0.2218, 0.4461] | **0.31** | **[0.82, 0.72, 1.44]** | 0.990 | 1.069 | 2.01 |
+| d10 uncapped | [0.278, 0.244, 0.833] | 0.45 | [0.62, 0.54, 1.85] | 1.005 | 1.001 | 3.41 |
+| d15 uncapped | [0.257, 0.226, 0.550] | 0.34 | [0.76, 0.66, 1.62] | 1.013 | 1.046 | 2.44 |
+| d20 uncapped | [0.243, 0.214, 0.424] | 0.29 | [0.84, 0.74, 1.46] | 1.012 | 1.095 | 1.99 |
 | *(legacy `small_trees`)* | [0.285, 0.256, 0.851] | *0.5* | *[0.57, 0.51, 1.70]* | *0.928* | — | — |
 
-All three pass the script's own check (`prior_std_pos OK`, per-axis |Δ|/std ≤ 0.005).
-N_GRAPHS = 1000 for d10/d15, 400 for d20 (~5× per-tree cost).
+All six pass the script's own check (`prior_std_pos OK`; per-axis |Δ|/std ≤ 0.005 uncapped,
+≤ 0.006 capped). N_GRAPHS = 1000 throughout for the capped sets — the cap makes d20 cheap enough
+(max 1,110 nodes vs 3,056) to drop the 400 the uncapped d20 needed. The capped rows are the ones
+wired to `config/dataset/trees_genus_d{10,15,20}.yaml`; the uncapped d10 row is `trees.yaml`, and
+uncapped d15/d20 have no config any more.
+
+**Capping raises every scale slightly** (0.45→0.46, 0.34→0.36, 0.29→0.31) — the opposite of what
+you might expect from dropping the largest trees. The reason: the dropped trees are the *bushiest*,
+and a bushy tree contributes disproportionately many short twig offsets, which were pulling the
+per-axis stds down. Anisotropy is essentially unchanged (3.36/2.45/2.01 vs 3.41/2.44/1.99), so the
+qualitative story below — trees far more anisotropic than neurons, less so the deeper the cap —
+holds for both.
 
 **The parameters do NOT transfer between depths** — unlike the neuron sets, where 45.1 carried
 over unchanged. Deeper caps add short, more isotropic twig offsets, so the axial std falls
@@ -283,10 +296,10 @@ Two properties worth noting for the flow prior:
   deliberately **not** bit-identical to it.
 - **Only broadleaf trees exist in this corpus**, so no conifer-vs-broadleaf generalisation claim
   can be made from it.
-- **The C₀ scale factors are depth-specific** and must be re-measured if the cap changes. This
-  includes the capped variants of §7: dropping the largest trees changes the raw per-axis stds, so
-  `pos_scale_factor` / `prior_std_pos` **have not been measured for them** and must be before any
-  dendrite_gen run on a `*_capped` corpus.
+- **The C₀ scale factors are corpus-specific** and must be re-measured whenever the cap or the
+  corpus changes — they transfer neither between depths nor between the capped and uncapped sets.
+  The capped variants of §7 **were measured on 2026-08-15** and are in §4; they are what
+  `config/dataset/trees_genus_d{10,15,20}.yaml` now carry.
 - **The capped variants truncate the size distribution**, not just the node count — see §7.
 
 ---
@@ -330,6 +343,21 @@ single root everywhere, root degree ≤ 2, `cell_class` in 0..5.
 | ΣN² vs uncapped | 75.3% | 63.0% | 57.2% |
 | SemlaFlow `coord_std` | 1.6346 | 1.7935 | 1.9658 |
 | — uncapped was | 1.6417 | 1.8062 | 1.9999 |
+| `pos_scale_factor` (§4) | 0.46 | 0.36 | 0.31 |
+| `prior_std_pos` (§4) | [0.62, 0.55, 1.84] | [0.74, 0.65, 1.60] | [0.82, 0.72, 1.44] |
+| **items/epoch** = Σ max_depth | **27,263** | **40,637** | **53,690** |
+| — uncapped was | 29,080 | 43,324 | 57,213 |
+| `training.num_steps` at B=128 | **63900** | **95200** | **125800** |
+| — uncapped was | 68200 | 101500 | 134100 |
+
+**`num_steps` had to change with the corpus.** The depth sweep is a budget-parity protocol
+(`BUDGET_PARITY_SEMLAFLOW.md` §5.2 "Option C": fix the batch, set `num_steps` so both methods see
+E = 300 epochs), and `items/epoch = Σ max_depth` over the train split, because levels per graph
+equal the root-rooted max depth exactly (§3 of that doc). 2,538 trees instead of 2,695 means fewer
+items per epoch, so the old `num_steps` on capped data would train for **320 epochs, not 300** —
+equally across all three depths, so the depth comparison would survive but the parity claim against
+SemlaFlow would not. The SemlaFlow-side step counts in those configs' headers were measured on the
+uncapped corpora with the old bucket ladders and are flagged for re-measurement.
 
 Depth is essentially untouched; what changes is size. Node-count medians fall 72→70, 178→168,
 338→312, and max falls 378→268, 1456→666, 3056→1110.

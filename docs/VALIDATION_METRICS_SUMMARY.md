@@ -57,7 +57,7 @@ match. Do not clip it and do not read a negative value as an error.
 | `bifurcation_angle_w1` | How wide a fork opens (degrees). |
 | `radial_to_root_w1` | Straight-line distance from soma/base to each node — where the mass sits. |
 | `contraction_w1` | Per leaf: straight-line ÷ along-cable distance from root. Tortuosity. |
-| `branch_order_w1` | **On our data this is exactly the node-depth distribution** (§6). |
+| `branch_order_w1` | **On our data this is exactly the node-depth distribution** (§7). |
 | `partition_asymmetry_w1` | Van Pelt asymmetry: 0 = every fork splits evenly, 1 = caterpillar. |
 | `node_count_w1` | Tree size. |
 | `sholl_critical_radius_w1` | Where the arbor is densest, as a fraction of the tree's own reach. |
@@ -198,7 +198,58 @@ not put runs from either side of the change on one axis.
 
 ---
 
-## 6. `branch_order` is tree depth — the one naming trap
+## 6. `density_*` / `coverage_*` — the exact estimator
+
+Naeem et al. (2020), implemented in `utils/dist_helper.py:density_coverage`. Both numbers come
+from **spheres centred on real points only** — the generated set never defines a radius, so it
+cannot inflate its own score by spreading out.
+
+```
+real = GT embeddings (N × d),  fake = generated (M × d),  k = min(dc_nearest_k, N−1)
+
+r_i  = distance from real_i to its k-th nearest OTHER real point
+       (k+1 neighbours are queried and the last taken, so the self-match at 0 is dropped)
+B_i  = { x : ‖x − real_i‖ ≤ r_i }        # the "real manifold" is ∪ B_i
+
+density  = (1 / (k·M)) · Σ_i |{ j : fake_j ∈ B_i }|
+coverage = (1 / N)     · Σ_i 1[ |{ j : fake_j ∈ B_i }| ≥ 1 ]
+```
+
+| | what it counts | range | 1.0 means |
+|---|---|---|---|
+| `density_*` | how many real k-NN spheres the average fake lands in, ÷ k | **unbounded above** | fakes are as concentrated as real samples; **> 1 = piling into the dense core** |
+| `coverage_*` | fraction of real samples with ≥ 1 fake neighbour | [0, 1] | every real mode has a generated neighbour |
+
+Density is the *fidelity* half and coverage the *diversity* half. Density is the reason this pair
+is used instead of precision/recall: a fake sitting inside one real outlier's inflated sphere
+earns only `1/k` credit rather than full credit.
+
+**Both are computed twice**, on the two per-tree embeddings the joint block builds
+(`dist_metrics.py:joint_metrics_from_vectors`), each **z-scored / PCA-fit on the GT set once** and
+reused every step (§5) — the same property that makes `mmd_*` comparable across checkpoints makes
+the radii `r_i` comparable:
+
+- `*_morpho` — the 9-D `MORPHO_KEYS` vector, z-scored by GT mean/std (+ optional ZCA).
+- `*_tmd` — the 16×16 `radial_root` persistence image, PCA-reduced to `tmd_pca_ncomp`.
+
+Both are **order-independent**: no `gen[i] ↔ gt[i]` pairing is used, unlike tree-edit distance and
+the whole `tmd_cond` block. `k` is `validation.dc_nearest_k` (5); the per-class block re-clamps it
+to `min(k, class_size − 1)`. `(nan, nan)` if `N < 2`, `M < 1`, or `k` clamps below 1.
+
+**Reading them.** Sign convention is inverted vs everything else — *smaller is worse* (§2). Judge
+against the real-vs-real floor in §4 (trees 0.967/1.044, neurons 0.960/0.960), never against 1.0.
+Two failure modes to keep in mind:
+
+1. **The imputation loophole.** `standardize_vectors` maps non-finite morpho features to the GT
+   *mean*, i.e. to the centre of the point cloud — the densest region of the real manifold. A
+   degenerate generated tree therefore lands inside many spheres and **earns density and coverage
+   credit for being broken**. Always read `gen_degenerate_frac` / `morpho_nan_frac` first.
+2. **`density_tmd` / `coverage_tmd` are inert** — never leave 0.95–0.99 under any injected defect
+   (§8.6), which is why they are off the `standard` dashboard.
+
+---
+
+## 7. `branch_order` is tree depth — the one naming trap
 
 `branch_order_values` increments at every non-root node of undirected degree ≥ 3. Our datasets
 are strictly binary away from the root with **zero degree-2 non-root nodes**, so every non-root
@@ -220,7 +271,7 @@ the trim.)
 
 ---
 
-## 7. Matched pairwise (`tmd_cond`) — is the conditioning actually used?
+## 8. Matched pairwise (`tmd_cond`) — is the conditioning actually used?
 
 Only meaningful with `tmd_hidden_dim > 0`. `gen[i]` was conditioned on `gt[i]` and the rollout
 keeps them index-aligned, so each pair is compared directly. The distributional suite **cannot**
@@ -241,7 +292,7 @@ carry the scale. Do not read `pd_wasserstein_*` alone as "the tree matches".
 
 ---
 
-## 8. Known blind spots
+## 9. Known blind spots
 
 1. **The suite cannot see a flipped tree.** Reflect every generated tree along `uhat` and **0 of
    31 metrics change** — re-verified on `MORPHO_VERSION 2`; the v2 prune neither helped nor hurt
@@ -270,7 +321,7 @@ carry the scale. Do not read `pd_wasserstein_*` alone as "the tree matches".
 
 ---
 
-## 9. Config reference
+## 10. Config reference
 
 ```yaml
 validation:
@@ -306,7 +357,7 @@ Per-run constants (`mmd_bandwidth_morpho`, `mmd_bandwidth_tmd`, `tmd_eff_rank`,
 
 ---
 
-## 10. Changelog
+## 11. Changelog
 
 **2026-08-08 — `MORPHO_VERSION 2`.** Breaks comparability of `mmd_morpho` / `density_morpho` /
 `coverage_morpho` and of `tmd_barlen_w1`, `sholl_peak_w1`, `sholl_critical_radius_w1`,

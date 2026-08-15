@@ -12,16 +12,25 @@ prior_std_pos: [0.74, 0.61, 0.83]  # per-axis prior std [forward, sideways, axia
                      #
                      #   dataset (axis)              pos_scale   prior_std_pos
                      #   neurons_conditional_full (y)   45.1     [0.74, 0.61, 0.83]   <- default above
-                     #   trees / trees_genus_d10 (z)     0.45    [0.62, 0.54, 1.85]
-                     #   trees_genus_d15 (z)             0.34    [0.76, 0.66, 1.62]
-                     #   trees_genus_d20 (z)             0.29    [0.84, 0.74, 1.46]
+                     #   trees_genus_d10 (z)   CAPPED    0.46    [0.62, 0.55, 1.84]
+                     #   trees_genus_d15 (z)   CAPPED    0.36    [0.74, 0.65, 1.60]
+                     #   trees_genus_d20 (z)   CAPPED    0.31    [0.82, 0.72, 1.44]
+                     #   trees (z), uncapped d10         0.45    [0.62, 0.54, 1.85]
                      #   small_trees, LEGACY (z)         0.5     [0.57, 0.51, 1.70]
                      #
-                     # e.g. 'diffusion.prior_std_pos=[0.76,0.66,1.62]' with dataset=trees_genus_d15.
+                     # The three trees_genus_d* configs point at the NODE-CAPPED corpora (3,169
+                     # trees, docs/TREE_DATASET_STATS.md §7); `trees` is the uncapped depth-10 set
+                     # the parity_trees_d10_* configs use. Uncapped d15/d20 have no config any
+                     # more -- their old values were 0.34/[0.76,0.66,1.62] and 0.29/[0.84,0.74,1.46].
+                     #
+                     # e.g. 'diffusion.prior_std_pos=[0.74,0.65,1.60]' with dataset=trees_genus_d15.
                      # Trees are far more axially anisotropic than neurons, and less so the deeper
-                     # the cap (ratio 3.4 -> 2.4 -> 2.0 for d10 -> d15 -> d20): a shallow cap keeps
+                     # the cap (ratio 3.4 -> 2.5 -> 2.0 for d10 -> d15 -> d20): a shallow cap keeps
                      # only the long trunk/major-branch jumps, while deeper caps add short, more
-                     # isotropic twig offsets. See docs/TREE_DATASET_STATS.md §4.
+                     # isotropic twig offsets. Capping barely moves that ratio (3.36/2.45/2.01 vs
+                     # 3.41/2.44/1.99 uncapped) but does raise every scale slightly: the dropped
+                     # trees are the bushiest, and their many short twig offsets were pulling the
+                     # per-axis stds down. See docs/TREE_DATASET_STATS.md §4.
 time_dist: "uniform" # "uniform" | "beta"
 beta_a: 2.0
 beta_b: 1.0

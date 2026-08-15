@@ -1,17 +1,22 @@
 name: tree_dataset
-# Genus-labelled biological trees at depth cap 20 -- same 3,368 trees and same official split
-# as config/dataset/trees.yaml (the depth-10 set), retaining the most branching structure of
-# the three: mean 445 nodes/tree vs 84 (5.3x), p95 1,203, max 3,056, realized depth <= 26.
-# Produced by preprocessing/prepare_tree_dataset.py --max-depth 20.
+# Genus-labelled biological trees at depth cap 20, NODE-CAPPED -- the same 3,169 trees and same
+# official split as config/dataset/trees_genus_d10.yaml, retaining the most branching structure of
+# the three: mean 380 nodes/tree vs 78 (4.9x), p95 903, max 1,110, realized depth <= 26. The cap is
+# defined on THIS corpus: the 199 trees above 1110 nodes here are dropped from all three depths so
+# the depth sweep stays sample-matched (2,538 train / 316 val / 315 test). Built by
+# preprocessing/make_capped_tree_corpora.py; see docs/TREE_DATASET_STATS.md §7. The uncapped d20
+# corpus (2,695 train trees, max 3,056 nodes) is no longer wired to a config -- recover it from git
+# history if you need it.
 # NOTE: reduce training.batch_size relative to the d10 configs -- reduction sequences scale
-# with node count and PrecomputedRedDataset materialises all of them up front.
-# See docs/TREE_DATASET_STATS.md.
-data_dir: /scratch/guptau/trees_genus_d20
+# with node count and PrecomputedRedDataset materialises all of them up front. The cap makes this
+# less severe than before (max 1,110 nodes vs 3,056) but the ratio to d10 is still ~4.9x.
+data_dir: /scratch/guptau/trees_genus_d20_capped
 load: True
-pos_scale_factor: 0.29  # = mean of the raw per-axis C_0 offset std [0.243, 0.214, 0.424];
-                        # /0.29 -> [0.84, 0.74, 1.46], mean 1.012, offset-norm |C| mean 1.095.
+pos_scale_factor: 0.31  # = mean of the raw per-axis C_0 offset std [0.2530, 0.2218, 0.4461];
+                        # /0.31 -> [0.82, 0.72, 1.44], mean 0.990, offset-norm |C| mean 1.069.
                         # Measured by tests/analyse_c0_distribution.py --axis z on the
-                        # 2,695-tree train split (N_GRAPHS=400; d20 trees are ~5x d10 cost).
-                        # Pair with diffusion.prior_std_pos=[0.84,0.74,1.46].
+                        # 2,538-tree train split (N_GRAPHS=1000; the cap makes d20 cheap enough
+                        # to use the same N_GRAPHS as d10/d15).
+                        # Pair with diffusion.prior_std_pos=[0.82,0.72,1.44].
 num_classes: 6          # must match model.num_classes (utils.data_loading.TREE_GENUS_NAMES)
 class_names: [Fagus, Quercus, Acer, Carpinus, Fraxinus, Betula]

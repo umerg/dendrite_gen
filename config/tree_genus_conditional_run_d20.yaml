@@ -1,21 +1,23 @@
 defaults:
-  - dataset: trees_genus_d20          # depth-10 genus-labelled trees. Override with dataset=trees_genus_d15
+  - dataset: trees_genus_d20          # depth-20 genus-labelled trees, NODE-CAPPED (3,169 trees)
                             # or dataset=trees_genus_d20 for the deeper corpora.
   - diffusion: flow_v10
   - method: expansion
   - _self_                  # LAST on purpose: lets the diffusion block below override
                             # flow_v10.yaml's neuron-tuned prior_std_pos default.
 
-# prior_std_pos must match the dataset's pos_scale_factor, so it is pinned to the d10 values
+# prior_std_pos must match the dataset's pos_scale_factor, so it is pinned to the d20 values
 # here. WHEN YOU SWITCH DATASETS YOU MUST ALSO SWITCH THIS (table in config/diffusion/flow_v10.yaml
 # and docs/TREE_DATASET_STATS.md §4):
 # (quote the list -- zsh globs bare brackets):
 #   d15: python main.py -cn tree_genus_conditional_run dataset=trees_genus_d15 \
-#          'diffusion.prior_std_pos=[0.76,0.66,1.62]' training.batch_size=128
+#          'diffusion.prior_std_pos=[0.74,0.65,1.60]' training.batch_size=128
 #   d20: python main.py -cn tree_genus_conditional_run dataset=trees_genus_d20 \
-#          'diffusion.prior_std_pos=[0.84,0.74,1.46]' training.batch_size=64
+#          'diffusion.prior_std_pos=[0.82,0.72,1.44]' training.batch_size=64
+# NOTE: dataset=trees_genus_d10/d15/d20 are the NODE-CAPPED corpora (3,169 trees, see
+# docs/TREE_DATASET_STATS.md §7); dataset=trees is the uncapped depth-10 set.
 diffusion:
-  prior_std_pos: [0.84,0.74,1.46]   # trees_genus_d20, pos_scale_factor 0.45 (axis z)
+  prior_std_pos: [0.82,0.72,1.44]   # trees_genus_d20 capped, pos_scale_factor 0.31 (axis z)
 
 reduction:
   type: "depth"

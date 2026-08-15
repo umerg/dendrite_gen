@@ -4,10 +4,16 @@
 # size, set num_steps so both methods see E = 300 epochs, where one epoch = every node
 # position denoised exactly once (the N-1 identity, §2). Report the step ratio.
 #
-#   items/epoch = 57,213 (2,695 trees x 21.23 reduction levels, measured §3)
-#   num_steps   = 300 * 57213 / 128 -> 134100  (E = 300.0)
-#   SemlaFlow at 300 epochs = 238,800 steps  ->  we take 0.56x its updates (disclose this)
-#   ~21,100 nodes/step
+#   items/epoch = 53,690 (2,538 trees x 21.15 reduction levels; NODE-CAPPED
+#                 corpus, items/epoch = sum of per-tree max depth, BUDGET_PARITY §3)
+#   num_steps   = 300 * 53690 / 128 -> 125800  (E = 299.9)
+#                 (was 134100 on the uncapped set; keeping it would give E = 320)
+#   SemlaFlow at 300 epochs: RE-MEASURE. The 238,800 figure below was measured on the
+#   UNCAPPED 2,695-tree set with the old bucket ladder (BUDGET_PARITY_SEMLAFLOW.md §4);
+#   both the corpus and the ladder changed, so the step ratio is stale until re-measured.
+#   (was: SemlaFlow 238,800 steps -> we take 0.56x its updates)
+#   ~17,940 nodes/step (scaled from the uncapped measurement by mean nodes/graph
+#                 379.8/446.6; approximate, unlike the exact items/epoch above)
 #
 # The model block is identical across all 12 parity/depth configs except the two conditioning
 # switches and the per-dataset geometry fields (so2_axis, num_classes, prior_std_pos), so any
@@ -18,7 +24,7 @@
 # 128; config/parity_trees_d10_*.yaml keeps 256 for the neuron-paired comparison.
 
 defaults:
-  - dataset: trees_genus_d20          # genus-labelled trees, depth cap 20
+  - dataset: trees_genus_d20          # genus-labelled trees, depth cap 20, NODE-CAPPED
   - diffusion: flow_v10
   - method: expansion
   - _self_                              # LAST on purpose: pins diffusion.prior_std_pos below
@@ -26,7 +32,7 @@ defaults:
 diffusion:
   # Pinned explicitly so a dataset swap can never silently inherit the wrong prior (the
   # footgun documented in config/diffusion/flow_v10.yaml and docs/TREE_DATASET_STATS.md §4).
-  prior_std_pos: [0.84, 0.74, 1.46]   # trees_genus_d20, pos_scale_factor 0.29 (axis z)
+  prior_std_pos: [0.82, 0.72, 1.44]   # trees_genus_d20 capped, pos_scale_factor 0.31 (axis z)
 
 reduction:
   type: "depth"
@@ -41,11 +47,11 @@ training:
   lr: 1e-4
   optimizer: adam      # adam | adamw (adamw = decoupled weight decay)
   weight_decay: 0.0
-  # ~21k nodes/step -- the heaviest config here. If this OOMs, the E-preserving
-  # fallback is batch_size 64 with num_steps 268200 (still 300 epochs).
-  num_steps: 134100
+  # ~18k nodes/step -- the heaviest config here. If this OOMs, the E-preserving
+  # fallback is batch_size 64 with num_steps 251600 (still 300 epochs).
+  num_steps: 125800
   max_num_workers: 0
-  log_interval: 100    # 1,341 log rows over the run
+  log_interval: 100    # 1,258 log rows over the run
   save_checkpoint: True
   resume: False        # False, True (latest checkpoint), step number, or path to .pt file
   lr_scheduler: "cosine_annealing"
@@ -55,9 +61,13 @@ training:
 
 validation:
   batch_size: 32
-  # ~99 validations over the run. NOTE: a full step_N.pt (model + EMA + Adam state,
-  # ~310 MB at this model size) is written at EVERY validation with no pruning -> ~31 GB.
-  interval: 1350
+  # Every 5 epochs (419.5 steps/epoch) -> 60 validations over the E = 300 run. Pinned in
+  # EPOCHS, not steps, so the cadence is the same currency as the budget and is identical
+  # across every arm; match it on the baseline with an explicit --val_check_epochs 5 (its
+  # code default is 10) or the two sides get different checkpoint-selection resolution.
+  # NOTE: a full step_N.pt (model + EMA + Adam state, ~310 MB at this model size) is written
+  # at EVERY validation with no pruning -> ~19 GB.
+  interval: 2100
   first_step: 0
   per_graph_size: False
   eval_mode: rollout               # rollout | teacher_forced | both

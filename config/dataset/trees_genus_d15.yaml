@@ -1,14 +1,17 @@
 name: tree_dataset
-# Genus-labelled biological trees at depth cap 15 -- same 3,368 trees and same official split
-# as config/dataset/trees.yaml (the depth-10 set), just less of the branching skeleton discarded:
-# mean 224 nodes/tree vs 84 (2.7x), realized depth <= 20. Produced by
-# preprocessing/prepare_tree_dataset.py --max-depth 15. See docs/TREE_DATASET_STATS.md.
-data_dir: /scratch/guptau/trees_genus_d15
+# Genus-labelled biological trees at depth cap 15, NODE-CAPPED -- the same 3,169 trees and same
+# official split as config/dataset/trees_genus_d10.yaml, just less of the branching skeleton
+# discarded: mean 197 nodes/tree vs 78 (2.5x), realized depth <= 20. The 199 trees whose *d20* node
+# count exceeds 1110 are dropped from all three depths so the depth sweep stays sample-matched
+# (2,538 train / 316 val / 315 test). Built by preprocessing/make_capped_tree_corpora.py; see
+# docs/TREE_DATASET_STATS.md §7. The uncapped d15 corpus (2,695 train trees, max 1,456 nodes) is no
+# longer wired to a config -- recover it from git history if you need it.
+data_dir: /scratch/guptau/trees_genus_d15_capped
 load: True
-pos_scale_factor: 0.34  # = mean of the raw per-axis C_0 offset std [0.257, 0.226, 0.550];
-                        # /0.34 -> [0.76, 0.66, 1.62], mean 1.013, offset-norm |C| mean 1.046.
+pos_scale_factor: 0.36  # = mean of the raw per-axis C_0 offset std [0.2678, 0.2348, 0.5765];
+                        # /0.36 -> [0.74, 0.65, 1.60], mean 0.999, offset-norm |C| mean 1.039.
                         # Measured by tests/analyse_c0_distribution.py --axis z on the
-                        # 2,695-tree train split (N_GRAPHS=1000).
-                        # Pair with diffusion.prior_std_pos=[0.76,0.66,1.62].
+                        # 2,538-tree train split (N_GRAPHS=1000).
+                        # Pair with diffusion.prior_std_pos=[0.74,0.65,1.60].
 num_classes: 6          # must match model.num_classes (utils.data_loading.TREE_GENUS_NAMES)
 class_names: [Fagus, Quercus, Acer, Carpinus, Fraxinus, Betula]

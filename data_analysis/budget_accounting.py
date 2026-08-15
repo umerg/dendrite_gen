@@ -36,32 +36,62 @@ from utils.data_loading import load_swc_graph, nx_graph_to_adj_pos  # noqa: E402
 # SemlaFlow constants (semlaflow/scriptutil.py::get_n_bond_types, uniform-sample strategy).
 N_BOND_TYPES = 5
 
-# Per-corpus defaults. bucket_limits mirror what SemlaFlow needs in
-# scriptutil.py; they must cover the corpus max (semlaflow raises otherwise).
+# Per-corpus settings. `buckets` and `batch_cost` are NOT ours to choose -- they mirror the
+# bucket_limits registered in semlaflow/scriptutil.py (DATASET_CONFIGS) and the --batch_cost that
+# semla-flow/RUN.md 0/3a prescribes for each corpus. `batch_size` is *our* training.batch_size for
+# the config that trains on it. Keep these in sync with RUN.md; see
+# docs/BUDGET_PARITY_SEMLAFLOW.md 4/7.3/7.4.
+#
+# NOTE the live SemlaFlow sampler is stock (drop_last=True, no dead-bucket clamp), so the numbers
+# in docs 4 come from `--no-clamp --stock-drop-last`; this script's defaults are the *patched*
+# sampler.
+_SWC_BUCKET_PREFIX = [24, 40, 56, 72, 96, 128, 160, 200]
+
 PRESETS = {
     "neurons": dict(
         root="/Users/umer/Documents/neurons_conditional_full",
-        buckets=[24, 40, 56, 72, 96, 128, 160, 200, 256, 320, 400, 544],
+        buckets=[40, 56, 72, 96, 128, 160, 200, 256, 537],
         batch_cost=1024,
         batch_size=256,
     ),
     "trees_d10": dict(
         root="/Users/umer/Documents/trees_genus_d10",
-        buckets=[24, 40, 56, 72, 96, 128, 160, 200, 256, 320, 384],
+        buckets=[96, 128, 160, 200, 256, 320, 384],
         batch_cost=1024,
         batch_size=256,
     ),
+    "trees_d10_capped": dict(
+        root="/Users/umer/Documents/trees_genus_d10_capped",
+        buckets=[96, 128, 160, 200, 240, 268],
+        batch_cost=1024,
+        batch_size=128,
+    ),
+    "trees_d15_capped": dict(
+        root="/Users/umer/Documents/trees_genus_d15_capped",
+        buckets=[128, 200, 264, 336, 416, 512, 592, 666],
+        batch_cost=2048,
+        batch_size=128,
+    ),
+    "trees_d20_capped": dict(
+        root="/Users/umer/Documents/trees_genus_d20_capped",
+        buckets=[160, 200, 264, 336, 424, 528, 648, 784, 928, 1110],
+        batch_cost=16384,
+        batch_size=128,
+    ),
+    # Superseded by the capped corpora (RUN.md 0a). They keep the fine-grained prefix ladder and
+    # are lossy at every batch_cost (2.2-22.3% of the train split never sampled) -- kept so old
+    # runs stay reproducible.
     "trees_d15": dict(
         root="/Users/umer/Documents/trees_genus_d15",
-        buckets=[32, 48, 72, 104, 144, 200, 280, 384, 528, 728, 1000, 1472],
-        batch_cost=4096,
+        buckets=_SWC_BUCKET_PREFIX + [264, 336, 416, 512, 640, 768, 1024, 1280, 1536],
+        batch_cost=16384,
         batch_size=128,
     ),
     "trees_d20": dict(
         root="/Users/umer/Documents/trees_genus_d20",
-        buckets=[48, 72, 104, 152, 216, 304, 424, 592, 824, 1152, 1600, 2216, 3056],
-        batch_cost=8192,
-        batch_size=64,
+        buckets=_SWC_BUCKET_PREFIX + [264, 336, 424, 528, 648, 784, 1024, 1408, 1792, 2304, 3072],
+        batch_cost=16384,
+        batch_size=128,
     ),
 }
 

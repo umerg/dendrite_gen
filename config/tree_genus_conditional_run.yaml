@@ -1,5 +1,5 @@
 defaults:
-  - dataset: trees          # depth-10 genus-labelled trees. Override with dataset=trees_genus_d15
+  - dataset: trees          # UNCAPPED depth-10 genus-labelled trees. Override with dataset=trees_genus_d15
                             # or dataset=trees_genus_d20 for the deeper corpora.
   - diffusion: flow_v10
   - method: expansion
@@ -11,9 +11,11 @@ defaults:
 # and docs/TREE_DATASET_STATS.md §4):
 # (quote the list -- zsh globs bare brackets):
 #   d15: python main.py -cn tree_genus_conditional_run dataset=trees_genus_d15 \
-#          'diffusion.prior_std_pos=[0.76,0.66,1.62]' training.batch_size=128
+#          'diffusion.prior_std_pos=[0.74,0.65,1.60]' training.batch_size=128
 #   d20: python main.py -cn tree_genus_conditional_run dataset=trees_genus_d20 \
-#          'diffusion.prior_std_pos=[0.84,0.74,1.46]' training.batch_size=64
+#          'diffusion.prior_std_pos=[0.82,0.72,1.44]' training.batch_size=64
+# NOTE: dataset=trees_genus_d10/d15/d20 are the NODE-CAPPED corpora (3,169 trees, see
+# docs/TREE_DATASET_STATS.md §7); dataset=trees is the uncapped depth-10 set.
 diffusion:
   prior_std_pos: [0.62, 0.54, 1.85]   # trees_genus_d10, pos_scale_factor 0.45 (axis z)
 

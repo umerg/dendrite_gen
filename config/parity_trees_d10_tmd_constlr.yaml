@@ -64,9 +64,13 @@ training:
 
 validation:
   batch_size: 64
-  # ~97 validations over the run. NOTE: a full step_N.pt (model + EMA + Adam state,
-  # ~310 MB at this model size) is written at EVERY validation with no pruning -> ~30 GB.
-  interval: 350
+  # Every 5 epochs (113.6 steps/epoch) -> 60 validations over the E = 300 run. Pinned in
+  # EPOCHS, not steps, so the cadence is the same currency as the budget and is identical
+  # across every arm; match it on the baseline with an explicit --val_check_epochs 5 (its
+  # code default is 10) or the two sides get different checkpoint-selection resolution.
+  # NOTE: a full step_N.pt (model + EMA + Adam state, ~310 MB at this model size) is written
+  # at EVERY validation with no pruning -> ~19 GB.
+  interval: 570
   first_step: 0
   per_graph_size: False
   eval_mode: rollout               # rollout | teacher_forced | both

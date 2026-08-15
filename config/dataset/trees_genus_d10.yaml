@@ -1,0 +1,18 @@
+name: tree_dataset
+# Genus-labelled biological trees at depth cap 10, NODE-CAPPED. The 199 trees whose *d20* node
+# count exceeds 1110 are dropped from all three depths, so d10/d15/d20 hold the same 3,169 trees
+# (2,538 train / 316 val / 315 test) and a cross-depth comparison is a depth ablation rather than a
+# depth-plus-composition one. Nothing in d10 itself exceeds any cap -- it loses trees only to stay
+# matched. Built by preprocessing/make_capped_tree_corpora.py from the uncapped corpora, which are
+# left untouched; see docs/TREE_DATASET_STATS.md §7.
+# The UNCAPPED depth-10 set remains at config/dataset/trees.yaml (2,695 train trees) and is what
+# the parity_trees_d10_* configs use. Deeper capped variants: trees_genus_d15 / trees_genus_d20.
+data_dir: /scratch/guptau/trees_genus_d10_capped
+load: True
+pos_scale_factor: 0.46  # = mean of the raw per-axis C_0 offset std [0.2835, 0.2526, 0.8478];
+                        # /0.46 -> [0.62, 0.55, 1.84], mean 1.003, offset-norm |C| mean 1.015.
+                        # Measured by tests/analyse_c0_distribution.py --axis z on the
+                        # 2,538-tree train split (N_GRAPHS=1000).
+                        # Pair with diffusion.prior_std_pos=[0.62,0.55,1.84].
+num_classes: 6          # must match model.num_classes (utils.data_loading.TREE_GENUS_NAMES)
+class_names: [Fagus, Quercus, Acer, Carpinus, Fraxinus, Betula]
