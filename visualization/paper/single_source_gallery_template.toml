@@ -1,0 +1,111 @@
+# Single-source, free-layout tree gallery template.
+#
+# Put this file anywhere convenient (keeping a renamed copy beside the paper
+# scripts is usually simplest), then run from the outer generating-trees root:
+#
+#   python -m dendrite_gen.visualization.paper.fig1_unconditional \
+#     --config dendrite_gen/visualization/paper/my_gallery.toml \
+#     --show-guides
+#
+# Remove --show-guides for the final render. Paths below are resolved relative
+# to the outer generating-trees root, not relative to this TOML file.
+
+[figure]
+size_inches = [7.2, 2.25]
+axes_rect = [0.01, 0.01, 0.98, 0.98]
+x_limits = [0.0, 1800.0]
+y_limits = [0.0, 520.0]
+
+# xy, xz, or yz.
+projection = "xy"
+linewidth = 0.72
+
+# Shorter segments make the front-to-back green gradient appear smoother.
+depth_segment_length = 1.0
+# "figure" shares one depth scale across all five trees; "tree" normalizes
+# each tree independently and usually gives stronger contrast per sample.
+depth_normalization = "figure"
+depth_percentile = 80.0
+depth_scale = "asinh"
+depth_linear_width = 0.25
+
+[output]
+# PNG and PDF are written under --out-dir with this filename stem.
+stem = "single_source_tree_gallery"
+
+# Use this form when each tree is an individual SWC file. Generated samples are
+# fine: "swc_directory" describes the storage format, not whether data are GT.
+[sources.samples]
+kind = "swc_directory"
+path = "data2/trees_test_set_generations/parity_neurons_uncond"
+
+# For a prediction pickle, replace the [sources.samples] block above with:
+#
+# [sources.samples]
+# kind = "prediction_pickle"
+# path = "data2/path/to/predictions.pkl"
+# ema_key = "ema_1"  # Remove this line if the pickle has no EMA variants.
+
+# The layout engine uses a column as an anchor even though this gallery has no
+# visible column heading. Samples below are positioned relative to this origin.
+[[columns]]
+key = "gallery"
+label = ""
+origin = [0.0, 500.0]
+width = 1800.0
+color = "text"
+
+[scale_bar]
+show = true
+length_um = 100.0
+# Scale-bar offsets are measured rightward and downward from the top-left of
+# the complete figure, just like sample offsets from their column origin.
+offset = [40.0, 460.0]
+label_offset = 12.0
+linewidth = 1.4
+fontsize = 6.5
+
+# Five examples in one horizontal row. Duplicate or remove [[samples]] blocks
+# as needed. `index` selects a tree from the source; `offset = [x, y]` moves its
+# center right/down from the column origin; rotation is counter-clockwise.
+# Keep every scale equal if the shared physical scale bar is enabled.
+
+[[samples]]
+column = "gallery"
+source = "samples"
+index = 0
+offset = [180.0, 245.0]
+rotation_deg = -8.0
+scale = 0.62
+
+[[samples]]
+column = "gallery"
+source = "samples"
+index = 1
+offset = [540.0, 245.0]
+rotation_deg = 6.0
+scale = 0.62
+
+[[samples]]
+column = "gallery"
+source = "samples"
+index = 2
+offset = [900.0, 245.0]
+rotation_deg = -4.0
+scale = 0.62
+
+[[samples]]
+column = "gallery"
+source = "samples"
+index = 3
+offset = [1260.0, 245.0]
+rotation_deg = 8.0
+scale = 0.62
+
+[[samples]]
+column = "gallery"
+source = "samples"
+index = 4
+offset = [1620.0, 245.0]
+rotation_deg = -6.0
+scale = 0.62
