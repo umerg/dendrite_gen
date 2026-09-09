@@ -1,0 +1,162 @@
+# SIZE-SCALING ARM -- neurons, UNCONDITIONAL, width/4 (F = 64)
+#
+# One of three points on a capacity ladder that varies ONLY the residual stream width.
+# Forked from parity_neurons_uncond.yaml, which is the F = 256 point of the same ladder:
+#
+#   F = 256  ->  21,642,620 params   (parity_neurons_uncond)
+#   F = 128  ->   5,694,204 params   (size_neurons_uncond_f128, 0.26x)
+#   F =  64  ->   1,566,140 params   (size_neurons_uncond_f64,  0.072x)
+#
+# This file is the F = 64 point.
+#
+# Depth stays at 12 ON PURPOSE. `global_linear_attn_every: 2` puts an attention block
+# wherever (i+1) % 2 == 0 (egnn_so2.py:740), so scaling depth would also scale the number
+# of global mixing points (12 layers -> 6 blocks, 6 -> 3, 3 -> 1) and confound capacity with
+# the model's only non-local pathway -- the pathway abl_c_wide16.yaml already blames for the
+# residual weakness on GLOBAL extent metrics. Width holds hop count, attention-block count
+# and the shape of the computation graph fixed, and buys more range: 13.8x across two runs
+# against 4.4x for a depth ladder.
+#
+# Five model fields move together because all five are defined in terms of feats_dim:
+#   feats_dim, m_dim, offset_head_hidden,
+#   edge_mlp_hidden = 2 * edge_input_dim = 2 * (2F + 4 + 5),
+#   node_mlp_hidden = 2F
+# Leaving the last two at their F = 256 values (1042 / 512) would narrow the stream while
+# keeping fat MLPs -- that is a shape change, not a size change, and it breaks the ladder.
+#
+# NOT scaled: global_linear_attn_heads x global_linear_attn_dim_head = 4 x 16 = 64. The
+# attention inner dim stays 64 as the stream narrows, so the squeeze ratio goes 4.0x (F=256)
+# -> 2.0x (F=128) -> 1.0x (F=64) and the smaller arms keep proportionally MORE global
+# capacity. That biases AGAINST a "smaller is enough" conclusion rather than for it, so it
+# is a footnote to disclose, not a thing to fix.
+#
+# The training budget is untouched (218,500 steps = E 300, lr 1e-4, batch 256, same cosine
+# schedule and validation cadence): "smaller" here means fewer parameters, never less
+# training. Everything outside the model block is byte-identical to parity_neurons_uncond
+# except validation.enable_floor (see the note there), so any difference BETWEEN arms is
+# attributable to width alone.
+
+defaults:
+  - dataset: neurons_conditional_full   # soma-rooted, binarized, class-labelled; MAX_CHILDREN=23, no root-degree cap
+  - diffusion: flow_v10
+  - method: expansion
+  - _self_                              # LAST on purpose: pins diffusion.prior_std_pos below
+
+diffusion:
+  # Pinned explicitly so a dataset swap can never silently inherit the wrong prior (the
+  # footgun documented in config/diffusion/flow_v10.yaml and docs/TREE_DATASET_STATS.md §4).
+  prior_std_pos: [0.74, 0.61, 0.83]   # neurons_conditional_full, pos_scale_factor 45.1 (axis y)
+
+reduction:
+  type: "depth"
+  mode: "deterministic"
+  cherry_p: 1.0
+  ensure_progress: True
+  root: 0
+  contract_root: False
+
+training:
+  batch_size: 256
+  lr: 1e-4
+  optimizer: adam      # adam | adamw (adamw = decoupled weight decay)
+  weight_decay: 0.0
+  num_steps: 218500
+  max_num_workers: 0
+  log_interval: 100    # 2,185 log rows over the run
+  save_checkpoint: True
+  resume: False        # False, True (latest checkpoint), step number, or path to .pt file
+  lr_scheduler: "cosine_annealing"
+  scheduler_T_max: ${training.num_steps}
+  scheduler_eta_min: 1e-6
+  grad_clip_norm: 1.0
+
+validation:
+  batch_size: 64
+  # Every 5 epochs (728.3 steps/epoch) -> 60 validations over the E = 300 run. Pinned in
+  # EPOCHS, not steps, so the cadence is the same currency as the budget and is identical
+  # across every arm; match it on the baseline with an explicit --val_check_epochs 5 (its
+  # code default is 10) or the two sides get different checkpoint-selection resolution.
+  # NOTE: a full step_N.pt (model + EMA + Adam state, ~310 MB at this model size) is written
+  # at EVERY validation with no pruning -> ~19 GB.
+  interval: 3640
+  first_step: 0
+  per_graph_size: False
+  eval_mode: rollout               # rollout | teacher_forced | both
+  tf_max_graphs: 64
+  tf_min_depth: 0
+  enable_plots: True
+  enable_dist_metrics: True
+  ged_enabled: False
+  ged_timeout: 5.0
+  plot_angles: [[20, 30], [20, 120], [20, 210]]
+  enable_ks: False
+  enable_morphometrics: True
+  enable_light_joint: True
+  # ON for the size ladder (the parity arms have it off). The floor is a property of the
+  # DATA -- a size-matched train subset scored against the eval split, rng seed 0 -- so it
+  # is identical across all three arms and gives the degradation curve a fixed reference
+  # band. It is computed once per eval set and cached, and it only ADDS keys (floor/*,
+  # headline_excess_mmd_morpho) without perturbing any existing metric or the generation.
+  enable_floor: True
+  tmd_eval_filtration: radial_root
+  tmd_eval_bins: 16
+  tmd_pca_ncomp: 64
+  dc_nearest_k: 5
+  # Reporting tier for the distribution metrics: headline | standard | full.
+  # PURELY a wandb filter -- every metric is still computed and still written to
+  # validation/step_*.pkl, so switching tiers is free and changes no number.
+  metric_report_level: standard
+  # ZCA-whiten the standardized morpho vector before the MMD/Density/Coverage kernel.
+  # Off by default; the pruned MORPHO_KEYS already removes most correlation distortion.
+  morpho_whiten: False
+  # No class conditioning here; per_cell_class is gated on class_hidden_dim>0 in the trainer
+  # anyway, but set False so the intent is explicit.
+  per_cell_class: False
+  per_cell_class_min_count: 20
+  enable_pairwise_metrics: False   # matched TMD-conditioned pairwise block: off (not a TMD run)
+
+testing: False
+
+model:
+  name: egnn
+  num_layers: 12
+  feats_dim: 64
+  m_dim: 64                    # tracks feats_dim (base ratio m_dim/F = 1.0)
+  # --- conditioning switches (the ONLY model difference between the arms) ---
+  tmd_hidden_dim: 0            # 0 = TMD conditioning OFF
+  class_hidden_dim: 0          # 0 = cell-type conditioning OFF
+  # --------------------------------------------------------------------------
+  tmd_filtrations: [path, radial_root]   # inert while tmd_hidden_dim == 0
+  tmd_bins: 16
+  num_classes: 7               # 7 kept pyramidal types (utils.data_loading.CELL_CLASS_NAMES)
+  dropout: 0.1
+  norm_feats: True
+  global_linear_attn_every: 2
+  global_linear_attn_heads: 4
+  global_linear_attn_dim_head: 16
+  num_global_tokens: 8
+  offset_head_hidden: 64
+  # Same legacy 2x expansion as the F = 256 arm, re-derived for this width. rbf_k=0.
+  # WARNING: changing these changes state_dict shapes -> checkpoints stop loading.
+  edge_mlp_hidden: 274    # = 2*edge_input_dim = 2*(2*64 + 4 + 5)
+  node_mlp_hidden: 128    # = 2*feats_dim
+  use_global_fallback_frames: False
+  so2_axis: [0., 1., 0.]        # y-axis for neurons
+  root_child_order: axial_extent  # sampling must use the same mode the checkpoint trained in
+  rbf_k: 0
+  rbf_gamma: 10.0
+  rbf_rho_max: 4.0
+  rbf_du_max: 4.0
+
+ema:
+  betas: [0.999]
+  gamma: 1.0
+  power: 1.0
+
+name: size_neurons_uncond_f64
+debugging: False
+debugging_max_batches: 50
+debugging_dir: "neurons_debug"
+
+wandb:
+  logging: True
