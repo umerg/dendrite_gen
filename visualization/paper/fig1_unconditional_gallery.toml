@@ -1,0 +1,140 @@
+# Free-layout Figure 1 experiment. Paths are relative to the outer project root.
+
+[figure]
+size_inches = [7.2, 3.2]
+axes_rect = [0.01, 0.01, 0.98, 0.98]
+x_limits = [0.0, 1800.0]
+y_limits = [0.0, 800.0]
+projection = "xy"
+linewidth = 0.72
+depth_segment_length = 1.0
+depth_normalization = "figure"
+depth_percentile = 80.0
+depth_scale = "asinh"
+depth_linear_width = 0.25
+show_guides = false
+
+[output]
+stem = "fig1_unconditional_gallery_semlaflow_epoch209"
+
+# Unpaired held-out reference trees and unconditional generations. The three
+# pools all contain 1,167 trees; indices select examples independently within
+# each pool and do not imply correspondence between columns.
+[sources.reference]
+kind = "swc_directory"
+path = "data2/neurons_conditional/test"
+
+[sources.semlaflow]
+kind = "prediction_pickle"
+path = "data2/epoch209/neuron_samples_sanitised.pkl"
+ema_key = "ema_1"
+
+[sources.ours]
+kind = "swc_directory"
+path = "data2/trees_test_set_generations/parity_neurons_uncond"
+
+[[columns]]
+key = "reference"
+label = "Reference data"
+origin = [0.0, 760.0]
+width = 600.0
+color = "reference"
+
+[[columns]]
+key = "semlaflow"
+label = "SemlaFlow"
+origin = [600.0, 760.0]
+width = 600.0
+color = "semlaflow"
+
+[[columns]]
+key = "ours"
+label = "Ours"
+origin = [1200.0, 760.0]
+width = 600.0
+color = "ours"
+
+[scale_bar]
+show = true
+length_um = 100.0
+offset = [40.0, 700.0]
+label_offset = 12.0
+linewidth = 1.4
+fontsize = 6.5
+
+# Each `offset` is measured from its column's top-left `origin`: the first value
+# moves right and the second moves down. It locates the center of the rotated
+# tree's projected bounding box. Positive rotation is counter-clockwise. Keep
+# scale equal across samples if the shared physical scale bar is shown.
+
+[[samples]]
+column = "reference"
+source = "reference"
+index = 626
+offset = [180.0, 190.0]
+rotation_deg = -10.0
+scale = 0.75
+
+[[samples]]
+column = "reference"
+source = "reference"
+index = 675
+offset = [405.0, 250.0]
+rotation_deg = 14.0
+scale = 0.75
+
+[[samples]]
+column = "reference"
+source = "reference"
+index = 200
+offset = [220.0, 520.0]
+rotation_deg = -4.0
+scale = 0.75
+
+[[samples]]
+column = "semlaflow"
+source = "semlaflow"
+index = 622
+offset = [160.0, 165.0]
+rotation_deg = 11.0
+scale = 0.75
+
+[[samples]]
+column = "semlaflow"
+source = "semlaflow"
+index = 520
+offset = [400.0, 300.0]
+rotation_deg = -13.0
+scale = 0.75
+
+[[samples]]
+column = "semlaflow"
+source = "semlaflow"
+index = 552
+offset = [190.0, 500.0]
+rotation_deg = 7.0
+scale = 0.75
+
+[[samples]]
+column = "ours"
+source = "ours"
+index = 889
+offset = [180.0, 190.0]
+rotation_deg = -12.0
+scale = 0.75
+
+[[samples]]
+column = "ours"
+source = "ours"
+index = 187
+offset = [400.0, 300.0]
+rotation_deg = 12.0
+scale = 0.75
+
+[[samples]]
+column = "ours"
+source = "ours"
+index = 635
+offset = [170.0, 500.0]
+rotation_deg = -6.0
+scale = 0.75

@@ -4,8 +4,9 @@ The current `.smol` files we have explored are:
   - a top-level pickle containing a list of per-sample byte blobs
   - each blob unpickles to a dict with at least `coords` and `bond_indices`
 
-This script turns those samples into one rooted NetworkX tree per entry and
-writes a pickle payload that the visualization runners can already consume.
+By default, raw graphs are passed through SemlaFlow's canonical validation
+sanitiser before being written. The former visualization-only conversion is
+available explicitly as ``--preprocessing legacy`` for reproducibility.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import argparse
 from collections import Counter
 from pathlib import Path
 import pickle
+import sys
 from typing import Any
 
 import networkx as nx
@@ -23,6 +25,9 @@ import numpy as np
 ROOT_MODE_CHOICES = ("degree", "origin", "centroid", "first")
 COMPONENT_MODE_CHOICES = ("largest", "root")
 OUT_FORMAT_CHOICES = ("validation", "pred_graphs", "graph-list")
+PREPROCESSING_CHOICES = ("semlaflow", "legacy")
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_SEMLAFLOW_REPO = PROJECT_ROOT / "semla-flow-adapted"
 
 
 def _to_numpy(value: Any) -> np.ndarray:
@@ -293,24 +298,127 @@ def _convert_one_sample(
     return converted, stats
 
 
-def _format_summary(stats: Counter) -> list[str]:
+def _load_semlaflow_sanitiser(repo_path: Path):
+    """Load the canonical sanitiser from the sibling SemlaFlow checkout."""
+    repo_path = repo_path.expanduser().resolve()
+    sanitise_path = repo_path / "semlaflow" / "validation" / "sanitise.py"
+    if not sanitise_path.is_file():
+        raise FileNotFoundError(
+            "Could not find SemlaFlow's canonical sanitiser at "
+            f"{sanitise_path}. Pass --semlaflow-repo if the checkout moved."
+        )
+
+    repo_string = str(repo_path)
+    if repo_string not in sys.path:
+        sys.path.insert(0, repo_string)
+
+    try:
+        from semlaflow.validation.convert import choose_root
+        from semlaflow.validation import sanitise as sanitise_module
+    except ImportError as error:
+        raise ImportError(
+            "Failed to import SemlaFlow's canonical sanitiser from "
+            f"{repo_path}: {error}"
+        ) from error
+    imported_path = Path(sanitise_module.__file__).resolve()
+    if imported_path != sanitise_path.resolve():
+        raise ImportError(
+            "Imported a different SemlaFlow checkout than requested: "
+            f"{imported_path} (requested {sanitise_path.resolve()}). Start a fresh "
+            "Python process or remove the conflicting package from sys.path."
+        )
+    return (
+        choose_root,
+        sanitise_module.graph_health,
+        sanitise_module.sanitise_graph,
+        sanitise_path,
+    )
+
+
+def _convert_one_sample_semlaflow(
+    sample: dict[str, Any],
+    *,
+    sample_index: int,
+    choose_root,
+    sanitise_graph,
+    sanitise_path: Path,
+) -> tuple[nx.Graph, nx.Graph, Counter]:
+    """Convert one raw sample with SemlaFlow's canonical validation policy."""
+    raw_graph, positions, meta = _graph_from_sample(sample, sample_index=sample_index)
+    stats = Counter()
+    stats["raw_samples"] += 1
+    stats["raw_nodes_total"] += raw_graph.number_of_nodes()
+    stats["raw_edges_total"] += raw_graph.number_of_edges()
+    stats["raw_connected" if meta["raw_connected"] else "raw_disconnected"] += 1
+    stats["raw_tree" if meta["raw_tree"] else "raw_not_tree"] += 1
+
+    if raw_graph.number_of_nodes():
+        coords = np.stack([positions[node] for node in sorted(raw_graph.nodes)], axis=0)
+        raw_graph.graph["root"] = int(choose_root(raw_graph, coords))
+    else:
+        raw_graph.graph["root"] = 0
+
+    converted = sanitise_graph(raw_graph)
+    converted.graph.update(
+        {
+            "source_format": "smol",
+            "source_sample_index": int(sample_index),
+            "source_sample_id": sample.get("id"),
+            "source_device": sample.get("device"),
+            "conversion_preprocessing": "semlaflow",
+            "conversion_sanitiser": str(sanitise_path.resolve()),
+            "conversion_raw_root": int(raw_graph.graph["root"]),
+            "conversion_raw_connected": meta["raw_connected"],
+            "conversion_raw_tree": meta["raw_tree"],
+            "conversion_raw_node_count": raw_graph.number_of_nodes(),
+            "conversion_raw_edge_count": raw_graph.number_of_edges(),
+        }
+    )
+
+    stats["emitted_graphs"] += 1
+    stats["emitted_nodes_total"] += converted.number_of_nodes()
+    stats["emitted_edges_total"] += converted.number_of_edges()
+    removed_nodes = raw_graph.number_of_nodes() - converted.number_of_nodes()
+    stats["removed_nodes_total"] += removed_nodes
+    if removed_nodes or raw_graph.number_of_edges() != converted.number_of_edges():
+        stats["sanitised_changed_graphs"] += 1
+    return converted, raw_graph, stats
+
+
+def _format_summary(
+    stats: Counter,
+    *,
+    preprocessing: str = "legacy",
+    health: dict[str, float] | None = None,
+) -> list[str]:
     raw_samples = stats.get("raw_samples", 0)
     emitted = stats.get("emitted_graphs", 0)
     avg_emitted_nodes = (
         stats.get("emitted_nodes_total", 0) / emitted if emitted else 0.0
     )
     avg_raw_nodes = stats.get("raw_nodes_total", 0) / raw_samples if raw_samples else 0.0
-    return [
+    lines = [
+        f"preprocessing: {preprocessing}",
         f"raw samples: {raw_samples}",
         f"emitted graphs: {emitted}",
         f"raw connected: {stats.get('raw_connected', 0)}",
         f"raw disconnected: {stats.get('raw_disconnected', 0)}",
         f"raw trees: {stats.get('raw_tree', 0)}",
         f"raw non-trees: {stats.get('raw_not_tree', 0)}",
-        f"treeified samples: {stats.get('treeified_samples', 0)}",
         f"avg raw nodes: {avg_raw_nodes:.1f}",
         f"avg emitted nodes: {avg_emitted_nodes:.1f}",
     ]
+    if preprocessing == "legacy":
+        lines.insert(7, f"treeified samples: {stats.get('treeified_samples', 0)}")
+    else:
+        lines.insert(
+            7,
+            f"graphs changed by sanitisation: {stats.get('sanitised_changed_graphs', 0)}",
+        )
+        lines.insert(8, f"nodes removed: {stats.get('removed_nodes_total', 0)}")
+        if health:
+            lines.extend(f"raw {key}: {value:.6f}" for key, value in health.items())
+    return lines
 
 
 def build_output_payload(
@@ -320,6 +428,9 @@ def build_output_payload(
     ema_key: str,
     smol_path: Path,
     stats: Counter,
+    preprocessing: str = "legacy",
+    sanitiser_path: Path | None = None,
+    health: dict[str, float] | None = None,
 ) -> Any:
     summary = {
         "source_path": str(smol_path),
@@ -330,6 +441,11 @@ def build_output_payload(
         "raw_tree": int(stats.get("raw_tree", 0)),
         "raw_not_tree": int(stats.get("raw_not_tree", 0)),
         "treeified_samples": int(stats.get("treeified_samples", 0)),
+        "preprocessing": preprocessing,
+        "sanitiser_path": str(sanitiser_path.resolve()) if sanitiser_path else None,
+        "sanitised_changed_graphs": int(stats.get("sanitised_changed_graphs", 0)),
+        "removed_nodes_total": int(stats.get("removed_nodes_total", 0)),
+        "raw_graph_health": health,
     }
 
     if out_format == "graph-list":
@@ -386,11 +502,26 @@ def parse_args() -> argparse.Namespace:
         help="EMA key used when `--out-format validation` is selected.",
     )
     parser.add_argument(
+        "--preprocessing",
+        choices=PREPROCESSING_CHOICES,
+        default="semlaflow",
+        help=(
+            "Graph preprocessing policy. `semlaflow` uses the canonical validation "
+            "sanitiser; `legacy` reproduces the old visualization-only conversion."
+        ),
+    )
+    parser.add_argument(
+        "--semlaflow-repo",
+        type=Path,
+        default=DEFAULT_SEMLAFLOW_REPO,
+        help="Checkout containing semlaflow/validation/sanitise.py.",
+    )
+    parser.add_argument(
         "--component-mode",
         choices=COMPONENT_MODE_CHOICES,
         default="largest",
         help=(
-            "How to collapse disconnected samples to one graph. "
+            "Legacy preprocessing only: how to collapse disconnected samples. "
             "`largest` keeps the largest connected component; `root` keeps the component "
             "containing the chosen root candidate."
         ),
@@ -400,7 +531,7 @@ def parse_args() -> argparse.Namespace:
         choices=ROOT_MODE_CHOICES,
         default="degree",
         help=(
-            "How to choose a root before recentering. "
+            "Legacy preprocessing only: how to choose a root before recentering. "
             "`degree` picks the highest-degree node, `origin` picks the node closest to (0,0,0), "
             "`centroid` picks the node closest to the geometric centroid, and `first` picks the "
             "lowest node id."
@@ -434,9 +565,16 @@ def main() -> None:
         )
 
     graphs: list[nx.Graph] = []
+    raw_graphs: list[nx.Graph] = []
     stats: Counter = Counter()
     limit = args.limit if args.limit is None or args.limit >= 0 else None
     sample_items = payload if limit is None else payload[:limit]
+
+    choose_root = graph_health = sanitise_graph = sanitise_path = None
+    if args.preprocessing == "semlaflow":
+        choose_root, graph_health, sanitise_graph, sanitise_path = (
+            _load_semlaflow_sanitiser(args.semlaflow_repo)
+        )
 
     for sample_index, item in enumerate(sample_items):
         sample = pickle.loads(item) if isinstance(item, (bytes, bytearray, memoryview)) else item
@@ -448,14 +586,26 @@ def main() -> None:
             raise KeyError(
                 f"Sample {sample_index} is missing required keys `coords` and/or `bond_indices`."
             )
-        graph, sample_stats = _convert_one_sample(
-            sample,
-            sample_index=sample_index,
-            component_mode=args.component_mode,
-            root_mode=args.root_mode,
-        )
+        if args.preprocessing == "semlaflow":
+            graph, raw_graph, sample_stats = _convert_one_sample_semlaflow(
+                sample,
+                sample_index=sample_index,
+                choose_root=choose_root,
+                sanitise_graph=sanitise_graph,
+                sanitise_path=sanitise_path,
+            )
+            raw_graphs.append(raw_graph)
+        else:
+            graph, sample_stats = _convert_one_sample(
+                sample,
+                sample_index=sample_index,
+                component_mode=args.component_mode,
+                root_mode=args.root_mode,
+            )
         graphs.append(graph)
         stats.update(sample_stats)
+
+    health = graph_health(raw_graphs) if graph_health is not None else None
 
     out_pkl.parent.mkdir(parents=True, exist_ok=True)
     output_payload = build_output_payload(
@@ -464,12 +614,17 @@ def main() -> None:
         ema_key=args.ema_key,
         smol_path=smol_path,
         stats=stats,
+        preprocessing=args.preprocessing,
+        sanitiser_path=sanitise_path,
+        health=health,
     )
     with out_pkl.open("wb") as handle:
         pickle.dump(output_payload, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
     print(f"Wrote {out_pkl}")
-    for line in _format_summary(stats):
+    for line in _format_summary(
+        stats, preprocessing=args.preprocessing, health=health
+    ):
         print(f"  - {line}")
 
 

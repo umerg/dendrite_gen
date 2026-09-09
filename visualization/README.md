@@ -21,10 +21,102 @@ The visualization runners assume:
 - optional EMA selection can be provided with `--ema-key`
 - GT and predicted graphs are paired by index order
 
+## Paper Figure Drafts
+
+The paper-specific scripts are intentionally small, fixed-layout entry points
+for fast iteration. They reuse the graph loaders and canonical metric
+implementations without depending on the older all-purpose plotting runners.
+The shared semantic palette is defined in `visualization/paper/colors.py`:
+method base/light/dark colors, the qualitative tree-depth gradient, and neutral
+supporting colors all live there. Figure 1's TOML accepts those semantic names
+(for example `semlaflow-dark`) as well as literal Matplotlib colors.
+
+```bash
+python -m dendrite_gen.visualization.paper.fig1_unconditional
+python -m dendrite_gen.visualization.paper.fig2_unconditional
+python -m dendrite_gen.visualization.paper.fig3_conditional
+```
+
+They overwrite PNG and PDF drafts in
+`dendrite_gen/outputs/paper_figures/`. These previews are not copied into
+`iclr27-writeup/Figures/` automatically; copy the selected final files there
+explicitly when updating the LaTeX writeup.
+
+- `fig1_unconditional_gallery.{png,pdf}` is a free-layout, configurable
+  three-column gallery. `fig1_unconditional.py` is its primary entry point;
+  edit the adjacent
+  `fig1_unconditional_gallery.toml` to select, position, and rotate samples;
+  pass `--show-guides` while arranging them.
+- `fig2_unconditional_distributions.{png,pdf}` contains six population-level
+  density comparisons. Node/branch observations are weighted so every tree
+  contributes equal total mass.
+- `fig3_conditional_placeholder.{png,pdf}` contains two target/generated
+  pairs, their persistence diagrams, and two within-pair distribution
+  comparisons. For an expanded appendix version, increase `--num-examples`;
+  the script then uses a separate appendix output name automatically:
+
+  ```bash
+  python -m dendrite_gen.visualization.paper.fig3_conditional \
+    --num-examples 3
+  ```
+
+  Use `--output-stem` only when you want a different filename.
+
+The Figure 1 TOML currently uses the 1,167-tree neuronal test populations:
+`neurons_conditional/test`, the canonically sanitised SemlaFlow `epoch209`
+pickle, and the extracted `parity_neurons_uncond` generations. Its selected
+indices remain deliberately easy to change in the TOML. Figure 3 still uses
+index-aligned `neurons_conditional/val` and `step_5500.pkl` data and asserts the
+selected filenames before plotting. That checkpoint is cell-type-conditioned
+with morphology/TMD conditioning disabled, so Figure 3 is currently a layout
+placeholder rather than evidence of morphology-conditional fidelity.
+
+The matching three-way Figure 2 comparison can be regenerated with:
+
+```bash
+python -m dendrite_gen.visualization.paper.fig2_unconditional \
+  --reference-dir data/neurons_conditional/test \
+  --ours-dir data/trees_test_set_generations/parity_neurons_uncond \
+  --semla-pkl data/epoch209/neuron_samples_sanitised.pkl \
+  --output-stem fig2_unconditional_distributions_epoch209
+```
+
+Use `--max-trees` with Figure 2 for a faster style preview. Input paths, EMA
+keys, and output directories can be overridden from the command line; inspect
+the complete options with `--help`.
+
+## Paper Table Draft
+
+Generate the provisional unconditional-results LaTeX table with:
+
+```bash
+python -m dendrite_gen.visualization.paper.table1_unconditional
+```
+
+The authoritative output is the copy-pasteable `booktabs` fragment at
+`iclr27-writeup/Tables/table1_unconditional.tex`. A JSON sidecar containing the
+unrounded metrics, paths, counts, and protocol is written to
+`dendrite_gen/outputs/paper_tables/table1_unconditional_metrics.json`.
+
+The defaults intentionally label the output provisional. They compare the only
+locally available common legacy-validation artifacts, use 924 valid trees per
+distributional row, and leave sampling time blank because no controlled
+cross-method timing exists. Replace the input paths with matched held-out-test
+runs before using the values as paper claims.
+
 ## Convert `.smol` Samples
 
-If you have a `.smol` sample dump and want something the visualization runners
-can read directly, convert it first:
+If you have a raw SemlaFlow `.smol` sample dump, convert it before running the
+paper figures. For `epoch209`, the exact command and output consumed by the
+Figure 1 TOML and the Figure 2 command above are:
+
+```bash
+python -m dendrite_gen.visualization.convert_smol_to_pred_pkl \
+  --smol-path data/epoch209/neuron_samples.smol \
+  --out-pkl data/epoch209/neuron_samples_sanitised.pkl
+```
+
+The general form is:
 
 ```bash
 python -m dendrite_gen.visualization.convert_smol_to_pred_pkl \
@@ -32,10 +124,26 @@ python -m dendrite_gen.visualization.convert_smol_to_pred_pkl \
   --out-pkl /path/to/samples_converted.pkl
 ```
 
-By default this writes a validation-style pickle under `ema_1`, keeps the
-largest connected component from each sample, chooses a root by highest node
-degree, recenters the tree to that root, and turns cyclic components into a
-single BFS spanning tree when needed.
+By default the converter writes a validation-style pickle under `ema_1` and
+uses SemlaFlow's canonical `validation/sanitise.py:sanitise_graph` policy. It
+first builds the raw graph and records raw connectivity, tree validity, and the
+full graph-health summary. It then keeps the largest connected component,
+relabels it, constructs a Euclidean minimum spanning tree, chooses the root,
+binarises non-root multifurcations, contracts non-root degree-2 nodes, and
+relabels the resulting critical tree. The figure scripts consume these
+sanitised `pred_graphs`; the retained raw metadata is for reporting structural
+failures before repair.
+
+The former visualization-only path (largest component, degree root, and BFS
+spanning tree, without binarisation or degree-2 contraction) is available only
+for reproducing stale drafts:
+
+```bash
+python -m dendrite_gen.visualization.convert_smol_to_pred_pkl \
+  --smol-path /path/to/samples.smol \
+  --out-pkl /path/to/samples_legacy.pkl \
+  --preprocessing legacy
+```
 
 ## Run All Plots
 
@@ -135,4 +243,8 @@ neighborhoods. Tune them with `--plotly-leaf-count`,
 python -m dendrite_gen.visualization.run_all_plots --help
 python -m dendrite_gen.visualization.run_cylinder_trees --help
 python -m dendrite_gen.visualization.run_unconditional --help
+python -m dendrite_gen.visualization.paper.fig1_unconditional --help
+python -m dendrite_gen.visualization.paper.fig2_unconditional --help
+python -m dendrite_gen.visualization.paper.fig3_conditional --help
+python -m dendrite_gen.visualization.paper.table1_unconditional --help
 ```
