@@ -54,7 +54,8 @@ conda run -n NEURO2 python -m pytest tests/test_forward_pass.py -v -k "test_name
 Hydra-based YAML configs in `config/`. Top-level configs (e.g., `smoke.yaml`, `small_trees_run.yaml`) compose defaults from `config/dataset/`, `config/method/`, and `config/diffusion/`. Override any value via CLI: `python main.py key=value`.
 
 ## Detailed Documentation
-Might not be updated, but relevant to identify overall flow and logic and relevant files.
-- `TRAINING_FLOW_TRACE.md` — Line-by-line trace of the training forward pass 
-- `SAMPLING_FLOW_TRACE.md` — Line-by-line trace of inference/sampling
-- `README_EGNN.md` — EGNN library reference
+- `docs/METHODOLOGY.md` — The methodology reference: end-to-end trace of training and sampling
+  (root-child ordering, local frames, flow matching, conditioning). Carries a
+  "verified against <sha>" line — check it before trusting the details.
+- `README_EGNN.md` — EGNN library reference. Might not be updated, but relevant to identify
+  overall flow and logic and relevant files.
