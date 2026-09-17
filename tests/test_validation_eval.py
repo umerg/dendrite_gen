@@ -13,6 +13,8 @@ import sys
 import types as _types
 from pathlib import Path
 
+import pytest
+
 _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
@@ -266,3 +268,97 @@ def test_evaluate_first8_plots_when_unconditional(tmp_path):
     assert all(t.startswith("Gen") for t in gen_titles)
     assert not any(name in t for t in gen_titles for name in CELL_CLASS_NAMES)
     plt.close("all")
+
+
+def _positions(graphs):
+    return [np.stack([G.nodes[n]["pos"] for n in G.nodes()]) for G in graphs]
+
+
+def _load_test_pkl(path):
+    import pickle
+    with open(path, "rb") as f:
+        payload = pickle.load(f)
+    assert list(payload) == ["ema_1"], list(payload)
+    return payload["ema_1"]
+
+
+def test_test_seeds_loop(tmp_path):
+    """`test_seeds` repeats the test pass once per seed, one pkl each, reproducibly.
+
+    Unset -> the single `test/step_<N>.pkl` as before. Set -> `test/step_<N>_seed_<s>.pkl`
+    per seed in the same `{"ema_<beta>": results}` shape; different seeds give different
+    trees, and re-running a seed reproduces its trees bit-for-bit.
+    """
+    cfg = _make_cfg()
+    cfg.validation.enable_plots = False
+    cfg.validation.enable_dist_metrics = False
+    trainer = _build_trainer(cfg, tmp_path, so2_axis=(0.0, 0.0, 1.0))
+    test_dir = Path(tmp_path) / "test"
+
+    # Unset -> unchanged single-pass behaviour.
+    trainer.test()
+    assert (test_dir / "step_0.pkl").exists()
+    assert len(_load_test_pkl(test_dir / "step_0.pkl")["pred_graphs"]) == len(trainer.test_graphs)
+
+    # k-seed loop.
+    cfg.test_seeds = [1, 2]
+    trainer.test()
+    per_seed = {}
+    for s in (1, 2):
+        p = test_dir / f"step_0_seed_{s}.pkl"
+        assert p.exists(), f"missing {p}"
+        res = _load_test_pkl(p)
+        assert len(res["pred_graphs"]) == len(trainer.test_graphs)
+        assert "examples" not in res  # figures stripped before pickling
+        per_seed[s] = _positions(res["pred_graphs"])
+    different = any(
+        a.shape != b.shape or not np.allclose(a, b)
+        for a, b in zip(per_seed[1], per_seed[2])
+    )
+    assert different, "seeds 1 and 2 produced identical trees"
+
+    # Reproducibility: the same seed regenerates the same trees.
+    cfg.test_seeds = [1]
+    trainer.test()
+    again = _positions(_load_test_pkl(test_dir / "step_0_seed_1.pkl")["pred_graphs"])
+    assert len(again) == len(per_seed[1])
+    for a, b in zip(again, per_seed[1]):
+        assert a.shape == b.shape
+        assert np.allclose(a, b)
+
+
+def test_test_split_val(tmp_path):
+    """`+test_split=val` runs the test pass on the validation graphs, in its own pkl.
+
+    Unset/`test` -> `test/step_<N>.pkl` over test_graphs (unchanged). `val` ->
+    `test/step_<N>_val.pkl` over validation_graphs; with seeds, `step_<N>_val_seed_<s>.pkl`.
+    The two never overwrite each other. Anything else is rejected.
+    """
+    cfg = _make_cfg()
+    cfg.validation.enable_plots = False
+    cfg.validation.enable_dist_metrics = False
+    trainer = _build_trainer(cfg, tmp_path, so2_axis=(0.0, 0.0, 1.0))
+    # _build_trainer gives val 3 graphs and test 2, so the pkl length identifies the split.
+    assert len(trainer.validation_graphs) != len(trainer.test_graphs)
+    test_dir = Path(tmp_path) / "test"
+
+    trainer.test()
+    assert len(_load_test_pkl(test_dir / "step_0.pkl")["pred_graphs"]) == len(trainer.test_graphs)
+
+    cfg.test_split = "val"
+    trainer.test()
+    p = test_dir / "step_0_val.pkl"
+    assert p.exists(), f"missing {p}"
+    assert len(_load_test_pkl(p)["pred_graphs"]) == len(trainer.validation_graphs)
+    # The test pass pkl is untouched.
+    assert len(_load_test_pkl(test_dir / "step_0.pkl")["pred_graphs"]) == len(trainer.test_graphs)
+
+    cfg.test_seeds = [3]
+    trainer.test()
+    p = test_dir / "step_0_val_seed_3.pkl"
+    assert p.exists(), f"missing {p}"
+    assert len(_load_test_pkl(p)["pred_graphs"]) == len(trainer.validation_graphs)
+
+    cfg.test_split = "train"
+    with pytest.raises(ValueError, match="test_split"):
+        trainer.test()

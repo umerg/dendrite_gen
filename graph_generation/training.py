@@ -1,5 +1,6 @@
 from asyncio.log import logger
 import pickle
+import random
 from pathlib import Path
 from time import time
 import logging
@@ -116,6 +117,19 @@ def build_wandb_config(cfg):
             alias_cfg["training_learning_rate"] = getattr(training_cfg, "learning_rate")
 
     return {**base_cfg, **alias_cfg}
+
+
+def _strip_figures(results_dict: dict) -> None:
+    """Drop live Figure objects from a per-beta results dict before pickling.
+
+    PNGs are already saved to eval_plots/ and their paths are stored in *_path keys.
+    Keeping Figure objects in the pickle payload bloats artifacts and is fragile across
+    matplotlib versions.
+    """
+    for sub in results_dict.values():
+        if isinstance(sub, dict):
+            sub.pop("examples", None)
+            sub.pop("examples_compare", None)
 
 
 def build_optimizer(parameters, cfg_training):
@@ -377,22 +391,70 @@ class Trainer:
                     th.cuda.empty_cache()
 
     def test(self):
-        print(f"Testing model at {self.step} steps on {self.device}")
+        """Evaluate the test set once, or once per seed in ``cfg.test_seeds``.
 
-        # Test for all EMA beta values
-        test_results = {}
-        for beta in self.cfg.ema.betas:
-            test_results[f"ema_{beta}"] = self.evaluate(self.test_graphs, beta)
+        ``test_seeds`` (a CLI-only key, e.g. ``+test_seeds=[0,1,2,3,4]``) repeats the full
+        test pass k times with the torch global RNG re-seeded before each: the sampler's
+        randomness is the flow prior noise and the root frame draw, both on that RNG (there
+        is no seed argument on ``Expansion.sample_graphs``). The eval batch order comes from
+        ``self.rng``, which advances on every ``evaluate`` call, so it is reset to its fresh
+        state before each pass: every seed uses the same batch order as a plain test pass
+        and a seed re-run reproduces its trees exactly. Each pass writes its own
+        ``test/step_<N>_seed_<s>.pkl`` in the usual ``{"ema_<beta>": results}`` shape so the
+        visualization runners read it unchanged. Unset -> the single-pass behaviour.
 
-        # Log results
-        self.log({"test": test_results})
+        ``test_split`` (CLI-only, ``+test_split=val``; default ``test``) runs the same pass
+        on the validation graphs instead. The wandb key and the pkl name carry the split
+        (``test/val/...``, ``test/step_<N>_val[_seed_<s>].pkl``) so a val pass never
+        overwrites a test pass. ``test`` keeps the legacy names.
+        """
+        split = str(getattr(self.cfg, "test_split", "test"))
+        if split not in ("test", "val"):
+            raise ValueError(f"cfg.test_split must be 'test' or 'val', got {split!r}.")
+        eval_graphs = self.test_graphs if split == "test" else self.validation_graphs
+        print(f"Testing model at {self.step} steps on {self.device} "
+              f"(split={split}, {len(eval_graphs)} graphs)")
+        seeds = getattr(self.cfg, "test_seeds", None)
+        passes = [None] if seeds is None else [int(s) for s in seeds]
+        if seeds is not None:
+            print(f"k-seed test pass: seeds={passes}")
 
-        # Dump results
-        if self.cfg.training.save_checkpoint:
-            test_dir = self.output_dir / "test"
-            test_dir.mkdir(exist_ok=True)
-            with open(test_dir / f"step_{self.step}.pkl", "wb") as f:
-                pickle.dump(test_results, f)
+        for seed in passes:
+            if seed is not None:
+                th.manual_seed(seed)
+                th.cuda.manual_seed_all(seed)
+                np.random.seed(seed)
+                random.seed(seed)
+                self.rng = np.random.default_rng(0)  # same eval batch order for every seed
+                tag = f"seed_{seed}"
+                print(f"--- test pass {tag} ---")
+            else:
+                tag = None
+            _t0 = time()
+
+            # Test for all EMA beta values
+            test_results = {}
+            for beta in self.cfg.ema.betas:
+                test_results[f"ema_{beta}"] = self.evaluate(eval_graphs, beta)
+
+            # Log results
+            logged = test_results if tag is None else {tag: test_results}
+            self.log({"test": logged if split == "test" else {split: logged}})
+            self.logger.info(
+                "[test step=%d%s] total=%.1fs", self.step,
+                "" if tag is None else f" {tag}", time() - _t0,
+            )
+
+            # Dump results
+            if self.cfg.training.save_checkpoint:
+                test_dir = self.output_dir / "test"
+                test_dir.mkdir(exist_ok=True)
+                _strip_figures(test_results)
+                stem = f"step_{self.step}" + ("" if split == "test" else f"_{split}")
+                fname = f"{stem}.pkl" if tag is None else f"{stem}_{tag}.pkl"
+                with open(test_dir / fname, "wb") as f:
+                    pickle.dump(test_results, f)
+            plt.close('all')
 
     def run_step(self, batch):
         # # print memory usage - for batch sizing etc
@@ -486,16 +548,6 @@ class Trainer:
                 "sampling_total_s": float(sampling_total),
             },
         })
-
-        # Strip Figure objects from results before pickling: PNGs are already
-        # saved to eval_plots/ and their paths are stored in *_path keys. Keeping
-        # live Figure objects in the pickle payload bloats artifacts and is
-        # fragile across matplotlib versions.
-        def _strip_figures(results_dict):
-            for sub in results_dict.values():
-                if isinstance(sub, dict):
-                    sub.pop("examples", None)
-                    sub.pop("examples_compare", None)
 
         # Dump results (persist even if metrics disabled to keep artifacts of generated graphs/plots)
         if self.cfg.training.save_checkpoint:
