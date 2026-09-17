@@ -57,7 +57,7 @@ match. Do not clip it and do not read a negative value as an error.
 | `bifurcation_angle_w1` | How wide a fork opens (degrees). |
 | `radial_to_root_w1` | Straight-line distance from soma/base to each node — where the mass sits. |
 | `contraction_w1` | Per leaf: straight-line ÷ along-cable distance from root. Tortuosity. |
-| `branch_order_w1` | **On our data this is exactly the node-depth distribution** (§7). |
+| `branch_order_w1` | **On our data this is exactly the node-depth distribution** (§8). |
 | `partition_asymmetry_w1` | Van Pelt asymmetry: 0 = every fork splits evenly, 1 = caterpillar. |
 | `node_count_w1` | Tree size. |
 | `sholl_critical_radius_w1` | Where the arbor is densest, as a fraction of the tree's own reach. |
@@ -198,7 +198,84 @@ not put runs from either side of the change on one axis.
 
 ---
 
-## 6. `density_*` / `coverage_*` — the exact estimator
+## 6. `mmd_*` — the exact estimator
+
+Kernel two-sample distance, implemented in `utils/dist_helper.py:mmd2_unbiased`. Each distribution
+is embedded by its mean feature vector in the RKHS of a Gaussian kernel and the two embeddings are
+compared:
+
+```
+MMD²(P,Q) = E_{x,x'~P} k(x,x') + E_{y,y'~Q} k(y,y') − 2·E_{x~P,y~Q} k(x,y)
+```
+
+The RBF kernel is **characteristic**, so `MMD = 0 ⟺ P = Q`: it sees means, spreads **and all
+cross-feature dependence**. That is its job here — the §3 marginals can every one of them match
+while the joint is wrong.
+
+### The estimator, exactly as coded
+
+```
+X = generated (n×d),  Y = GT (m×d),  k(x,y) = exp(−‖x−y‖² / 2σ²)
+
+MMD²̂ = (ΣKxx − tr Kxx)/(n(n−1))  +  (ΣKyy − tr Kyy)/(m(m−1))  −  2·mean(Kxy)
+```
+
+- **Diagonals excluded** (`− tr K`, denominator `n(n−1)`): this is the *unbiased* U-statistic, not
+  the plug-in V-statistic. `k(x,x)=1` is not evidence about the distribution and would inflate
+  every estimate by ~1/n. The cross term needs no such correction — X and Y are disjoint sets, so
+  every pair is valid.
+- **Returned unclipped, and legitimately negative** when the two sets match (pinned by
+  `test_mmd2_unbiased_not_clipped_can_be_negative`). Clipping would reintroduce bias and destroy
+  comparison against the real-vs-real floor, which is itself a near-zero number.
+- It estimates MMD**²**, and **no square root is taken** — you cannot sqrt a negative. Everything
+  downstream keeps the signed squared value.
+- `nan` if either set has < 2 rows. Cost is the O(n·m·d) Gram — the dominant term in the suite.
+
+### Bandwidth
+
+`median_heuristic_bandwidth`: median of pairwise Euclidean distances, subsampled to 512 rows at
+`seed=0`, floored at 1e-8. It parks the kernel's dynamic range on the data's typical separations —
+too small and every off-diagonal underflows to 0, too large and everything is ≈ 1; both directions
+stop discriminating.
+
+**σ is fit on the GT set alone, once, and cached** (`build_gt_cache`), exactly like the z-score
+mean/std and the TMD PCA basis (§5). A bandwidth refit per step from gen ∪ GT would move the
+yardstick whenever the model moved, and the trajectory across checkpoints would be meaningless.
+Being per-run constants, `mmd_bandwidth_*` go to wandb **config**, not the time series.
+
+Runs on the same two embeddings as §7: `mmd_morpho` (9-D z-scored morpho vector) and `mmd_tmd`
+(PCA-reduced `radial_root` persistence image).
+
+### Reading the value
+
+MMD² is in **kernel units** — dimensionless, not a distance in feature units, and comparable only
+within a fixed (embedding, bandwidth, `MORPHO_VERSION`) triple. Read it three ways, never raw:
+
+1. **Against the floor** (§4): −0.0004 ± 0.0013 trees, −0.0003 ± 0.0017 neurons.
+   `headline_excess_mmd_morpho = gen − floor` is the effect size.
+2. **As a z-score** against that floor's sd: |z| ≳ 3 real, |z| ≲ 1 noise. `mmd_morpho` is the only
+   metric above floor for *every* defect class on both datasets.
+3. **As a trajectory** — which is precisely what the frozen GT-side bandwidth buys.
+
+### Failure modes
+
+| | what happens |
+|---|---|
+| **Saturation** | Once the clouds are a few σ apart all `Kxy → 0` and MMD² → the sum of the self-terms (bounded by 2, since `k ≤ 1`). It stops being monotone in "how wrong" — good monitor, bad ranking of *bad* checkpoints. |
+| **One bandwidth = one scale** | Defects at a length scale far from the GT median are attenuated. The offline protocol requires a `{0.5σ, σ, 2σ}` band, with σ **held fixed across permutations** or the null is invalid. |
+| **Correlation, not just variance** | The RBF runs on raw z-scores, which equalise per-feature variance but **not** collinearity: a block of *m* near-duplicate features contributes ~m× to the exponent. This is the whole reason for the v2 prune (§5) — same defect went from z 0.2 to 14.3. **MMD reports the geometry of the embedding you hand it, not morphology per se.** |
+| **Imputation loophole** | Non-finite morpho features map to 0 = the GT mean, so degenerate trees are pulled to the centre rather than flagged. Kept on purpose (it keeps `mmd_morpho` finite); `gen_degenerate_frac` / `morpho_nan_frac` are the disclosure. |
+| **Sign-blind** | Inherits §10.1 — reflect the generated set along `uhat` and MMD does not move. |
+| **Small-n variance** | The U-statistic's variance grows fast as n shrinks; per-class blocks (min 20 trees) are correspondingly noisy. |
+| **Point estimate only** | No CI in the loop. Bootstrap CIs, permutation p-values and BH-FDR are deferred to `docs/EVAL_PAPER_PROTOCOL.md` (**not implemented**). |
+
+One caveat specific to this codebase: `tmd_eval_filtration: radial_root` is inside
+`model.tmd_filtrations`, so on TMD-conditioned runs `mmd_tmd` partly scores the model echoing its
+own conditioning input (§10.3). It is also weak on trees (max z 0.6).
+
+---
+
+## 7. `density_*` / `coverage_*` — the exact estimator
 
 Naeem et al. (2020), implemented in `utils/dist_helper.py:density_coverage`. Both numbers come
 from **spheres centred on real points only** — the generated set never defines a radius, so it
@@ -245,11 +322,11 @@ Two failure modes to keep in mind:
    degenerate generated tree therefore lands inside many spheres and **earns density and coverage
    credit for being broken**. Always read `gen_degenerate_frac` / `morpho_nan_frac` first.
 2. **`density_tmd` / `coverage_tmd` are inert** — never leave 0.95–0.99 under any injected defect
-   (§8.6), which is why they are off the `standard` dashboard.
+   (§10.6), which is why they are off the `standard` dashboard.
 
 ---
 
-## 7. `branch_order` is tree depth — the one naming trap
+## 8. `branch_order` is tree depth — the one naming trap
 
 `branch_order_values` increments at every non-root node of undirected degree ≥ 3. Our datasets
 are strictly binary away from the root with **zero degree-2 non-root nodes**, so every non-root
@@ -271,7 +348,7 @@ the trim.)
 
 ---
 
-## 8. Matched pairwise (`tmd_cond`) — is the conditioning actually used?
+## 9. Matched pairwise (`tmd_cond`) — is the conditioning actually used?
 
 Only meaningful with `tmd_hidden_dim > 0`. `gen[i]` was conditioned on `gt[i]` and the rollout
 keeps them index-aligned, so each pair is compared directly. The distributional suite **cannot**
@@ -292,7 +369,7 @@ carry the scale. Do not read `pd_wasserstein_*` alone as "the tree matches".
 
 ---
 
-## 9. Known blind spots
+## 10. Known blind spots
 
 1. **The suite cannot see a flipped tree.** Reflect every generated tree along `uhat` and **0 of
    31 metrics change** — re-verified on `MORPHO_VERSION 2`; the v2 prune neither helped nor hurt
@@ -321,7 +398,7 @@ carry the scale. Do not read `pd_wasserstein_*` alone as "the tree matches".
 
 ---
 
-## 10. Config reference
+## 11. Config reference
 
 ```yaml
 validation:
@@ -357,7 +434,7 @@ Per-run constants (`mmd_bandwidth_morpho`, `mmd_bandwidth_tmd`, `tmd_eff_rank`,
 
 ---
 
-## 11. Changelog
+## 12. Changelog
 
 **2026-08-08 — `MORPHO_VERSION 2`.** Breaks comparability of `mmd_morpho` / `density_morpho` /
 `coverage_morpho` and of `tmd_barlen_w1`, `sholl_peak_w1`, `sholl_critical_radius_w1`,

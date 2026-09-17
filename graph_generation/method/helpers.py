@@ -488,9 +488,12 @@ def compute_local_bases_for_leaves(
     Used during expand() when full precompute_full_geometry is not available.
 
     When child_ordinal and sibling_count are provided and root children are
-    spawned all at once (degenerate: all at parent position), child 0 gets a
-    random forward direction and children 1..k-1 get frames rotated by
-    2π*i/k from child 0's frame.
+    spawned all at once (degenerate: all at parent position), ONE random forward
+    direction is drawn per parent and SHARED by every one of its children — there
+    is no per-child rotation. The MAX_CHILDREN-wide one-hot ordinal feature is the
+    only cue that distinguishes siblings; the model learns each child's angular
+    placement relative to the shared frame. Since the shared angle is random, the
+    absolute orientation carries no information (SO(2)-equivariant in distribution).
 
     Args:
         pos:              [N, 3] node positions
@@ -764,8 +767,11 @@ def compute_geo_order(
     everything internally.
 
     Returns:
-        geo_ordinal [N]:      i/(k-1) for root children, 0.0/1.0 for binary
-                              interior L/R, -1.0 sentinel for root/parentless.
+        geo_ordinal [N]:      integer rank 0, 1, ..., k-1 for root children (an
+                              ABSOLUTE child index, NOT normalized by k), 0.0/1.0
+                              for binary interior L/R, -1.0 sentinel for
+                              root/parentless. Consumed as a MAX_CHILDREN-wide
+                              one-hot in the expansion.py feature assembly.
         geo_delta_theta [N]:  relative angle from child_0 for root children,
                               0.0 for all others.
     """
@@ -867,6 +873,10 @@ def compute_geo_lr_for_new_leaves(
     tol: float = 1e-6,
 ) -> Tuple[th.Tensor, th.Tensor]:
     """Compute geo L/R mask for only the specified new leaves (O(K) not O(N)).
+
+    DEAD: no callers anywhere, tests included. Superseded by compute_geo_order, which
+    handles root children and binary interior nodes in one unified pass. Kept for now
+    only to avoid mixing a deletion into a docs change.
 
     Returns (lr_mask[K], valid[K]) where:
       - lr_mask[i] = True means new_leaf_idx[i] is the LEFT child
@@ -995,14 +1005,19 @@ def compute_geo_angle_for_new_leaves(
 ) -> Tuple[th.Tensor, th.Tensor]:
     """Compute ordinal angular feature for new leaves (generalizes compute_geo_lr_for_new_leaves).
 
+    TEST-ONLY: no live caller. Sampling stopped calling this once `expand()` began
+    deriving internal-node ordinals from `precompute_full_geometry` each step; it
+    survives only as an SO(2)-invariance fixture in tests/test_so2_invariance.py.
+
     Handles any sibling count ≥ 1 (not just binary pairs).
-    For root children: sorts clockwise from x-axis, assigns i/(k-1).
+    For root children: sorts clockwise from fwd0 (the root→child_0 direction projected
+    into the plane perpendicular to uhat), assigns the integer rank 0, 1, ..., k-1.
     For binary children: uses parity logic, left=0.0, right=1.0.
     For single children: assigns 0.0.
 
     Returns:
         (geo_angle [K] float, valid [K] bool)
-        - geo_angle: ordinal feature i/(k-1) for each new leaf
+        - geo_angle: integer ordinal rank (NOT normalized by k) for each new leaf
         - valid: True for leaves where the computation succeeded
     """
     K = new_leaf_idx.numel()
