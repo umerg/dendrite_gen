@@ -62,7 +62,8 @@ def sweep(st: Store, rows: pd.DataFrame, y, sites, *, kind=None, stack=None, B=5
             rec.update(score_obs=inc["score_obs"], score_full=inc["score_full"],
                        delta=d, delta_lo=dlo, delta_hi=dhi)
         recs.append(rec)
-        print(f"  [{tag}] {s:>4} score={pt:.3f} [{lo:.3f},{hi:.3f}]"
+        head = f"score={pt:.3f} [{lo:.3f},{hi:.3f}]" if plain else "score=(see primary)"
+        print(f"  [{tag}] {s:>4} {head}"
               + (f"  Δ={rec['delta']:+.3f} [{rec['delta_lo']:+.3f},{rec['delta_hi']:+.3f}]" if stack is not None else ""),
               flush=True)
     return recs
