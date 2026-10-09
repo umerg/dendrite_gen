@@ -132,12 +132,14 @@ def fmt(rec: dict) -> str:
     sc = rec.get("score", np.nan)
     if sc == sc:
         out += f" score={sc:.3f}"
-        if rec.get("lo") == rec.get("lo") and "lo" in rec:
+        if rec.get("lo") is not None and rec["lo"] == rec["lo"]:
             out += f" [{rec['lo']:.3f},{rec['hi']:.3f}]"
     if rec.get("score_obs") is not None and rec["score_obs"] == rec["score_obs"]:
         out += f"  obs={rec['score_obs']:.3f}"
     if "delta" in rec and rec["delta"] == rec["delta"]:
-        out += f"  Δ={rec['delta']:+.3f} [{rec['delta_lo']:+.3f},{rec['delta_hi']:+.3f}]"
+        out += f"  Δ={rec['delta']:+.3f}"
+        if rec.get("delta_lo") is not None:
+            out += f" [{rec['delta_lo']:+.3f},{rec['delta_hi']:+.3f}]"
     return out
 
 

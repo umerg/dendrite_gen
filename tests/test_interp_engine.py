@@ -76,3 +76,10 @@ def test_p5_parallel_and_resume_match_serial(tmp_path, monkeypatch):
     part.write_text("\n".join(lines[: 1 + (len(lines) - 1) // 2]) + "\n")
     c = p5_stop.run(store, 0.0, "val", tmp_path / "par", B=20, sites=sites)
     pd.testing.assert_frame_equal(a, c)
+
+
+def test_fmt_tolerates_partial_records():
+    for rec in (dict(site="L1", score=0.5), dict(site="L1", score=0.5, delta=0.1),
+                dict(part="a", target="t", site="L1", bin_lo=2, bin_hi=99, score=float("nan"), delta=0.1),
+                dict(site="x", score=0.5, lo=0.4, hi=0.6, delta=0.1, delta_lo=0.0, delta_hi=0.2, score_obs=0.3)):
+        assert isinstance(C.fmt(rec), str)
