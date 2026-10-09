@@ -38,6 +38,13 @@ class Store:
     _gcache: dict = field(default_factory=dict, repr=False)
 
     @classmethod
+    def light(cls, path: str | Path) -> "Store":
+        """Meta only (no index tables) — enough for ``acts`` / ``graph_acts`` given row ids.
+        Used by parallel workers, which receive the row ids from the parent."""
+        p = Path(path)
+        return cls(path=p, meta=json.loads((p / "meta.json").read_text()), index=None, graph_index=None)
+
+    @classmethod
     def open(cls, root: str | Path, t: float | None = None, split: str | None = None) -> "Store":
         p = Path(root) if t is None else split_dir(root, t, split)
         return cls(

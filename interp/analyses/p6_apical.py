@@ -30,7 +30,7 @@ import pandas as pd
 from .. import probe as P
 from ..baselines import KHOP_COLS, OBS_LOCAL, matrix, row_table
 from ..store import Store
-from .common import ordered_sites, site_depth, tmd_obs, write
+from .common import Checkpoint, Lazy, open_store, ordered_sites, row_ref, run_units, site_depth, tmd_obs, write
 
 DAB_BINS = [(2, 4), (5, 8), (9, 12), (13, 16), (17, 99)]
 CROSS_TARGETS = ["apical_vis_reach", "apical_is_tallest_vis", "other_arm_tall_vis", "own_rank",
@@ -78,38 +78,74 @@ def _binned(y, p, groups, kind, bins_idx, bins, B, extra):
     return recs
 
 
-def own_lineage(st, rows, t, split, B):
+DEPTH_BINS = [(d, d) for d in range(2, 13)] + [(13, 99)]
+CONT_TARGETS = ("apical_vis_reach", "own_rank", "apical_final_reach")
+
+
+def _delta_bins(y, groups, kind, bidx, bins, inc, B, rec, part):
+    recs = []
+    for k, (lo, hi) in enumerate(bins):
+        m = bidx == k
+        if not _bin_ok(y, groups, m, kind):
+            continue
+        d, dlo, dhi = P.paired_bootstrap(y[m], inc["oof_obs"][m], inc["oof_full"][m], groups[m],
+                                         _bin_kind(kind), B=B)
+        recs.append(dict(bin_lo=lo, bin_hi=hi, n=int(m.sum()), metric=_bin_kind(kind), delta=d,
+                         delta_lo=dlo, delta_hi=dhi, **{**rec, "part": part}))
+    return recs
+
+
+def baseline_unit(stack, y, groups, bidx, bins, B, rec, overall: bool) -> list[dict]:
+    """Observables-only model, scored overall (optional) and per bin."""
+    recs = [dict(bin_lo=bins[0][0], bin_hi=99, n=len(y), score=stack.score_obs, **rec)] if overall else []
+    return recs + _binned(y, stack.oof_obs, groups, stack.kind, bidx, bins, B, rec)
+
+
+def probe_unit(path, site, rref, y, groups, kind, bidx, bins, B, stack, rec, delta_part, overall: bool):
+    """One site: plain probe (overall + per bin) and Δ over the stack (per bin)."""
+    X = open_store(path).acts(site, rref)
+    r = P.linear_probe(X, y, groups, kind=kind)
+    inc = P.incremental_with(stack, X)
+    recs = ([dict(bin_lo=bins[0][0], bin_hi=99, n=len(y), score=r.score, delta=inc["delta"], **rec)]
+            if overall else [])
+    recs += _binned(y, r.oof, groups, kind, bidx, bins, B, rec)
+    return recs + _delta_bins(y, groups, kind, bidx, bins, inc, B, rec, delta_part)
+
+
+def ablation_unit(path_i, path_a, site, rref_i, rref_a, y, groups, kind, bidx, B, rec):
+    """Intact fit, fixed-probe transfer to ablated activations, and refit on ablated."""
+    Xi = open_store(path_i).acts(site, rref_i)
+    Xa = open_store(path_a).acts(site, rref_a)
+    fit = P.ridge_cv if kind == "regression" else P.logistic_cv
+    recs = []
+    for mode, res in (("intact", fit(Xi, y, groups)),
+                      ("fixed_probe", fit(Xi, y, groups, X_eval=Xa)),
+                      ("refit", fit(Xa, y, groups))):
+        recs += _binned(y, res.oof, groups, kind, bidx, DAB_BINS, B, {**rec, "mode": mode})
+    return recs
+
+
+def own_lineage_units(st, rows, t, split, B):
     df = rows[(rows.depth >= 2) & (rows.owner >= 0)].reset_index(drop=True)
     y = df.is_apical_subtree.to_numpy().astype(int)
     g = df.neuron.to_numpy()
-    depth = df.depth.to_numpy()
-    dbins = [(d, d) for d in range(2, 13)] + [(13, 99)]
-    bidx = _bin_of(depth, dbins)
+    bidx = _bin_of(df.depth.to_numpy(), DEPTH_BINS)
     # Non-learned baseline: depth + 12-hop neighbourhood profile (apical-subtree nodes sit far
     # along -uhat, which the profile's axial columns partly reveal). Δ = what the activations
     # add beyond it.
     obs = np.hstack([df[["depth"]].to_numpy(float), matrix(df, KHOP_COLS)])
-    stack = P.obs_stack(obs, y, g, kind="binary")
-    base = dict(part="a_own_lineage", target="is_apical_subtree", site="baseline:khop", x=np.nan, t=t, split=split)
-    recs = [dict(bin_lo=2, bin_hi=99, n=len(y), score=stack.score_obs, **base)]
-    recs += _binned(y, stack.oof_obs, g, "binary", bidx, dbins, B, base)
-    print(f"[P6a] baseline:khop AUROC={stack.score_obs:.3f}", flush=True)
+    stack = Lazy(P.obs_stack, obs, y, g, kind="binary")
+    base = dict(part="a_own_lineage", target="is_apical_subtree", t=t, split=split)
+    units = [("a|baseline:khop", baseline_unit,
+              dict(stack=stack, y=y, groups=g, bidx=bidx, bins=DEPTH_BINS, B=B,
+                   rec={**base, "site": "baseline:khop", "x": np.nan}, overall=True))]
+    rref = row_ref(df)
     for s in ordered_sites(st, dense_ok=False):
-        X = st.acts(s, df)
-        r = P.logistic_cv(X, y, g)
-        inc = P.incremental_with(stack, X)
-        extra = dict(part="a_own_lineage", target="is_apical_subtree", site=s, x=site_depth(s), t=t, split=split)
-        recs.append(dict(bin_lo=2, bin_hi=99, n=len(y), score=r.score, delta=inc["delta"], **extra))
-        recs += _binned(y, r.oof, g, "binary", bidx, dbins, B, extra)
-        for k, (lo, hi) in enumerate(dbins):
-            m = bidx == k
-            if not _bin_ok(y, g, m, "binary"):
-                continue
-            d, dlo, dhi = P.paired_bootstrap(y[m], inc["oof_obs"][m], inc["oof_full"][m], g[m], "binary", B=B)
-            recs.append(dict(bin_lo=lo, bin_hi=hi, n=int(m.sum()), delta=d, delta_lo=dlo, delta_hi=dhi,
-                             **{**extra, "part": "a_own_lineage_delta"}))
-        print(f"[P6a] {s:>4} AUROC={r.score:.3f}  Δ over khop={inc['delta']:+.3f}", flush=True)
-    return recs
+        units.append((f"a|{s}", probe_unit,
+                      dict(path=str(st.path), site=s, rref=rref, y=y, groups=g, kind="binary", bidx=bidx,
+                           bins=DEPTH_BINS, B=B, stack=stack, rec={**base, "site": s, "x": site_depth(s)},
+                           delta_part="a_own_lineage_delta", overall=True)))
+    return units
 
 
 def cross_rows(rows):
@@ -118,7 +154,14 @@ def cross_rows(rows):
     return df
 
 
-def cross_dendrite(st, rows, t, split, B):
+def _target(df, name):
+    y = df[name].to_numpy()
+    ok = pd.notna(y)
+    y = y[ok].astype(float if name in CONT_TARGETS else int)
+    return y, ok
+
+
+def cross_units(st, rows, t, split, B):
     df = cross_rows(rows)
     g = df.neuron.to_numpy()
     bidx = _bin_of(df.dAB.to_numpy(), DAB_BINS)
@@ -126,79 +169,65 @@ def cross_dendrite(st, rows, t, split, B):
     t_o = tmd_obs(st, df)
     if t_o is not None:  # TMD arm: the conditioning vector is global info the node is given
         obs = np.hstack([obs, t_o])
-    sites = ordered_sites(st)
-    recs = []
+    units = []
     for name in CROSS_TARGETS:
-        y = df[name].to_numpy()
-        ok = pd.notna(y)
+        y, ok = _target(df, name)
         if ok.sum() < 50:
             continue
-        y = y[ok].astype(float if name in ("apical_vis_reach", "own_rank", "apical_final_reach") else int)
         kind = P.task_kind(y)
         if kind == "binary" and len(np.unique(y)) < 2:
             continue
         gk, bk = g[ok], bidx[ok]
-        stack = P.obs_stack(obs[ok], y, gk, kind=kind)
-        recs += _binned(y, stack.oof_obs, gk, kind, bk, DAB_BINS, B,
-                        dict(part="b_cross", target=name, site="baseline:local_obs", x=np.nan, t=t, split=split))
-        for s in sites:
-            X = st.acts(s, df[ok])
-            inc = P.incremental_with(stack, X)
-            r = P.linear_probe(X, y, gk, kind=kind)
-            extra = dict(part="b_cross", target=name, site=s, x=site_depth(s), t=t, split=split)
-            recs += _binned(y, r.oof, gk, kind, bk, DAB_BINS, B, extra)
-            for k, (lo, hi) in enumerate(DAB_BINS):  # Δ over local observables per bin
-                m = bk == k
-                if not _bin_ok(y, gk, m, kind):
-                    continue
-                d, dlo, dhi = P.paired_bootstrap(y[m], inc["oof_obs"][m], inc["oof_full"][m], gk[m],
-                                                 _bin_kind(kind), B=B)
-                recs.append(dict(bin_lo=lo, bin_hi=hi, n=int(m.sum()), metric=_bin_kind(kind), delta=d,
-                                 delta_lo=dlo, delta_hi=dhi, **{**extra, "part": "b_cross_delta"}))
-        print(f"[P6b] {name}: done ({ok.sum()} rows)", flush=True)
-    return recs
+        stack = Lazy(P.obs_stack, obs[ok], y, gk, kind=kind)
+        base = dict(part="b_cross", target=name, t=t, split=split)
+        units.append((f"b|{name}|baseline:local_obs", baseline_unit,
+                      dict(stack=stack, y=y, groups=gk, bidx=bk, bins=DAB_BINS, B=B,
+                           rec={**base, "site": "baseline:local_obs", "x": np.nan}, overall=False)))
+        rref = row_ref(df[ok])
+        for s in ordered_sites(st):
+            units.append((f"b|{name}|{s}", probe_unit,
+                          dict(path=str(st.path), site=s, rref=rref, y=y, groups=gk, kind=kind, bidx=bk,
+                               bins=DAB_BINS, B=B, stack=stack, rec={**base, "site": s, "x": site_depth(s)},
+                               delta_part="b_cross_delta", overall=False)))
+    return units
 
 
-def ablation(st, rows, abl_name, abl_root, t, split, B):
+def ablation_units(st, rows, abl_name, abl_root, t, split, B):
+    """Units for P6c plus the (cheap, computed directly) position-error records."""
     sa = Store.open(abl_root, t, split)
     df = cross_rows(rows)
     ai = sa.index[sa.index.is_frontier][KEY + ["row_dense", "row_sparse", "pos_err"]]
     m = df.merge(ai, on=KEY, how="inner", suffixes=("", "_abl"))
     if len(m) < 100:
         print(f"[P6c] {abl_name}: only {len(m)} matched rows, skipping")
-        return []
-    intact_rows = m
+        return [], []
     abl_rows = m.assign(row_dense=m.row_dense_abl, row_sparse=m.row_sparse_abl)
     g = m.neuron.to_numpy()
     bidx = _bin_of(m.dAB.to_numpy(), DAB_BINS)
-    recs = []
+    direct = []
     # does the model need the global read? teacher-forced position error, ablated / intact
     for k, (lo, hi) in enumerate(DAB_BINS):
         mk = bidx == k
         if mk.sum() < 30:
             continue
-        recs.append(dict(part="c_pos_err", ablation=abl_name, bin_lo=lo, bin_hi=hi, n=int(mk.sum()),
-                         intact=float(m.pos_err[mk].mean()), ablated=float(m.pos_err_abl[mk].mean()),
-                         ratio=float(m.pos_err_abl[mk].mean() / max(m.pos_err[mk].mean(), 1e-12)), t=t, split=split))
+        direct.append(dict(part="c_pos_err", ablation=abl_name, bin_lo=lo, bin_hi=hi, n=int(mk.sum()),
+                           intact=float(m.pos_err[mk].mean()), ablated=float(m.pos_err_abl[mk].mean()),
+                           ratio=float(m.pos_err_abl[mk].mean() / max(m.pos_err[mk].mean(), 1e-12)),
+                           t=t, split=split))
+    units = []
     for name in CROSS_TARGETS:
-        y = m[name].to_numpy()
-        ok = pd.notna(y)
-        y = y[ok].astype(float if name in ("apical_vis_reach", "own_rank", "apical_final_reach") else int)
+        y, ok = _target(m, name)
         kind = P.task_kind(y)
         if ok.sum() < 50 or (kind == "binary" and len(np.unique(y)) < 2):
             continue
+        rref_i, rref_a = row_ref(m[ok]), row_ref(abl_rows[ok])
         for s in ordered_sites(st):
-            Xi = st.acts(s, intact_rows[ok])
-            Xa = sa.acts(s, abl_rows[ok])
-            fit = P.ridge_cv if kind == "regression" else P.logistic_cv
-            for mode, res in (("intact", fit(Xi, y, g[ok])),
-                              ("fixed_probe", fit(Xi, y, g[ok], X_eval=Xa)),
-                              ("refit", fit(Xa, y, g[ok]))):
-                extra = dict(part="c_ablation", ablation=abl_name, mode=mode, target=name, site=s,
-                             x=site_depth(s), t=t, split=split)
-                recs += _binned(y, res.oof, g[ok], kind, bidx[ok], DAB_BINS, B, extra)
-        print(f"[P6c] {abl_name}/{name}: done", flush=True)
-    return recs
+            units.append((f"c|{abl_name}|{name}|{s}", ablation_unit,
+                          dict(path_i=str(st.path), path_a=str(sa.path), site=s, rref_i=rref_i, rref_a=rref_a,
+                               y=y, groups=g[ok], kind=kind, bidx=bidx[ok], B=B,
+                               rec=dict(part="c_ablation", ablation=abl_name, target=name, site=s,
+                                        x=site_depth(s), t=t, split=split))))
+    return units, direct
 
 
 def run(store_root, t: float, split: str, out, ablated: dict[str, str] | None = None, B: int = 300,
@@ -210,22 +239,21 @@ def run(store_root, t: float, split: str, out, ablated: dict[str, str] | None = 
     rows = row_table(st)
     meta = dict(analysis="P6", store=str(store_root), t=t, split=split, store_meta=st.meta,
                 ablated=ablated, obs_local=OBS_LOCAL + KHOP_COLS)
-    recs = []
-
-    def save():  # written after every part, so a later failure never loses finished parts
-        write(out, f"p6_{split}_t{t:g}", recs, meta)
-
+    units, direct = [], []
     if "a" in parts:
-        recs += own_lineage(st, rows, t, split, B)
-        save()
+        units += own_lineage_units(st, rows, t, split, B)
     if "b" in parts:
-        recs += cross_dendrite(st, rows, t, split, B)
-        save()
+        units += cross_units(st, rows, t, split, B)
     if "c" in parts:
         for name, path in (ablated or {}).items():
-            recs += ablation(st, rows, name, path, t, split, B)
-            save()
-    save()
+            u, d = ablation_units(st, rows, name, path, t, split, B)
+            units += u
+            direct += d
+    out_name = f"p6_{split}_t{t:g}"
+    ckpt = Checkpoint(out, out_name, dict(analysis="P6", store=str(store_root), t=t, split=split, B=B,
+                                          ablated=ablated, parts=list(parts)))
+    recs = run_units(units, ckpt) + direct
+    write(out, out_name, recs, meta)
     return pd.DataFrame(recs)
 
 

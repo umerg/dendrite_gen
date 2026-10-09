@@ -29,6 +29,8 @@ ANALYSES=${ANALYSES:-p1,p2,p3,p5,p6}
 T=${T:-0}
 ABLATED=${ABLATED:-}                     # name=path[,name=path...] (P6 part c)
 B=${B:-500}
+JOBS=${JOBS:-8}                          # parallel worker processes (layers run in parallel); each gets
+                                         # CPUs/JOBS BLAS threads. Peak memory ~2-3 GB per worker on full val.
 OUT=${OUT:-${STORE}/results}
 
 ETH_USERNAME=guptau
@@ -70,6 +72,9 @@ cd ${DIRECTORY}
 mkdir -p "${OUT}"
 echo "store=${STORE} split=${SPLIT} analyses=${ANALYSES} out=${OUT}"
 export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-16}
+export INTERP_JOBS=${JOBS}
+# Resuming: every finished (target, layer) unit is checkpointed in ${OUT}/<analysis>.partial.jsonl;
+# resubmitting the same command skips finished units (a change of settings starts that analysis fresh).
 
 ABL_ARGS=()
 IFS=',' read -ra ABL <<< "${ABLATED}"

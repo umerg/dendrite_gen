@@ -454,7 +454,7 @@ Each card: **question → rows → targets → inputs → baseline → metric �
 * **Rows / targets.** Placed rows: depth, number of visible children (internal nodes only),
   own edge length, branch angle. Frontier rows: depth, own edge length. All rows: is-frontier.
 * **Inputs.** Every site (frontier rows); sparse sites (placed rows, which include the 20 % sample).
-* **Baselines.** Raw input (`in`) and the 12-hop profile, with the same probe.
+* **Baselines.** Raw input (= the probe at site `in`) and the 12-hop profile, with the same probe.
 * **Depth diagonal.** For each true depth d: the AUROC with which the depth probe's OOF score
   separates depth d from d+1. AUROC is used because ridge shrinks predictions towards the mean
   depth, which makes exact-integer accuracy meaningless for deep nodes (a pilot design error).
@@ -764,6 +764,31 @@ operating point. `zero` is a robustness check.
 
 ---
 
+## 14b. Execution: checkpointing and parallelism
+
+Every analysis is decomposed into independent **units** — one target × one layer (P6: one part ×
+target × layer; P3: one visible-depth bin × target × layer). Units run in parallel worker
+processes (`INTERP_JOBS`, default 8 in the cluster job), each limited to CPUs / jobs BLAS
+threads. A finished unit is appended immediately to `<out>/<analysis>.partial.jsonl`, so a
+killed or timed-out job is resumed by resubmitting the same command; finished units are read
+back instead of recomputed. A checkpoint carries a signature (analysis, store, t, split, B,
+options, engine version); if any of these change, the old file is moved to `*.stale<k>` and the
+analysis starts fresh, so results from different settings are never mixed. The observables model
+(Δ baseline) is fitted lazily — only if some unit of that target still has to run.
+
+This changes **no result**: every unit runs exactly the same probe with the same seeds as the
+serial code. ✅ `tests/test_interp_engine.py`: a parallel P5 run equals the serial run exactly; a
+run resumed after deleting half the checkpoint equals the uninterrupted run; truncated last lines
+(from a kill) are ignored and recomputed.
+
+Two cost-only simplifications made at the same time: P1's "is-frontier" pipeline check is run
+only at `in` and the last layer; and P1's separate "raw-input baseline" was removed because it
+was the identical probe on identical data as layer `in` (read `in` as the raw-input baseline).
+The P1 depth-diagonal now reuses the sweep's own out-of-fold predictions instead of refitting
+the same ridge (identical numbers).
+
+---
+
 ## 15. Code map
 
 | File | Role |
@@ -775,6 +800,7 @@ operating point. `zero` is a robustness check.
 | `interp/extract.py`, `interp/store.py` | extraction → store; overflow guard; no-overwrite |
 | `interp/baselines.py` | §4 observables, 12-hop profile, graph table (cached, versioned) |
 | `interp/probe.py` | §5–8 probes, Δ, controls, bootstrap, mass-mean, LEACE |
+| `interp/analyses/common.py` | §14b unit engine: checkpoint, lazy baselines, parallel runner, per-site probe unit |
 | `interp/analyses/p1…p6, report.py` | §9 experiments; text summary |
 | `scripts/interp_extract.sbatch`, `scripts/interp_analyze.sbatch` | cluster jobs |
 | `tests/test_interp_*.py` | §12 verification |

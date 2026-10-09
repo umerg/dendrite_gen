@@ -37,7 +37,7 @@ import pandas as pd
 
 from .. import probe as P
 from ..baselines import KHOP_COLS, OBS_CONTEXT, OBS_FRONTIER, matrix
-from .common import load, ordered_sites, sweep, tmd_obs, write
+from .common import Checkpoint, Lazy, load, ordered_sites, run_units, sweep_units, tmd_obs, write
 
 PRIMARY = [
     ("y_h2", lambda d: d.y_h2.to_numpy().astype(int)),
@@ -91,27 +91,24 @@ def run(store_root, t: float, split: str, out, B: int = 500, controls: bool = Tr
         obs_f = np.hstack([obs_f, t_f])
         print("[P2] TMD-conditioned store: conditioning-TMD PCs added to observables", flush=True)
     lvl_f = grow[["level"]].to_numpy(float)
-    recs = []
+    path = str(st.path)
+    units = []
     for name, fn in PRIMARY:
         y = fn(grow)
         if len(np.unique(y)) < 2:
             continue
-        stack = P.obs_stack(obs_f, y, groups)
-        print(f"[P2] {name}: obs-only score={stack.score_obs:.3f}", flush=True)
-        recs += sweep(st, grow, y, sites, stack=stack, tag=f"primary/{name}", B=B,
-                      extra=dict(t=t, split=split, target=name))
+        ex = dict(t=t, split=split, target=name)
+        units += sweep_units(path, grow, y, sites, tag=f"primary/{name}", B=B, extra=ex,
+                             stack=Lazy(P.obs_stack, obs_f, y, groups))
         if strict:
-            st_stack = P.obs_stack(np.hstack([obs_f, lvl_f]), y, groups)
-            print(f"[P2] {name} strict (+levels remaining): obs-only score={st_stack.score_obs:.3f}", flush=True)
-            recs += sweep(st, grow, y, sites, stack=st_stack, tag=f"strict/{name}", B=B, plain=False,
-                          extra=dict(t=t, split=split, target=name))
+            units += sweep_units(path, grow, y, sites, tag=f"strict/{name}", B=B, extra=ex, plain=False,
+                                 stack=Lazy(P.obs_stack, np.hstack([obs_f, lvl_f]), y, groups))
         if controls and name == "y_h2":
             ctl = [("shuffle_within", P.shuffle_within(y, groups))]
             if control_task:
                 ctl.append(("control_task", P.control_task(y, np.c_[grow.depth, grow.slot])))
             for cname, yc in ctl:
-                recs += sweep(st, grow, yc, sites, tag=f"control/{cname}", B=min(B, 200),
-                              extra=dict(t=t, split=split, target=name))
+                units += sweep_units(path, grow, yc, sites, tag=f"control/{cname}", B=min(B, 200), extra=ex)
 
     ctx = rows[(~rows.is_frontier) & (rows.hidden_desc > 0)].reset_index(drop=True)
     if len(ctx) > 100:
@@ -123,17 +120,22 @@ def run(store_root, t: float, split: str, out, B: int = 500, controls: bool = Tr
         csites = ordered_sites(st, dense_ok=False)
         for name, fn in SECONDARY:
             y = fn(ctx)
-            stack = P.obs_stack(obs_c, y, cg)
-            recs += sweep(st, ctx, y, csites, stack=stack, tag=f"secondary/{name}", B=B,
-                          extra=dict(t=t, split=split, target=name))
+            ex = dict(t=t, split=split, target=name)
+            units += sweep_units(path, ctx, y, csites, tag=f"secondary/{name}", B=B, extra=ex,
+                                 stack=Lazy(P.obs_stack, obs_c, y, cg))
             if strict:
-                st_stack = P.obs_stack(np.hstack([obs_c, ctx[["level"]].to_numpy(float)]), y, cg)
-                recs += sweep(st, ctx, y, csites, stack=st_stack, tag=f"strict_secondary/{name}", B=B,
-                              plain=False, extra=dict(t=t, split=split, target=name))
+                units += sweep_units(path, ctx, y, csites, tag=f"strict_secondary/{name}", B=B, extra=ex,
+                                     plain=False,
+                                     stack=Lazy(P.obs_stack, np.hstack([obs_c, ctx[["level"]].to_numpy(float)]), y, cg))
 
+    out_name = f"p2_{split}_t{t:g}"
+    ckpt = Checkpoint(out, out_name, dict(analysis="P2", store=str(store_root), t=t, split=split, B=B,
+                                          controls=controls, control_task=control_task,
+                                          obs_tmd=t_f is not None, strict=strict))
+    recs = run_units(units, ckpt)
     meta = dict(analysis="P2", store=str(store_root), t=t, split=split, store_meta=st.meta,
                 obs_cols=OBS_FRONTIER + KHOP_COLS, obs_tmd=t_f is not None)
-    write(out, f"p2_{split}_t{t:g}", recs, meta)
+    write(out, out_name, recs, meta)
     dirs = directions(st, front, sites)
     np.savez(Path(out) / f"directions_p2_{split}_t{t:g}.npz", **dirs)
     return pd.DataFrame(recs)
