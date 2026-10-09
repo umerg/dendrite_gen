@@ -25,7 +25,7 @@ import pandas as pd
 
 from .. import probe as P
 from ..baselines import KHOP_COLS, matrix
-from .common import baseline_records, load, ordered_sites, site_depth, sweep, write
+from .common import Checkpoint, load, ordered_sites, run_units, site_probe_unit, split_tables, sweep_units, write
 
 
 def run(store_root, t: float, split: str, out, B: int = 500, max_rows: int | None = None, seed: int = 0):
@@ -36,7 +36,6 @@ def run(store_root, t: float, split: str, out, B: int = 500, max_rows: int | Non
         rows = rows[rows.neuron.isin(keep)].reset_index(drop=True)
     sites_all = ordered_sites(st)                    # frontier/root-child rows: every site
     sites_ctx = ordered_sites(st, dense_ok=False)    # context rows include B2: sparse sites only
-    recs, diag = [], []
 
     front = rows[rows.is_frontier].reset_index(drop=True)
     ctx = rows[~rows.is_frontier].reset_index(drop=True)
@@ -52,6 +51,9 @@ def run(store_root, t: float, split: str, out, B: int = 500, max_rows: int | Non
         ("own_edge/frontier", front, front.parent_dist.to_numpy(float), sites_all),
         ("is_frontier/all", rows, rows.is_frontier.to_numpy().astype(int), sites_ctx),
     ]
+    path = str(st.path)
+    extra = dict(t=t, split=split)
+    units = []
     for tag, df, y, sites in jobs:
         df = df.reset_index(drop=True)
         ok = np.isfinite(y.astype(float))
@@ -60,27 +62,24 @@ def run(store_root, t: float, split: str, out, B: int = 500, max_rows: int | Non
             print(f"[P1] skip {tag}: too few rows")
             continue
         print(f"[P1] {tag}: {len(df)} rows, {df.neuron.nunique()} neurons", flush=True)
-        groups = df.neuron.to_numpy()
-        recs += sweep(st, df, y, sites, tag=tag, B=B, extra=dict(t=t, split=split))
-        recs += baseline_records(df, y, groups, {
-            "raw_input": st.acts("in", df),
-            "khop": matrix(df, KHOP_COLS),
-        }, P.task_kind(y), tag, B=B, extra=dict(t=t, split=split))
+        if tag == "is_frontier/all":
+            # pure pipeline check (the flag is an input channel): input + last layer suffice
+            sites = [s for s in sites if s in ("in", sites[-1])]
+        kind = P.task_kind(y)
+        units += sweep_units(path, df, y, sites, tag=tag, B=B, extra=extra, kind=kind,
+                             diag=tag.startswith("depth/"))
+        # the raw-input baseline is exactly the probe at site `in`; only the k-hop profile is extra
+        units.append((f"{tag}|baseline:khop", site_probe_unit,
+                      dict(path=path, site="baseline:khop", rref=None, y=y, groups=df.neuron.to_numpy(),
+                           kind=kind, rec=dict(tag=tag, **extra), B=B, X=matrix(df, KHOP_COLS))))
 
-        if tag.startswith("depth/"):
-            for s in sites:
-                res = P.ridge_cv(st.acts(s, df), y, groups)
-                err = np.abs(res.oof - y)
-                for d in np.unique(y):
-                    m = y == d
-                    pair = (y == d) | (y == d + 1)
-                    auc = (P.score((y[pair] == d + 1).astype(int), res.oof[pair], "binary")
-                           if (y == d + 1).sum() >= 20 and m.sum() >= 20 else np.nan)
-                    diag.append(dict(tag=tag, site=s, x=site_depth(s), depth=int(d), n=int(m.sum()),
-                                     mae=float(err[m].mean()), auc_next=auc))
-
+    name = f"p1_{split}_t{t:g}"
+    ckpt = Checkpoint(out, name, dict(analysis="P1", store=str(store_root), t=t, split=split, B=B,
+                                      max_rows=max_rows, seed=seed))
+    recs, side = split_tables(run_units(units, ckpt))
+    diag = side.get("diag", [])
     meta = dict(analysis="P1", store=str(store_root), t=t, split=split, store_meta=st.meta)
-    write(out, f"p1_{split}_t{t:g}", recs, meta)
+    write(out, name, recs, meta)
     write(out, f"p1_depth_diag_{split}_t{t:g}", diag, meta)
     return pd.DataFrame(recs), pd.DataFrame(diag)
 

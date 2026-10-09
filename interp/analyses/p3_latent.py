@@ -30,7 +30,7 @@ from .. import probe as P
 from ..baselines import GRAPH_OBS, graph_table, matrix, morpho_cols
 from ..load import compose_cfg, uhat_of
 from ..store import Store
-from .common import is_tmd_store, write
+from .common import Checkpoint, Lazy, is_tmd_store, run_units, site_probe_unit, stack_score_unit, write
 
 V_BINS = [(1, 1), (2, 2), (3, 3), (4, 4), (5, 5), (6, 6), (7, 8), (9, 99)]
 
@@ -80,7 +80,8 @@ def run(store_root, t: float, split: str, out, config: str | None = None, n_pcs:
     if is_tmd:
         obs = np.hstack([obs, PCA(n_components=min(64, ntmd.shape[1], len(ntmd) - 1)).fit_transform(ntmd)[gt.neuron.to_numpy()]])
 
-    recs = []
+    path = str(st.path)
+    units = []
     for lo, hi in V_BINS:
         m = (gt.visible_depth >= lo) & (gt.visible_depth <= hi)
         sub = gt[m]
@@ -105,26 +106,28 @@ def run(store_root, t: float, split: str, out, config: str | None = None, n_pcs:
             yk, gk = y[keep], groups[keep]
             if name == "cell_class":
                 kind = "binary" if len(np.unique(yk)) == 2 else "multiclass"
-            stack = P.obs_stack(obs[idx][keep], yk, gk, kind=kind)
-            extra = dict(t=t, split=split, target=name, v_lo=lo, v_hi=hi, n=int(keep.sum()))
-            recs.append(dict(site="baseline:partial_tree", score=stack.score_obs, **extra))
+            stack = Lazy(P.obs_stack, obs[idx][keep], yk, gk, kind=kind)
+            ex = dict(t=t, split=split, target=name, v_lo=lo, v_hi=hi)
+            key = f"{name}|v{lo}-{hi}"
+            units.append((f"{key}|baseline:partial_tree", stack_score_unit,
+                          dict(stack=stack, rec=dict(site="baseline:partial_tree", n=int(keep.sum()), **ex))))
             if tmd_input and name == "cell_class":
-                r = P.linear_probe(ntmd[gt.neuron.to_numpy()[idx][keep]], yk, gk, kind=kind)
-                recs.append(dict(site="baseline:tmd_input", score=r.score, **extra))
-            for s in sites:
-                X = graph_X(st, s, items)[keep]
-                r = P.linear_probe(X, yk, gk, kind=kind)
-                inc = P.incremental_with(stack, X)
-                d, dlo, dhi = P.paired_bootstrap(yk, inc["oof_obs"], inc["oof_full"], gk, kind, B=B)
-                pt, plo, phi = P.bootstrap_ci(yk, r.oof, gk, kind, B=B)
-                recs.append(dict(site=s, score=pt, lo=plo, hi=phi, score_obs=stack.score_obs,
-                                 score_full=inc["score_full"], delta=d, delta_lo=dlo, delta_hi=dhi, **extra))
-            print(f"  {name}: baseline={stack.score_obs:.3f}  best={max(x['score'] for x in recs[-len(sites):]):.3f}",
-                  flush=True)
+                units.append((f"{key}|baseline:tmd_input", site_probe_unit,
+                              dict(path=path, site="baseline:tmd_input", rref=None, y=yk, groups=gk, kind=kind,
+                                   rec=ex, B=B, X=ntmd[gt.neuron.to_numpy()[idx][keep]])))
+            for s_ in sites:
+                units.append((f"{key}|{s_}", site_probe_unit,
+                              dict(path=path, site=s_, rref=None, y=yk, groups=gk, kind=kind, rec=ex, B=B,
+                                   stack=stack, items=items, keep=keep)))
+    out_name = f"p3_{split}_t{t:g}"
+    ckpt = Checkpoint(out, out_name, dict(analysis="P3", store=str(store_root), t=t, split=split, B=B,
+                                          n_pcs=n_pcs, partial_tmd=partial_tmd, sites=sites, tmd_input=tmd_input,
+                                          min_neurons=min_neurons))
+    recs = run_units(units, ckpt)
     meta = dict(analysis="P3", store=str(store_root), t=t, split=split, store_meta=st.meta,
                 tmd_pca_explained=pca.explained_variance_ratio_.tolist(), obs_cols=base,
                 partial_tmd=ptmd is not None)
-    write(out, f"p3_{split}_t{t:g}", recs, meta)
+    write(out, out_name, recs, meta)
     return pd.DataFrame(recs)
 
 

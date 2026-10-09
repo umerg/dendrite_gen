@@ -25,8 +25,8 @@ from .. import probe as P
 from ..baselines import GRAPH_OBS, graph_table, matrix, morpho_cols
 from ..load import compose_cfg, uhat_of
 from ..store import Store
-from .common import is_tmd_store, write
-from .p3_latent import graph_X, graph_sites
+from .common import Checkpoint, Lazy, is_tmd_store, run_units, site_probe_unit, stack_score_unit, write
+from .p3_latent import graph_sites
 
 
 def run(store_root, t: float, split: str, out, config: str | None = None, B: int = 300,
@@ -52,26 +52,27 @@ def run(store_root, t: float, split: str, out, config: str | None = None, B: int
         "final_depth": gt.n_levels.to_numpy(float),
         "is_last": (gt.level == 0).to_numpy().astype(int),
     }
-    recs = []
+    path = str(st.path)
+    units = []
     for name, y in targets.items():
         kind = P.task_kind(y)
-        stack = P.obs_stack(obs, y, groups, kind=kind)
-        extra = dict(t=t, split=split, target=name, n=len(y), obs_tmd=obs_tmd)
-        recs.append(dict(site="baseline:observables", score=stack.score_obs, **extra))
-        r_v = P.linear_probe(gt[["visible_depth"]].to_numpy(float), y, groups, kind=kind)
-        recs.append(dict(site="baseline:visible_depth_only", score=r_v.score, **extra))
-        print(f"[P5] {name}: obs={stack.score_obs:.3f} v-only={r_v.score:.3f}", flush=True)
-        for s in sites:
-            X = graph_X(st, s, items)
-            r = P.linear_probe(X, y, groups, kind=kind)
-            pt, lo, hi = P.bootstrap_ci(y, r.oof, groups, r.kind, B=B)
-            inc = P.incremental_with(stack, X)
-            d, dlo, dhi = P.paired_bootstrap(y, inc["oof_obs"], inc["oof_full"], groups, r.kind, B=B)
-            recs.append(dict(site=s, score=pt, lo=lo, hi=hi, score_obs=stack.score_obs,
-                             score_full=inc["score_full"], delta=d, delta_lo=dlo, delta_hi=dhi, **extra))
-            print(f"  {s:>9} score={pt:.3f}  Δ={d:+.3f} [{dlo:+.3f},{dhi:+.3f}]", flush=True)
+        stack = Lazy(P.obs_stack, obs, y, groups, kind=kind)
+        ex = dict(t=t, split=split, target=name, obs_tmd=obs_tmd)
+        units.append((f"{name}|baseline:observables", stack_score_unit,
+                      dict(stack=stack, rec=dict(site="baseline:observables", n=len(y), **ex))))
+        units.append((f"{name}|baseline:visible_depth_only", site_probe_unit,
+                      dict(path=path, site="baseline:visible_depth_only", rref=None, y=y, groups=groups,
+                           kind=kind, rec=ex, B=B, X=gt[["visible_depth"]].to_numpy(float))))
+        for s_ in sites:
+            units.append((f"{name}|{s_}", site_probe_unit,
+                          dict(path=path, site=s_, rref=None, y=y, groups=groups, kind=kind, rec=ex, B=B,
+                               stack=stack, items=items)))
+    out_name = f"p5_{split}_t{t:g}"
+    ckpt = Checkpoint(out, out_name, dict(analysis="P5", store=str(store_root), t=t, split=split, B=B,
+                                          sites=sites, obs_tmd=obs_tmd))
+    recs = run_units(units, ckpt)
     meta = dict(analysis="P5", store=str(store_root), t=t, split=split, store_meta=st.meta, obs_cols=cols)
-    write(out, f"p5_{split}_t{t:g}", recs, meta)
+    write(out, out_name, recs, meta)
     return pd.DataFrame(recs)
 
 
