@@ -47,7 +47,7 @@ def load(store_root: str | Path, t: float, split: str):
 # A checkpoint is only reused if its signature (analysis, store, t, split, B, options, code
 # version) matches; otherwise it is moved aside as *.stale and the analysis starts fresh.
 
-CKPT_VERSION = 1   # bump when unit results would change for the same signature
+CKPT_VERSION = 2   # 2: probes centre only (no winsorising / z-scoring of activations); bump when unit results would change for the same signature
 
 
 def n_jobs_default() -> int:
@@ -190,10 +190,11 @@ def row_ref(rows: pd.DataFrame) -> pd.DataFrame:
 
 def site_probe_unit(path: str, site: str, rref, y, groups, kind, rec: dict, B: int,
                     stack=None, plain: bool = True, X=None, diag_tag: str | None = None,
-                    items=None, keep=None) -> list[dict]:
+                    items=None, keep=None, scale: bool = False) -> list[dict]:
     """One site: plain probe score + CI and, with ``stack``, Δ over observables. ``X`` overrides
     loading node activations (graph-level sites, baselines). ``diag_tag``: also emit the P1
-    depth-diagonal records from the same out-of-fold predictions."""
+    depth-diagonal records from the same out-of-fold predictions. ``scale``: z-score the plain
+    probe's columns (mixed-unit hand-built baselines only; activations are only centred)."""
     y = np.asarray(y)
     groups = np.asarray(groups)
     if X is None and items is not None:      # graph-level site: G{i} tokens or pool_<site>
@@ -207,7 +208,7 @@ def site_probe_unit(path: str, site: str, rref, y, groups, kind, rec: dict, B: i
            "n": len(y), "n_neurons": int(len(np.unique(groups)))}
     out_extra = []
     if plain:
-        res = P.linear_probe(X, y, groups, kind=kind)
+        res = P.linear_probe(X, y, groups, kind=kind, scale=scale)
         kind_s = res.kind
         pt, lo, hi = P.bootstrap_ci(y, res.oof, groups, res.kind, B=B)
         if diag_tag is not None:

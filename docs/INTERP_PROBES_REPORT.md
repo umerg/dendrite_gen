@@ -179,7 +179,9 @@ visible* (a node near the soma in a big tree will have a big subtree). So the ma
 Worth knowing because several gave spurious "results" before they were fixed:
 
 1. **Ridge regularisation chosen by GCV** blew up on heavy-tailed random-init features (R² down
-   to −40) → now chosen by grouped inner CV. Features are winsorised at 0.5/99.5 %.
+   to −40) → now chosen by grouped inner CV. (Features were also winsorised at 0.5/99.5 % and
+   z-scored at the time; that was later dropped in favour of centring only — see
+   `docs/INTERP_METHODOLOGY.md` §5.2. The pilot numbers here predate that change.)
 2. **Observables model overfit** neuron-constant targets (memorising neurons from row features)
    → would *inflate* Δ in the network's favour. Now chosen among several complexities by grouped
    inner CV; regression tests ensure Δ ≈ 0 for pure-noise activations.

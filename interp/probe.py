@@ -42,35 +42,43 @@ def folds(groups: np.ndarray, n_splits: int = 5, seed: int = 0):
                 .split(np.zeros(len(groups)), groups=groups))
 
 
-WINSOR = (0.5, 99.5)
-FREE_SCALE = 30.0   # baseline columns are multiplied by this after standardising → ~unpenalised
+FREE_SCALE = 30.0   # baseline columns: std = FREE_SCALE × activation scale → ~unpenalised
 
 
-def _standardize(Xtr, Xte, free: int = 0):
-    """Winsorize each feature at the training fold's WINSOR percentiles, then z-score.
+def _prepare(Xtr, Xte, free: int = 0, scale: bool = False):
+    """Centre every column on the training split; activations are otherwise left at the
+    model's own scale (no clipping, no per-channel rescaling), as in standard probing practice.
 
-    Activations can be heavy-tailed (a few rows with very large norm, especially deep in the
-    residual stream); without clipping those rows dominate ridge / logistic fits. Columns whose
-    clip range collapses (rare non-zero features) are not clipped. The first ``free`` columns
-    (stacked baseline predictions) are never clipped and are scaled by FREE_SCALE so that the
-    penalty on them is negligible.
+    Returns (Xtr, Xte, s2) with s2 = mean training variance of the non-free columns. The
+    penalty grids are expressed relative to s2 (ridge: α·s2, logistic: C/s2). That only places
+    the grid where the data are: a probe on X with penalty α·s2 makes exactly the same
+    predictions as a probe on X/√s2 with penalty α, so the per-channel scales the model chose
+    are untouched, and layers whose activations differ in overall size get comparable grids.
+
+    ``scale=True`` additionally z-scores each non-free column (s2 is then 1). Use it only for
+    hand-built feature sets with mixed units (e.g. the k-hop profile baseline), never for
+    activations. The first ``free`` columns (stacked baseline predictions) are z-scored and
+    multiplied by FREE_SCALE·√s2 so that the penalty on them is negligible.
     """
     Xtr = np.array(Xtr, dtype=np.float64, copy=True)
     Xte = np.array(Xte, dtype=np.float64, copy=True)
-    lo, hi = np.percentile(Xtr, WINSOR, axis=0)
-    clip = hi > lo
-    clip[:free] = False
-    if clip.any():
-        Xtr[:, clip] = np.clip(Xtr[:, clip], lo[clip], hi[clip])
-        Xte[:, clip] = np.clip(Xte[:, clip], lo[clip], hi[clip])
     mu = Xtr.mean(0)
+    Xtr -= mu
+    Xte -= mu
     sd = Xtr.std(0)
     sd[sd < 1e-8] = 1.0
-    Xtr, Xte = (Xtr - mu) / sd, (Xte - mu) / sd
+    if scale:
+        Xtr[:, free:] /= sd[free:]
+        Xte[:, free:] /= sd[free:]
+        s2 = 1.0
+    else:
+        v = Xtr[:, free:].var(0)
+        s2 = float(v.mean()) if v.size and v.mean() > 1e-12 else 1.0
     if free:
-        Xtr[:, :free] *= FREE_SCALE
-        Xte[:, :free] *= FREE_SCALE
-    return Xtr, Xte
+        f = FREE_SCALE * np.sqrt(s2) / sd[:free]
+        Xtr[:, :free] *= f
+        Xte[:, :free] *= f
+    return Xtr, Xte, s2
 
 
 def task_kind(y: np.ndarray) -> str:
@@ -120,27 +128,30 @@ def _ridge_path(Xtr, ytr, wtr, Xte, alphas):
     return np.asarray([XV_te @ (z / (lam + a)) + ym for a in alphas])
 
 
-def _ridge_fit_predict(Xtr, ytr, wtr, gtr, Xte, alphas=ALPHAS, seed=0, n_inner=3, free_cols=0):
+def _ridge_fit_predict(Xtr, ytr, wtr, gtr, Xte, alphas=ALPHAS, seed=0, n_inner=3, free_cols=0,
+                       scale=False):
     """Ridge with alpha chosen by grouped inner CV on the training fold (held-out weighted MSE).
 
     GCV is unreliable here: with heavy-tailed activations (notably random-init controls) it
-    picks small alphas whose weights extrapolate wildly on held-out neurons. Inputs are raw
-    (unstandardised); winsorising/standardising is redone inside every split.
-    Returns (pred_te, alpha).
+    picks small alphas whose weights extrapolate wildly on held-out neurons. Inputs are raw;
+    centring is redone inside every split and ``alphas`` are relative to the split's mean
+    feature variance (see ``_prepare``). Returns (pred_te, relative alpha).
     """
     mse = np.zeros(len(alphas))
     for itr, iva in folds(gtr, n_inner, seed + 7):
-        A, Bv = _standardize(Xtr[itr], Xtr[iva], free_cols)
-        preds = _ridge_path(A, ytr[itr], wtr[itr], Bv, alphas)
+        A, Bv, s2 = _prepare(Xtr[itr], Xtr[iva], free_cols, scale)
+        preds = _ridge_path(A, ytr[itr], wtr[itr], Bv, alphas * s2)
         mse += np.average((preds - ytr[iva][None, :]) ** 2, axis=1, weights=wtr[iva])
     k = int(np.argmin(mse))
-    A, B = _standardize(Xtr, Xte, free_cols)
-    return _ridge_path(A, ytr, wtr, B, alphas[k:k + 1])[0], float(alphas[k])
+    A, B, s2 = _prepare(Xtr, Xte, free_cols, scale)
+    return _ridge_path(A, ytr, wtr, B, alphas[k:k + 1] * s2)[0], float(alphas[k])
 
 
-def _logit_fit_predict(Xtr, ytr, wtr, gtr, Xte, kind, Cs=CS, seed=0, n_inner=3, free_cols=0, max_iter=500):
+def _logit_fit_predict(Xtr, ytr, wtr, gtr, Xte, kind, Cs=CS, seed=0, n_inner=3, free_cols=0, max_iter=500,
+                       scale=False):
     """Logistic probe with C chosen by grouped inner CV; first ``free_cols`` columns ~unpenalised.
-    If no inner split can be scored (e.g. single-class validation folds) C falls back to 1.0."""
+    ``Cs`` are relative to the mean feature variance (C/s2, see ``_prepare``). If no inner split
+    can be scored (e.g. single-class validation folds) C falls back to 1.0."""
     def pred(m, B):
         return m.predict_proba(B)[:, 1] if kind == "binary" else m.predict(B)
 
@@ -151,8 +162,8 @@ def _logit_fit_predict(Xtr, ytr, wtr, gtr, Xte, kind, Cs=CS, seed=0, n_inner=3, 
         for itr, iva in inner:
             if len(np.unique(ytr[itr])) < 2:
                 continue
-            A, B = _standardize(Xtr[itr], Xtr[iva], free_cols)
-            m = LogisticRegression(C=C, max_iter=max_iter).fit(A, ytr[itr], sample_weight=wtr[itr])
+            A, B, s2 = _prepare(Xtr[itr], Xtr[iva], free_cols, scale)
+            m = LogisticRegression(C=C / s2, max_iter=max_iter).fit(A, ytr[itr], sample_weight=wtr[itr])
             sc.append(score(ytr[iva], pred(m, B), kind, wtr[iva]))
         sc = np.asarray(sc, dtype=float)
         if np.isfinite(sc).any() and np.nanmean(sc) > best:
@@ -160,8 +171,8 @@ def _logit_fit_predict(Xtr, ytr, wtr, gtr, Xte, kind, Cs=CS, seed=0, n_inner=3, 
     if bestC is None:
         warnings.warn("logistic probe: no scorable inner split; using C=1.0")
         bestC = 1.0
-    A, B = _standardize(Xtr, Xte, free_cols)
-    m = LogisticRegression(C=bestC, max_iter=max_iter).fit(A, ytr, sample_weight=wtr)
+    A, B, s2 = _prepare(Xtr, Xte, free_cols, scale)
+    m = LogisticRegression(C=bestC / s2, max_iter=max_iter).fit(A, ytr, sample_weight=wtr)
     return pred(m, B), float(bestC)
 
 
@@ -174,9 +185,11 @@ class ProbeResult:
     params: list = field(default_factory=list)
 
 
-def ridge_cv(X, y, groups, weights=None, alphas=ALPHAS, n_splits=5, seed=0, X_eval=None) -> ProbeResult:
+def ridge_cv(X, y, groups, weights=None, alphas=ALPHAS, n_splits=5, seed=0, X_eval=None,
+             scale=False) -> ProbeResult:
     """Grouped-CV ridge. With ``X_eval`` (same rows, e.g. activations under an ablation), each
-    fold's probe is fit on ``X`` and *scored on* ``X_eval`` — the fixed-probe transfer test."""
+    fold's probe is fit on ``X`` and *scored on* ``X_eval`` — the fixed-probe transfer test.
+    ``scale``: z-score columns (mixed-unit feature sets only; see ``_prepare``)."""
     X = np.asarray(X, dtype=np.float64)
     Xe = X if X_eval is None else np.asarray(X_eval, dtype=np.float64)
     y = np.asarray(y, dtype=np.float64)
@@ -185,16 +198,17 @@ def ridge_cv(X, y, groups, weights=None, alphas=ALPHAS, n_splits=5, seed=0, X_ev
     oof = np.zeros(len(y))
     fs, ps = [], []
     for tr, te in folds(groups, n_splits, seed):
-        oof[te], a = _ridge_fit_predict(X[tr], y[tr], w[tr], groups[tr], Xe[te], alphas, seed)
+        oof[te], a = _ridge_fit_predict(X[tr], y[tr], w[tr], groups[tr], Xe[te], alphas, seed,
+                                          scale=scale)
         fs.append(score(y[te], oof[te], "regression", w[te]))
         ps.append(a)
     return ProbeResult("regression", oof, score(y, oof, "regression", w), fs, ps)
 
 
 def logistic_cv(X, y, groups, weights=None, Cs=CS, n_splits=5, seed=0, max_iter=300,
-                X_eval=None) -> ProbeResult:
+                X_eval=None, scale=False) -> ProbeResult:
     """L2 logistic probe; C picked by grouped inner CV inside each training fold.
-    ``X_eval``: see ``ridge_cv``."""
+    ``X_eval``, ``scale``: see ``ridge_cv``."""
     X = np.asarray(X, dtype=np.float64)
     Xe = X if X_eval is None else np.asarray(X_eval, dtype=np.float64)
     y = np.asarray(y)
@@ -205,7 +219,7 @@ def logistic_cv(X, y, groups, weights=None, Cs=CS, n_splits=5, seed=0, max_iter=
     fs, ps = [], []
     for tr, te in folds(groups, n_splits, seed):
         oof[te], C = _logit_fit_predict(X[tr], y[tr], w[tr], groups[tr], Xe[te], kind, Cs, seed,
-                                        max_iter=max_iter)
+                                        max_iter=max_iter, scale=scale)
         fs.append(score(y[te], oof[te], kind, w[te]))
         ps.append(C)
     return ProbeResult(kind, oof, score(y, oof, kind, w), fs, ps)
@@ -367,7 +381,7 @@ def obs_stack(obs, y, groups, weights=None, kind=None, n_splits=5, seed=0, model
 def incremental_with(stack: ObsStack, X) -> dict:
     """Linear probe on [ô, X] per fold of ``stack``; Δ against the same probe on [ô] alone.
 
-    ô enters (almost) unpenalised and unclipped, so the stacked probe can always reproduce the
+    ô enters (almost) unpenalised, so the stacked probe can always reproduce the
     baseline; Δ < 0 only reflects genuine overfitting to X.
     """
     X = np.asarray(X, dtype=np.float64)

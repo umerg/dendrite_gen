@@ -71,7 +71,8 @@ def run(store_root, t: float, split: str, out, B: int = 500, max_rows: int | Non
         # the raw-input baseline is exactly the probe at site `in`; only the k-hop profile is extra
         units.append((f"{tag}|baseline:khop", site_probe_unit,
                       dict(path=path, site="baseline:khop", rref=None, y=y, groups=df.neuron.to_numpy(),
-                           kind=kind, rec=dict(tag=tag, **extra), B=B, X=matrix(df, KHOP_COLS))))
+                           kind=kind, rec=dict(tag=tag, **extra), B=B, X=matrix(df, KHOP_COLS),
+                           scale=True)))
 
     name = f"p1_{split}_t{t:g}"
     ckpt = Checkpoint(out, name, dict(analysis="P1", store=str(store_root), t=t, split=split, B=B,

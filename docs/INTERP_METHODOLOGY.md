@@ -338,11 +338,20 @@ information is recoverable by a strong learner" (Alain & Bengio 2016; Hewitt & L
 
 ### 5.2 Fitting
 
-* **Pre-processing (per training split):** each feature is winsorised at the training split's
-  0.5 / 99.5 percentiles (skipped when that range collapses, so rare features survive), then
-  z-scored with training statistics. Rationale: activations can be heavy-tailed; a handful of
-  extreme rows otherwise dominate the fit (✅ observed: R² down to −40 on random-init features
-  before this).
+* **Pre-processing (per training split): centring only.** Each activation channel has its
+  training-split mean subtracted; nothing is clipped and no channel is rescaled, so the probe
+  sees the per-channel scales the model itself produces. This follows common probing practice:
+  Marks & Tegmark 2023 (*Geometry of Truth*) centre and otherwise use raw activations; Gurnee &
+  Tegmark 2023 (*Space and Time*) fit ridge on raw activations; Burns et al. 2022 (CCS) centre and
+  divide by one shared scalar; Li et al. 2023 (ITI) do not standardise and report insensitivity
+  to it. *Why not per-channel z-scoring:* it stretches low-variance channels the network may
+  ignore up to the same weight as dominant ones, and it treats the channel basis as meaningful.
+  *Why not winsorising:* networks can store information in rare large activations ("massive
+  activations", Sun et al. 2024), which clipping would delete. (History: an earlier version
+  winsorised at 0.5 / 99.5 % and z-scored; that was introduced to rescue the random-init control,
+  R² −40 — it was never shown to be needed for the trained network. Removed, §13.)
+  *Exception:* the hand-built k-hop profile baseline of P1 (§4.2) mixes units (counts, µm), so
+  its probe z-scores its columns (`scale=True`); activations never are.
 * **Neuron weights:** every row of neuron g gets weight w = 1/n_g (rescaled to mean 1), so each
   neuron counts equally regardless of size.
 * **Ridge (continuous targets)** with an unpenalised intercept, solved by eigendecomposition for
@@ -353,7 +362,15 @@ information is recoverable by a strong learner" (Alain & Bengio 2016; Hewitt & L
 * **Hyper-parameters** (α ∈ 10^[−2,5], 15 values; C ∈ 10^[−4,1], 6 values) are chosen by
   **grouped inner cross-validation inside each training fold** (held-out weighted MSE for ridge,
   held-out score for logistic). GCV was abandoned because it chose badly on heavy-tailed
-  features. If no inner split can be scored, C falls back to 1 with a warning.
+  features (and it leaves out rows, not neurons). If no inner split can be scored, C falls back
+  to 1 with a warning.
+* **The grids are relative to the activation scale.** With s² = mean training variance of the
+  activation channels, the penalty actually used is α·s² (ridge) and C/s² (logistic). This does
+  not rescale the data: a probe on x with penalty α·s² makes exactly the same predictions as a
+  probe on x/s with penalty α. It only places the grid where the data are — activations grow
+  through the residual stream (|h| up to ~346 at deep layers), so a fixed absolute grid would
+  penalise early layers far more than late ones and could run off the end of the grid. Reported
+  α / C are the relative values.
 
 ### 5.3 Cross-validation: grouped by neuron
 
@@ -402,10 +419,10 @@ $$\Delta = \text{score}\big(\text{OOF of }[\hat o, x]\big) - \text{score}\big(\t
   (rescale, re-threshold). If the baseline score were the raw ô, that recalibration would be
   credited to x. ✅ `test_delta_does_not_credit_recalibration_multiclass` (Δ for an all-zero x
   is < 0.01). AUROC is invariant to monotone recalibration, so binary results were never affected.
-* **ô effectively unpenalised:** after standardisation the ô columns are multiplied by s = 30 and
-  never winsorised. A ridge penalty α on the scaled coefficient corresponds to α/s² = α/900 on the
-  original scale, so the stacker can always reproduce the baseline; Δ < 0 then only reflects
-  genuine overfitting to x. ✅ `test_binary_incremental_no_penalty_artifact`.
+* **ô effectively unpenalised:** the ô columns (baseline predictions, not activations) are
+  z-scored and multiplied by 30·s, i.e. 30× the typical activation channel's spread. Relative to
+  an activation channel the penalty on ô is therefore 1/900 as strong, so the stacker can always
+  reproduce the baseline; Δ < 0 then only reflects genuine overfitting to x. ✅ `test_binary_incremental_no_penalty_artifact`.
 * **Cross-fitting:** ô on training rows is itself out-of-fold, so the stacker never sees a
   baseline prediction that was fit on the row it is learning from.
 
@@ -727,6 +744,7 @@ operating point. `zero` is a robustness check.
 | Observables = visible tree + model output | + **conditioning TMD (64 PCs)** for the TMD arm; reach/axial/morphometrics from **placed nodes only** | the TMD arm is given the final-tree summary; frontier positions are noise at t = 0 |
 | Δ via GBM on observables | **CV-selected** observables model (3 GBMs + linear) and baseline = **same stacker on ô** | neuron memorisation inflated Δ; raw-ô baseline credited recalibration (§6.2) |
 | Ridge α by GCV | grouped inner CV | GCV mis-selected on heavy-tailed features |
+| (implicit) standardise probe inputs | **centre only**; no winsorising, no per-channel z-scoring of activations; α / C grids relative to the mean activation variance | keep the model's own channel scales, as in Marks & Tegmark, Gurnee & Tegmark, CCS, ITI (§5.2). Results computed with the earlier winsorise + z-score pipeline are superseded (checkpoint version 2 forces a rerun) |
 | Hewitt–Liang control task as a primary control | opt-in | trivially solvable here (keys are inputs) |
 | — | **P2 strict variant** (+ levels remaining) | target cap height ≤ ℓ (§3.2) |
 | P6b per-bin R² | **Spearman** per bin for continuous targets; minimum positives per bin | pooled-intercept artefact (§9.6) |
