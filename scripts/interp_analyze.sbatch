@@ -30,6 +30,7 @@ ANALYSES=${ANALYSES:-p1,p2,p3,p5,p6}
 T=${T:-0}
 ABLATED=${ABLATED:-}                     # name=path[,name=path...] (P6 part c)
 B=${B:-500}
+P1_GROUPS=${P1_GROUPS:-sanity,ctx,path,morpho}   # P1 target groups (interp/analyses/p1_local.py)
 JOBS=${JOBS:-8}                          # parallel worker processes (layers run in parallel); each gets
                                          # CPUs/JOBS BLAS threads. Peak memory ~2-3 GB per worker on full val.
 OUT=${OUT:-${STORE}/results}
@@ -88,7 +89,7 @@ for an in "${AN[@]}"; do
     echo "=== ${an} $(date)"
     set +o errexit
     case "${an}" in
-        p1) python -m interp.analyses.p1_local     --store "${STORE}" --t "${T}" --split "${SPLIT}" --out "${OUT}" --B "${B}" ;;
+        p1) python -m interp.analyses.p1_local     --store "${STORE}" --t "${T}" --split "${SPLIT}" --out "${OUT}" --B "${B}" --groups "${P1_GROUPS}" ;;
         p2) python -m interp.analyses.p2_lookahead --store "${STORE}" --t "${T}" --split "${SPLIT}" --out "${OUT}" --B "${B}" ;;
         p3) python -m interp.analyses.p3_latent    --store "${STORE}" --t "${T}" --split "${SPLIT}" --out "${OUT}" --B "${B}" --tmd-input ;;
         p5) python -m interp.analyses.p5_stop      --store "${STORE}" --t "${T}" --split "${SPLIT}" --out "${OUT}" --B "${B}" ;;

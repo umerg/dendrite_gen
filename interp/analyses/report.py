@@ -67,6 +67,22 @@ def report(res_dir, control=None) -> str:
                 piv = g[keys + cols].dropna(axis=1, how="all")
                 out.append(piv.to_string(index=False, max_rows=400))
             continue
+        if "_bins_" in csv.stem:
+            from .common import site_depth
+            df = df.assign(bin=df.depth_lo.astype(str) + "-" + df.depth_hi.astype(str).str.replace("99", "+"))
+            order = list(dict.fromkeys(df.sort_values("depth_lo").bin))
+            for tag, g in df.groupby("tag", sort=False):
+                for val, title in (("rho", "probe ρ within depth bin"),
+                                   ("drho", "Δρ within bin (full stack − observables only)")):
+                    if val == "drho":
+                        if "rho_full" not in g or g.rho_full.isna().all():
+                            continue
+                        g = g.assign(drho=g.rho_full - g.rho_obs)
+                    piv = g.pivot_table(index="site", columns="bin", values=val, aggfunc="first")
+                    piv = piv.loc[sorted(piv.index, key=site_depth), [b for b in order if b in piv.columns]]
+                    out.append(f"\n  [{tag}] {title}")
+                    out.append(piv.round(2).to_string())
+            continue
         if "depth_diag" in csv.stem:
             from .common import site_depth
             for tag, g in df.groupby("tag"):   # context vs frontier rows: separate tables
@@ -77,6 +93,10 @@ def report(res_dir, control=None) -> str:
             continue
         keys = ["tag"] if "tag" in df.columns else [c for c in ("target", "v_lo") if c in df.columns]
         out += _table(df, ctl, keys, "")
+        if "nonconv" in df.columns and df.nonconv.fillna(0).sum() > 0:
+            nc = df[df.nonconv.fillna(0) > 0]
+            out.append(f"\n  note: {int(nc.nonconv.sum())} solver fits hit their iteration cap "
+                       f"(in {len(nc)} of {len(df)} records)")
     return "\n".join(out)
 
 

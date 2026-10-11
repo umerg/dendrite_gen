@@ -1,5 +1,12 @@
 # What does the generator know? — Interpretability probes, first results
 
+> **Update (2026-10-11).** Everything below is **superseded**. The first full cluster run (both
+> arms, val, t = 0, with random-init controls) used winsorised, z-scored probes. Probes now only
+> centre activations (commit 0b18bb0), and P1 gained the ctx / path / morpho groups
+> (`docs/INTERP_METHODOLOGY.md` §9.1). Every analysis is being rerun on the trained checkpoints:
+> batch 1 is P1–P3, batch 2 is P5–P6. Random-init controls will be rerun once, before write-up.
+> This report will be rewritten from those runs.
+
 > **Status (2026-10-06).** Pilot results on the **TMD-conditioned parity arm**
 > (`parity_neurons_tmd`, step 218 500, EMA weights), **400 validation neurons**, against a
 > **random-initialised copy of the same network** as control. Full val + test runs and the

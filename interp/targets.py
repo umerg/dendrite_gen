@@ -89,13 +89,48 @@ def final_node_targets(parent: np.ndarray, depth: np.ndarray, pos: np.ndarray,
         is_apical_sub = owner == ap
 
     axial = (pos - pos[root]) @ np.asarray(uhat, dtype=float)
-    return pd.DataFrame(dict(
+    df = pd.DataFrame(dict(
         node=np.arange(n), parent=parent, depth=depth, n_children=[len(c) for c in ch],
         desc_final=desc, height_final=height, leaves_final=leaves, strahler_final=strahler,
         subtree_pathlen=sub_len, parent_dist=edge_len, branch_angle=angle,
         owner=owner, is_apical_subtree=is_apical_sub, axial_coord=axial,
         px=pos[:, 0], py=pos[:, 1], pz=pos[:, 2],
     ))
+    return add_path_geometry(df)
+
+
+def add_path_geometry(final: pd.DataFrame) -> pd.DataFrame:
+    """Soma-relative path geometry from ``parent`` and ``px/py/pz`` (P1 path targets).
+
+    Works on any ``final_node_targets`` frame, including ``targets_final.parquet`` written
+    before these columns existed. Adds:
+    pathdist_soma   summed edge length along the path soma → node (0 at the root)
+    radial          Euclidean distance to the root
+    log_tort        log(pathdist_soma / radial), NaN at the root
+    in_edge_radial_cos  cos(incoming edge, root→node direction): 1 = the edge points straight
+                    away from the soma; NaN for the root and root children (trivially 1)
+    """
+    df = final.sort_values("node").reset_index(drop=True)
+    parent = df.parent.to_numpy()
+    pos = df[["px", "py", "pz"]].to_numpy(float)
+    root = int(np.nonzero(parent < 0)[0][0])
+    rel = pos - pos[root]
+    nonroot = parent >= 0
+    edge = np.zeros(len(df))
+    edge[nonroot] = np.linalg.norm(pos[nonroot] - pos[parent[nonroot]], axis=1)
+    path = np.zeros(len(df))
+    for u in _postorder(parent)[::-1]:             # parents before children
+        if parent[u] >= 0:
+            path[u] = path[parent[u]] + edge[u]
+    radial = np.linalg.norm(rel, axis=1)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        tort = np.where((radial > 0) & (path > 0), np.log(path / radial), np.nan)
+    cos = np.full(len(df), np.nan)
+    p = np.where(nonroot, parent, root)
+    ok = nonroot & (parent[p] >= 0) & (radial > 0) & (edge > 0)
+    cos[ok] = np.einsum("ij,ij->i", pos[ok] - pos[p[ok]], rel[ok]) / (edge[ok] * radial[ok])
+    df["pathdist_soma"], df["radial"], df["log_tort"], df["in_edge_radial_cos"] = path, radial, tort, cos
+    return df
 
 
 def level_targets(final: pd.DataFrame, n_levels: int, level: int) -> pd.DataFrame:
@@ -114,6 +149,21 @@ def level_targets(final: pd.DataFrame, n_levels: int, level: int) -> pd.DataFram
         if depth[u] > v or parent[u] < 0:
             continue
         vis_desc[parent[u]] += vis_desc[u] + 1
+    # Strahler order of the visible tree (frontier nodes and finished tips are its leaves).
+    vis_str = np.zeros(len(final), dtype=np.int64)
+    best = np.zeros(len(final), dtype=np.int64)    # highest child order seen so far
+    nbest = np.zeros(len(final), dtype=np.int64)   # how many children attain it
+    for u in np.argsort(-depth, kind="stable"):
+        if depth[u] > v:
+            continue
+        vis_str[u] = 1 if nbest[u] == 0 else best[u] + int(nbest[u] >= 2)
+        p = parent[u]
+        if p >= 0:
+            if vis_str[u] > best[p]:
+                best[p], nbest[p] = vis_str[u], 1
+            elif vis_str[u] == best[p]:
+                nbest[p] += 1
+    df["vis_strahler"] = vis_str[df.node.to_numpy()]
     df["level"] = level
     df["visible_depth"] = v
     df["is_frontier"] = df.depth == v

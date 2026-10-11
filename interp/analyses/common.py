@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -188,12 +189,46 @@ def row_ref(rows: pd.DataFrame) -> pd.DataFrame:
     return rows[["row_dense", "row_sparse"]].reset_index(drop=True)
 
 
-def site_probe_unit(path: str, site: str, rref, y, groups, kind, rec: dict, B: int,
-                    stack=None, plain: bool = True, X=None, diag_tag: str | None = None,
-                    items=None, keep=None, scale: bool = False) -> list[dict]:
+DEPTH_BINS = [(1, 2), (3, 4), (5, 6), (7, 8), (9, 12), (13, 99)]
+
+
+def _bin_records(y, oof, groups, bins_by, tag, site, rec, oof_obs=None, oof_full=None) -> list[dict]:
+    """Within-depth-bin Spearman of out-of-fold predictions (P1 ``bins`` table). Ranking inside a
+    bin removes what depth alone explains; with a stack the observables-only and full-stack
+    predictions are scored the same way (their difference is a within-bin Δ)."""
+    out = []
+    for lo, hi in DEPTH_BINS:
+        m = (bins_by >= lo) & (bins_by <= hi) & np.isfinite(y)
+        if m.sum() < 30 or len(np.unique(groups[m])) < 5 or np.nanstd(y[m]) == 0:
+            continue
+        r = dict(_table="bins", tag=tag, site=site, x=site_depth(site), depth_lo=lo, depth_hi=hi,
+                 n=int(m.sum()), n_neurons=int(len(np.unique(groups[m]))),
+                 rho=P.spearman(y[m], oof[m]) if oof is not None else np.nan,
+                 **{k: v for k, v in rec.items() if k in ("t", "split")})
+        if oof_obs is not None:
+            r["rho_obs"], r["rho_full"] = P.spearman(y[m], oof_obs[m]), P.spearman(y[m], oof_full[m])
+        out.append(r)
+    return out
+
+
+def site_probe_unit(path: str, site: str, rref, y, groups, kind, rec: dict, B: int, **kw) -> list[dict]:
+    """``_site_probe`` plus ``nonconv``: the number of solver fits in this unit that stopped at their
+    iteration cap (sklearn ConvergenceWarning) — recorded, not acted on."""
+    from sklearn.exceptions import ConvergenceWarning
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", ConvergenceWarning)
+        out = _site_probe(path, site, rref, y, groups, kind, rec, B, **kw)
+    out[0]["nonconv"] = sum(issubclass(w.category, ConvergenceWarning) for w in caught)
+    return out
+
+
+def _site_probe(path: str, site: str, rref, y, groups, kind, rec: dict, B: int,
+                stack=None, plain: bool = True, X=None, diag_tag: str | None = None,
+                items=None, keep=None, scale: bool = False, bins_by=None) -> list[dict]:
     """One site: plain probe score + CI and, with ``stack``, Δ over observables. ``X`` overrides
     loading node activations (graph-level sites, baselines). ``diag_tag``: also emit the P1
-    depth-diagonal records from the same out-of-fold predictions. ``scale``: z-score the plain
+    depth-diagonal records from the same out-of-fold predictions. ``bins_by`` (per-row depth):
+    also emit within-depth-bin rank scores (``_bin_records``). ``scale``: z-score the plain
     probe's columns (mixed-unit hand-built baselines only; activations are only centred)."""
     y = np.asarray(y)
     groups = np.asarray(groups)
@@ -207,10 +242,12 @@ def site_probe_unit(path: str, site: str, rref, y, groups, kind, rec: dict, B: i
     rec = {**rec, "site": site, "x": site_depth(site) if not site.startswith(("baseline", "G", "pool")) else np.nan,
            "n": len(y), "n_neurons": int(len(np.unique(groups)))}
     out_extra = []
+    oof = None
     if plain:
         res = P.linear_probe(X, y, groups, kind=kind, scale=scale)
         kind_s = res.kind
         pt, lo, hi = P.bootstrap_ci(y, res.oof, groups, res.kind, B=B)
+        oof = res.oof
         if diag_tag is not None:
             err = np.abs(res.oof - y)
             for d in np.unique(y):
@@ -228,12 +265,18 @@ def site_probe_unit(path: str, site: str, rref, y, groups, kind, rec: dict, B: i
         inc = P.incremental_with(stack, X)
         d, dlo, dhi = P.paired_bootstrap(y, inc["oof_obs"], inc["oof_full"], groups, kind_s, B=B)
         rec.update(score_obs=inc["score_obs"], score_full=inc["score_full"], delta=d, delta_lo=dlo, delta_hi=dhi)
+    if bins_by is not None:
+        o_obs, o_full = (inc["oof_obs"], inc["oof_full"]) if stack is not None else (None, None)
+        out_extra += _bin_records(y.astype(float), oof, groups, np.asarray(bins_by), rec["tag"], site, rec,
+                                  o_obs, o_full)
     return [rec] + out_extra
 
 
 def sweep_units(path: str, rows: pd.DataFrame, y, sites, *, tag: str, B: int, extra: dict | None = None,
-                kind=None, stack=None, plain: bool = True, diag: bool = False, key_prefix: str | None = None):
-    """Units probing ``y`` at every site of ``sites`` (node-level activations)."""
+                kind=None, stack=None, plain: bool = True, diag: bool = False, key_prefix: str | None = None,
+                bins: bool = False):
+    """Units probing ``y`` at every site of ``sites`` (node-level activations). ``bins``: emit
+    within-depth-bin rank scores keyed on ``rows.depth``."""
     y = np.asarray(y)
     kind = kind or P.task_kind(y)
     rref, groups = row_ref(rows), rows.neuron.to_numpy()
@@ -241,7 +284,8 @@ def sweep_units(path: str, rows: pd.DataFrame, y, sites, *, tag: str, B: int, ex
     pre = key_prefix or tag
     return [(f"{pre}|{s}", site_probe_unit,
              dict(path=path, site=s, rref=rref, y=y, groups=groups, kind=kind, rec=base, B=B,
-                  stack=stack, plain=plain, diag_tag=tag if diag else None))
+                  stack=stack, plain=plain, diag_tag=tag if diag else None,
+                  bins_by=rows.depth.to_numpy() if bins else None))
             for s in sites]
 
 

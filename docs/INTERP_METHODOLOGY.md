@@ -226,6 +226,13 @@ All targets are computed on the real neuron (`interp/targets.py`), indexed by or
 | `owner` | the soma child whose subtree contains u (u's primary dendrite) |
 | `is_apical_subtree` | owner is the apical soma child |
 | `axial_coord` | (p_u − p_soma)·û |
+| `pathdist_soma` | summed edge length along the path soma → u |
+| `radial` | ‖p_u − p_soma‖ (positions are recentred so the soma is the origin, `utils/data_loading.py`) |
+| `log_tort` | log(`pathdist_soma` / `radial`), tortuosity of the soma→u path |
+| `in_edge_radial_cos` | cos(u's incoming edge, soma→u direction); NaN for the soma and its children |
+
+The last four (`add_path_geometry`) are recomputed from `parent` and the stored positions when the
+row table is built, so stores extracted before they existed need no re-extraction.
 
 **Apical** = the soma child whose subtree reaches furthest along −û (the training flag,
 `root_child_order = axial_extent`; it is also ordinal slot 0 in the model input).
@@ -236,6 +243,8 @@ At visible depth v: `vis_desc(u)` = descendants with depth ≤ v; `hidden_desc =
 `vis_height = min(height_final, v − d(u))`; `hidden_height = height_final − vis_height`;
 `label2 = height_final ≥ 1` (the one-step branch label for frontier rows);
 `y_h2 = height_final ≥ 2` (will grow at least two more generations).
+`vis_strahler(u)` = Strahler order of u's subtree in the visible tree (frontier nodes and finished
+tips are its leaves); at level 0 it equals `strahler_final` (tested).
 
 Note the cap: a frontier node at level ℓ has height_final ≤ ℓ (the tree ends ℓ levels later). This
 is why P2 has a *strict* variant (§9.2).
@@ -480,7 +489,51 @@ Each card: **question → rows → targets → inputs → baseline → metric �
   propagation of depth.
 * **Assumption.** Depth is a meaningful variable for the network. 🟡 The pilot suggests it is not
   (neither network separates d from d+1 for d ≥ 6), so P1 is a calibration, not a routing test.
-* **Status.** ✅ built; pilot run at t = 0.6 (re-run at t = 0 pending).
+* **Status.** ✅ built; run at t = 0 on both arms (pre-centring probes; rerun pending, §14b).
+
+The checks above are the `sanity` group. They mostly show that the network writes coordinates into
+features, which is in its input anyway. Three more groups ask what the network builds that is
+*not* in a node's own input (`--groups`, default all):
+
+* **`ctx` (P1b): context arriving at the frontier.** Frontier rows only, every site. Targets are
+  properties of the frontier node's neighbourhood: its parent's incoming edge length and branch
+  angle (`parent_edge`, `parent_angle`); the parent's radial alignment (`parent_radial_cos`); the
+  grandparent's incoming edge (`gp_edge`); and the number of frontier siblings. The frontier
+  node's own position is noise at t = 0, so these can only reach its features by messages from
+  1–2 hops away.
+  * Question: does the parent's geometry arrive at the node being generated, and at which layer?
+  * Expectation: under message passing, 1-hop targets are decodable from about L0/L1 and 2-hop
+    targets one block later.
+* **`path`: path geometry.**
+  * Rows and targets:
+    * frontier rows: `parent_pathdist`, `parent_log_tort`, `parent_radial`, `parent_axial` (of the
+      parent, which is placed)
+    * placed rows (depth ≥ 1, sparse sites): `pathdist`, `log_tort`, `radial` of the node itself
+  * Path distance integrates edge lengths over the whole lineage, so it is *not* a function of a
+    node's coordinates. A net can only get it from depth-many hops or from global routing.
+  * Radial distance is the easy control: it is a 0-hop function of the node's (or parent's)
+    coordinates.
+* **`morpho`: morphometric aggregates.**
+  * Frontier rows: `log(1 + own dendrite's visible size)`, own dendrite reach and height,
+    `log(1 + visible tree size)`, tallest visible reach.
+  * Placed rows: `vis_strahler`, `log(1 + vis_desc)`, `vis_height`.
+  * Question: does the network build internally the quantities we evaluate generations with?
+* **Depth confound and how it is handled.** Every ctx/path/morpho target correlates with depth,
+  so each gets two readouts beyond the plain R²:
+  1. **Δ over a small geometry baseline** (§6): `[depth]`, or `[depth, radial, |axial|]` of the
+     parent (frontier rows) or node (placed rows) for path distance and tortuosity. The baseline
+     models are linear / gbm_small / gbm_mid, since there are few observables.
+  2. **Within-depth-bin rank scores** (`p1_bins_*.csv`): Spearman ρ of the out-of-fold
+     prediction inside depth bins 1–2, 3–4, 5–6, 7–8, 9–12, 13+.
+     * The same is computed for the observables-only and full stacks; their difference is a
+       within-bin Δ.
+     * Ranking inside a bin removes what depth alone explains.
+     * Reading the table: under pure message passing, deep bins become decodable only at deep
+       layers. Decoding above that line points to global routing.
+* **Interpretation rule.** A morphometric is "built by the network" only if its Δ over the
+  baseline is positive with a CI excluding 0 *and* the within-bin ρ rises across layers. A high
+  plain R² alone is not enough, since depth explains much of it.
+* **Status.** ✅ built 2026-10-11; first run with the centring-only rerun.
 
 ### 9.2 P2 — look-ahead · `analyses/p2_lookahead.py`
 
@@ -803,7 +856,13 @@ Two cost-only simplifications made at the same time: P1's "is-frontier" pipeline
 only at `in` and the last layer; and P1's separate "raw-input baseline" was removed because it
 was the identical probe on identical data as layer `in` (read `in` as the raw-input baseline).
 The P1 depth-diagonal now reuses the sweep's own out-of-fold predictions instead of refitting
-the same ridge (identical numbers).
+the same ridge (identical numbers). The P1 within-depth-bin table (§9.1) does the same.
+
+**Solver convergence.** Each record carries `nonconv`: the number of solver fits in that unit
+that stopped at their iteration cap. These are sklearn ConvergenceWarnings, almost always from
+lbfgs logistic fits at weak regularisation. The warnings are captured rather than printed, and
+`report` prints the total. Nothing is refitted. A record with many non-converged fits is a
+candidate for a refit with a larger cap, not an automatic exclusion.
 
 ---
 

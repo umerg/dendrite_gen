@@ -21,10 +21,11 @@ from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import shortest_path
 
 from .store import Store
-from .targets import apical_final_reach, cross_dendrite_targets, level_targets
+from .targets import add_path_geometry, apical_final_reach, cross_dendrite_targets, level_targets
 
 K_HOP = 12
-CACHE_VERSION = 3   # bump whenever row_table / graph_table columns change (old caches are ignored)
+CACHE_VERSION = 3   # bump whenever graph_table columns change (old caches are ignored)
+ROWS_VERSION = 4    # bump whenever row_table columns change
 KHOP_COLS = ([f"hop{k}_n" for k in range(1, K_HOP + 1)]
              + [f"hop{k}_front" for k in range(1, K_HOP + 1)]
              + [f"hop{k}_axial" for k in range(1, K_HOP + 1)])
@@ -96,6 +97,15 @@ def _item_rows(rows: pd.DataFrame, final: pd.DataFrame) -> pd.DataFrame:
     p = lt.parent.to_numpy()
     lt["parent_edge"] = np.where(p >= 0, pe[np.maximum(p, 0)], 0.0)
     lt["parent_angle"] = np.where(p >= 0, pa[np.maximum(p, 0)], np.nan)
+    # parent's soma-relative path geometry (P1 path/ctx targets; parents are always placed)
+    par = final.parent.to_numpy()
+    pp = np.maximum(p, 0)
+    for src, dst in [("pathdist_soma", "parent_pathdist"), ("radial", "parent_radial"),
+                     ("axial_coord", "parent_axial"), ("log_tort", "parent_log_tort"),
+                     ("in_edge_radial_cos", "parent_radial_cos")]:
+        lt[dst] = np.where(p >= 0, final[src].to_numpy()[pp], np.nan)
+    gp = np.where(p >= 0, par[pp], -1)
+    lt["gp_edge"] = np.where(gp >= 0, pe[np.maximum(gp, 0)], np.nan)   # grandparent's incoming edge
 
     cd = cross_dendrite_targets(lt)
     cd_cols = ["apical_vis_reach", "apical_is_tallest_vis", "other_arm_tall_vis", "n_tall_vis",
@@ -108,11 +118,11 @@ def _item_rows(rows: pd.DataFrame, final: pd.DataFrame) -> pd.DataFrame:
 
 
 def row_table(store: Store, cache: bool = True) -> pd.DataFrame:
-    path = store.path / f"rows_v{CACHE_VERSION}.parquet"
+    path = store.path / f"rows_v{ROWS_VERSION}.parquet"
     if cache and path.exists():
         return pd.read_parquet(path)
     tf = store.targets_final()
-    finals = {k: g.sort_values("node").reset_index(drop=True) for k, g in tf.groupby("neuron")}
+    finals = {k: add_path_geometry(g) for k, g in tf.groupby("neuron")}
     parts = [_item_rows(rows, finals[n]) for (n, _), rows in store.index.groupby(["neuron", "level"], sort=False)]
     out = pd.concat(parts, ignore_index=True)
     out = out.sort_values("row_sparse").reset_index(drop=True)

@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pytest
 
 DATA_DIR = Path(os.environ.get("INTERP_DATA_DIR", "/Users/umer/Documents/neurons_conditional_full"))
@@ -34,9 +35,21 @@ def test_row_table(store):
     assert ((f.hidden_desc == f.desc_final) & (f.vis_desc == 0)).all()
     # the hop-1 neighbourhood of a frontier node is its parent (+ its own children: none visible)
     assert (f.hop1_n == 1).all()
+    # parent-indexed path geometry on frontier rows = the parent's own values in the final tree
+    from interp.targets import add_path_geometry
+    tf = pd.concat([add_path_geometry(g) for _, g in st.targets_final().groupby("neuron")])
+    par = f[["neuron", "parent", "parent_pathdist", "parent_radial", "parent_radial_cos"]].merge(
+        tf[["neuron", "node", "pathdist_soma", "radial", "in_edge_radial_cos"]],
+        left_on=["neuron", "parent"], right_on=["neuron", "node"], validate="many_to_one")
+    assert len(par) == len(f)
+    np.testing.assert_allclose(par.parent_pathdist, par.pathdist_soma)
+    np.testing.assert_allclose(par.parent_radial, par.radial)
+    np.testing.assert_allclose(par.parent_radial_cos, par.in_edge_radial_cos)
+    assert (f.parent_pathdist >= f.parent_radial - 1e-9).all()      # path ≥ straight line
+    assert (rows.vis_strahler >= 1).all()
     # row table is cached
-    from interp.baselines import CACHE_VERSION
-    assert (st.path / f"rows_v{CACHE_VERSION}.parquet").exists()
+    from interp.baselines import ROWS_VERSION
+    assert (st.path / f"rows_v{ROWS_VERSION}.parquet").exists()
 
 
 def test_p1_p2_run(store, tmp_path):
@@ -46,6 +59,15 @@ def test_p1_p2_run(store, tmp_path):
     fr = recs[(recs.tag == "is_frontier/all") & (recs.site == "in")]
     assert fr.score.iloc[0] > 0.99          # new_leaf_flag is an input channel
     assert set(diag.tag) == {"depth/context", "depth/frontier"}
+    for tag in ("ctx/parent_edge/frontier", "path/parent_pathdist/frontier", "morpho/vis_strahler/placed"):
+        g = recs[recs.tag == tag]
+        assert len(g) and g.delta.notna().all() and g.score_obs.notna().all(), tag
+    assert "nonconv" in recs.columns
+    bins = pd.read_csv(tmp_path / "p1_bins_val_t0.csv")
+    assert {"tag", "site", "depth_lo", "depth_hi", "rho", "rho_obs", "rho_full"} <= set(bins.columns)
+    assert not bins.tag.str.startswith("depth/").any()
+    from interp.analyses.report import report
+    assert "probe ρ within depth bin" in report(tmp_path)
 
     p2 = p2_lookahead.run(store, 0.0, "val", tmp_path, B=20)
     prim = p2[p2.tag == "primary/y_h2"]
