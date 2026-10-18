@@ -124,3 +124,14 @@ def test_p3_p5_p6_run(store, ablated_store, tmp_path):
     assert modes == {"intact", "fixed_probe", "refit"}
     for f in ("p3_val_t0.csv", "p5_val_t0.csv", "p6_val_t0.csv"):
         assert (tmp_path / f).exists()
+
+
+def test_within_tree(store, tmp_path):
+    from interp.analyses import within_tree
+
+    df = within_tree.run(store, 0.0, "val", tmp_path, max_neurons=30)
+    assert {"rho_pooled", "rho_within", "share_between"} <= set(df.columns)
+    orc = df[df.site == "oracle:tree_mean"]
+    assert len(orc) and (orc.rho_within.dropna().abs() < 1e-9).all()   # tree-only knowledge scores 0 within trees
+    assert (tmp_path / "within_tree_val_t0.csv").exists()
+    assert "rho_within" in within_tree.table(df, "rho_within")
