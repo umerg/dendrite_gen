@@ -59,20 +59,31 @@ def test_p1_p2_run(store, tmp_path):
     fr = recs[(recs.tag == "is_frontier/all") & (recs.site == "in")]
     assert fr.score.iloc[0] > 0.99          # new_leaf_flag is an input channel
     assert set(diag.tag) == {"depth/context", "depth/frontier"}
-    for tag in ("ctx/parent_edge/frontier", "path/parent_pathdist/frontier", "morpho/vis_strahler/placed"):
+    for tag in ("ctx/parent_edge/frontier", "path/parent_pathdist/frontier", "dend/own_minus_apical/basal",
+                "dend/mine_taller/basal", "morpho/strahler_ge3/internal"):
         g = recs[recs.tag == tag]
         assert len(g) and g.delta.notna().all() and g.score_obs.notna().all(), tag
+    assert recs[recs.tag == "morpho/strahler_ge3/internal"].kind.iloc[0] == "binary"
+    # tree-level targets are no longer probed on node rows (they live in P5's tree/ targets)
+    assert not recs.tag.isin(["morpho/log_n_visible/frontier", "morpho/tallest_reach/frontier"]).any()
     assert "nonconv" in recs.columns
     bins = pd.read_csv(tmp_path / "p1_bins_val_t0.csv")
-    assert {"tag", "site", "depth_lo", "depth_hi", "rho", "rho_obs", "rho_full"} <= set(bins.columns)
-    assert not bins.tag.str.startswith("depth/").any()
+    assert {"tag", "site", "depth_lo", "depth_hi", "rho", "rho_obs", "rho_full",
+            "rho_tree", "rho_dend", "share_tree", "rho_tree_obs", "rho_tree_full"} <= set(bins.columns)
+    assert not bins.tag.str.startswith("depth/").any() and "own_edge/frontier" in set(bins.tag)
+    assert bins.rho_tree.notna().any() and bins.share_tree.between(0, 1).any()
     from interp.analyses.report import report
-    assert "probe ρ within depth bin" in report(tmp_path)
+    rep = report(tmp_path)
+    assert "probe ρ within depth bin" in rep and "within snapshot" in rep
 
     p2 = p2_lookahead.run(store, 0.0, "val", tmp_path, B=20)
     prim = p2[p2.tag == "primary/y_h2"]
     assert {"delta", "delta_lo", "delta_hi", "score_obs"} <= set(prim.columns)
     assert len(prim) == prim.site.nunique() > 10
+    assert {"apical/y_h2", "nonapical/y_h2"} <= set(p2.tag)
+    assert p2[p2.tag == "apical/y_h2"].delta.notna().all()
+    b2 = pd.read_csv(tmp_path / "p2_bins_val_t0.csv")
+    assert {"primary/y_h2", "apical/y_h2", "nonapical/y_h2"} <= set(b2.tag) and "rho_tree" in b2
     d = np.load(tmp_path / "directions_p2_val_t0.npz")
     assert d["L7/v_grow"].shape == (256,)
     v = d["L7/v_orth"]
@@ -117,6 +128,9 @@ def test_p3_p5_p6_run(store, ablated_store, tmp_path):
     p5 = p5_stop.run(store, 0.0, "val", tmp_path, B=20, sites=["G11", "pool_L11"])
     lr = p5[(p5.target == "levels_remaining") & (p5.site == "baseline:observables")]
     assert lr.score.iloc[0] > 0.0      # observables beat predicting the mean
+    tree = p5[p5.target.str.startswith("tree/")]
+    assert {"tree/log_n_visible", "tree/tallest_reach"} <= set(tree.target)
+    assert "baseline:tree_average" in set(tree.site) and tree[tree.site == "G11"].delta.notna().all()
 
     p6 = p6_apical.run(store, 0.0, "val", tmp_path, ablated={"zero": str(ablated_store)}, B=20)
     assert {"a_own_lineage", "b_cross", "c_pos_err", "c_ablation"} <= set(p6.part)

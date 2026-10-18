@@ -636,12 +636,29 @@ there was the apical label. ⛔
 - the apical's final reach (given by the apical flag);
 - own dendrite height (equals depth for frontier rows).
 
-**Implementation (⛔):**
-- a `--unit none|tree|dendrite` option on the bins table, generalising `within_tree.py`;
-- internal-only rows for the visible-subtree targets;
-- apical membership in the P2 observables, plus the non-apical variant;
-- the tree-average baseline for graph-level probes;
-- the "mine vs the apical" target.
+**Implementation (✅ built 2026-10-18; ⛔ not yet run on trained weights):**
+- **Within-group bins** (`analyses/common.py::_bin_records`, `_within`, `tree_ids`, `dend_ids`).
+  Every bins table (P1 ctx / path / dend / morpho and own edge; all P2 variants) now carries:
+  - `rho_tree` and `rho_dend` (snapshot- and dendrite-centred probe scores);
+  - `rho_tree_obs` / `rho_tree_full` (the same for the observables-only and full stacks);
+  - `share_tree` (the between-snapshot share of the bin's variance).
+- **P1 groups** (`analyses/p1_local.py`):
+  - `dend` (dendrite level): own reach, own size; for basal rows own rank, own reach minus the
+    apical's (relative to the tallest), and own-taller-than-apical.
+  - `morpho` on internal placed nodes: Strahler ≥ 3 (binary), log descendants, height.
+  - Tree size, tallest reach and own dendrite height are removed from node rows.
+- **P2** (`analyses/p2_lookahead.py`):
+  - `apical/<target>` (Δ with apical membership in the observables);
+  - `nonapical/<target>` (frontier rows outside the apical dendrite);
+  - a bins table `p2_bins_*` for the primary / apical / non-apical variants;
+  - `--no-apical` to skip.
+- **Tree-average baseline** (`baselines.py::tree_average_table`, cached `tree_avg_v1.parquet`).
+  - Used as the observables for P5's new graph-level `tree/` targets: log visible size, tallest
+    reach, apical reach relative to the tallest, apical is tallest.
+  - Its columns are also added to P5's stopping observables and to P3's partial-tree baseline.
+- **Report:** the bins tables print the pooled, within-snapshot and within-dendrite views; P6
+  tables are no longer truncated.
+- **`CKPT_VERSION` = 3,** so every analysis reruns from scratch.
 
 ---
 

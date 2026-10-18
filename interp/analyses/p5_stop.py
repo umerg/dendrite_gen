@@ -12,6 +12,15 @@ partial-tree morphometrics. For TMD-conditioned stores the conditioning vector's
 to the observables (the model is *given* them, and the path filtration encodes D).
 
 Reported per graph-level site: plain probe score and Δ over observables (with neuron CI).
+
+Tree-level facts (``tree/<target>``, methodology §8b.6): visible tree size (log), the tallest
+dendrite's reach, the apical's reach relative to the tallest, and whether the apical is the
+tallest. They are constant within a snapshot, so they are probed here, one row per snapshot,
+not on node rows. Their baseline is only what one attention read of the L0 node states could
+average: the tree-wide means of edge length / axial step / sideways length / leaf flag and the
+frontier and soma-child fractions (``baselines.tree_average_table``), plus visible depth. Δ over
+that is the part of a tree fact *not* explained by a single tree-wide average. The same tree
+averages are also added to the stopping targets' observables.
 """
 from __future__ import annotations
 
@@ -22,7 +31,7 @@ import pandas as pd
 from sklearn.decomposition import PCA
 
 from .. import probe as P
-from ..baselines import GRAPH_OBS, graph_table, matrix, morpho_cols
+from ..baselines import GRAPH_OBS, TREE_AVG_COLS, graph_table, matrix, morpho_cols, tree_average_table
 from ..load import compose_cfg, uhat_of
 from ..store import Store
 from .common import Checkpoint, Lazy, is_tmd_store, run_units, site_probe_unit, stack_score_unit, write
@@ -34,12 +43,15 @@ def run(store_root, t: float, split: str, out, config: str | None = None, B: int
     st = Store.open(store_root, t, split)
     cfg = compose_cfg(config or st.meta["config"])
     gt, _ = graph_table(st, uhat_of(cfg))
+    ta = tree_average_table(st, uhat_of(cfg))
     gt = gt.sort_values("item").reset_index(drop=True)
+    tcols = TREE_AVG_COLS + ["log_n_visible", "tallest_reach", "apical_reach_rel", "apical_is_tallest"]
+    gt = gt.merge(ta[["item"] + tcols], on="item", how="left", validate="one_to_one")
     sites = sites or graph_sites(st)
     if obs_tmd is None:
         obs_tmd = is_tmd_store(st)
 
-    cols = [*GRAPH_OBS, *morpho_cols(gt)]
+    cols = [*GRAPH_OBS, *morpho_cols(gt), *TREE_AVG_COLS]
     obs = matrix(gt, cols)
     if obs_tmd:
         ntmd = st.neuron_tmd()
@@ -67,6 +79,28 @@ def run(store_root, t: float, split: str, out, config: str | None = None, B: int
             units.append((f"{name}|{s_}", site_probe_unit,
                           dict(path=path, site=s_, rref=None, y=y, groups=groups, kind=kind, rec=ex, B=B,
                                stack=stack, items=items)))
+    # tree-level facts vs the single-attention-read baseline (§8b.6)
+    obs_ta = matrix(gt, [*TREE_AVG_COLS, "visible_depth"])
+    tree_targets = {"tree/log_n_visible": gt.log_n_visible.to_numpy(float),
+                    "tree/tallest_reach": gt.tallest_reach.to_numpy(float),
+                    "tree/apical_reach_rel": gt.apical_reach_rel.to_numpy(float),
+                    "tree/apical_is_tallest": gt.apical_is_tallest.to_numpy(float)}
+    for name, yall in tree_targets.items():
+        keep = np.isfinite(yall)
+        if keep.sum() < 50 or len(np.unique(yall[keep])) < 2:
+            continue
+        y = yall[keep]
+        kind = P.task_kind(y)
+        y = y.astype(int) if kind != "regression" else y
+        gk = groups[keep]
+        stack = Lazy(P.obs_stack, obs_ta[keep], y, gk, kind=kind)
+        ex = dict(t=t, split=split, target=name, obs_tmd=False)
+        units.append((f"{name}|baseline:tree_average", stack_score_unit,
+                      dict(stack=stack, rec=dict(site="baseline:tree_average", n=len(y), **ex))))
+        for s_ in sites:
+            units.append((f"{name}|{s_}", site_probe_unit,
+                          dict(path=path, site=s_, rref=None, y=y, groups=gk, kind=kind, rec=ex, B=B,
+                               stack=stack, items=items, keep=keep)))
     out_name = f"p5_{split}_t{t:g}"
     ckpt = Checkpoint(out, out_name, dict(analysis="P5", store=str(store_root), t=t, split=split, B=B,
                                           sites=sites, obs_tmd=obs_tmd))

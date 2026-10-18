@@ -48,7 +48,7 @@ def load(store_root: str | Path, t: float, split: str):
 # A checkpoint is only reused if its signature (analysis, store, t, split, B, options, code
 # version) matches; otherwise it is moved aside as *.stale and the analysis starts fresh.
 
-CKPT_VERSION = 2   # 2: probes centre only (no winsorising / z-scoring of activations); bump when unit results would change for the same signature
+CKPT_VERSION = 3   # 3: within-tree / within-dendrite bins (§8b); 2: probes centre only; bump when unit results would change for the same signature
 
 
 def n_jobs_default() -> int:
@@ -192,10 +192,29 @@ def row_ref(rows: pd.DataFrame) -> pd.DataFrame:
 DEPTH_BINS = [(1, 2), (3, 4), (5, 6), (7, 8), (9, 12), (13, 99)]
 
 
-def _bin_records(y, oof, groups, bins_by, tag, site, rec, oof_obs=None, oof_full=None) -> list[dict]:
+def _within(y, p, grp):
+    """Spearman of group-centred target vs group-centred prediction (methodology §8b.2), over
+    rows whose group has >= 2 rows. A prediction constant within every group scores 0."""
+    d = pd.DataFrame({"y": y, "p": p, "g": grp})
+    d = d[d.groupby("g").y.transform("size") >= 2]
+    if len(d) < 30:
+        return np.nan, np.nan
+    yc = d.y - d.groupby("g").y.transform("mean")
+    pc = d.p - d.groupby("g").p.transform("mean")
+    if yc.std() == 0:
+        return np.nan, np.nan
+    share = float(1 - yc.var() / y.var()) if np.var(y) > 0 else np.nan
+    return (P.spearman(yc, pc) if pc.std() > 1e-12 else 0.0), share
+
+
+def _bin_records(y, oof, groups, bins_by, tag, site, rec, oof_obs=None, oof_full=None,
+                 tree=None, dend=None) -> list[dict]:
     """Within-depth-bin Spearman of out-of-fold predictions (P1 ``bins`` table). Ranking inside a
     bin removes what depth alone explains; with a stack the observables-only and full-stack
-    predictions are scored the same way (their difference is a within-bin Δ)."""
+    predictions are scored the same way (their difference is a within-bin Δ). With ``tree`` /
+    ``dend`` ids (partial-tree snapshot, primary dendrite within it) each bin is also scored
+    within groups (§8b.2): ``rho_tree`` / ``rho_dend``, ``rho_tree_obs`` / ``rho_tree_full``, and
+    ``share_tree`` = the part of the bin's variance that is between snapshots."""
     out = []
     for lo, hi in DEPTH_BINS:
         m = (bins_by >= lo) & (bins_by <= hi) & np.isfinite(y)
@@ -207,6 +226,14 @@ def _bin_records(y, oof, groups, bins_by, tag, site, rec, oof_obs=None, oof_full
                  **{k: v for k, v in rec.items() if k in ("t", "split")})
         if oof_obs is not None:
             r["rho_obs"], r["rho_full"] = P.spearman(y[m], oof_obs[m]), P.spearman(y[m], oof_full[m])
+        if tree is not None:
+            if oof is not None:
+                r["rho_tree"], r["share_tree"] = _within(y[m], oof[m], tree[m])
+            if oof_obs is not None:
+                r["rho_tree_obs"] = _within(y[m], oof_obs[m], tree[m])[0]
+                r["rho_tree_full"] = _within(y[m], oof_full[m], tree[m])[0]
+        if dend is not None and oof is not None:
+            r["rho_dend"] = _within(y[m], oof[m], dend[m])[0]
         out.append(r)
     return out
 
@@ -224,7 +251,8 @@ def site_probe_unit(path: str, site: str, rref, y, groups, kind, rec: dict, B: i
 
 def _site_probe(path: str, site: str, rref, y, groups, kind, rec: dict, B: int,
                 stack=None, plain: bool = True, X=None, diag_tag: str | None = None,
-                items=None, keep=None, scale: bool = False, bins_by=None) -> list[dict]:
+                items=None, keep=None, scale: bool = False, bins_by=None, bins_tree=None,
+                bins_dend=None) -> list[dict]:
     """One site: plain probe score + CI and, with ``stack``, Δ over observables. ``X`` overrides
     loading node activations (graph-level sites, baselines). ``diag_tag``: also emit the P1
     depth-diagonal records from the same out-of-fold predictions. ``bins_by`` (per-row depth):
@@ -268,15 +296,28 @@ def _site_probe(path: str, site: str, rref, y, groups, kind, rec: dict, B: int,
     if bins_by is not None:
         o_obs, o_full = (inc["oof_obs"], inc["oof_full"]) if stack is not None else (None, None)
         out_extra += _bin_records(y.astype(float), oof, groups, np.asarray(bins_by), rec["tag"], site, rec,
-                                  o_obs, o_full)
+                                  o_obs, o_full,
+                                  tree=None if bins_tree is None else np.asarray(bins_tree),
+                                  dend=None if bins_dend is None else np.asarray(bins_dend))
     return [rec] + out_extra
+
+
+def tree_ids(rows: pd.DataFrame) -> np.ndarray:
+    """One id per partial-tree snapshot (neuron × reduction level)."""
+    return rows.neuron.to_numpy(np.int64) * 1000 + rows.level.to_numpy(np.int64)
+
+
+def dend_ids(rows: pd.DataFrame) -> np.ndarray:
+    """One id per primary dendrite within a snapshot (the soma itself gets its own id)."""
+    return tree_ids(rows) * 100000 + (rows.owner.to_numpy(np.int64) + 1)
 
 
 def sweep_units(path: str, rows: pd.DataFrame, y, sites, *, tag: str, B: int, extra: dict | None = None,
                 kind=None, stack=None, plain: bool = True, diag: bool = False, key_prefix: str | None = None,
                 bins: bool = False):
     """Units probing ``y`` at every site of ``sites`` (node-level activations). ``bins``: emit
-    within-depth-bin rank scores keyed on ``rows.depth``."""
+    within-depth-bin rank scores keyed on ``rows.depth``, pooled and within snapshot / dendrite
+    (§8b.2; ids from ``tree_ids`` / ``dend_ids``)."""
     y = np.asarray(y)
     kind = kind or P.task_kind(y)
     rref, groups = row_ref(rows), rows.neuron.to_numpy()
@@ -285,7 +326,9 @@ def sweep_units(path: str, rows: pd.DataFrame, y, sites, *, tag: str, B: int, ex
     return [(f"{pre}|{s}", site_probe_unit,
              dict(path=path, site=s, rref=rref, y=y, groups=groups, kind=kind, rec=base, B=B,
                   stack=stack, plain=plain, diag_tag=tag if diag else None,
-                  bins_by=rows.depth.to_numpy() if bins else None))
+                  bins_by=rows.depth.to_numpy() if bins else None,
+                  bins_tree=tree_ids(rows) if bins else None,
+                  bins_dend=dend_ids(rows) if bins else None))
             for s in sites]
 
 
