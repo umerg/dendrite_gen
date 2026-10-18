@@ -28,6 +28,7 @@
 6. [Δ over observables — the main statistic](#6-δ-over-observables--the-main-statistic)
 7. [Controls](#7-controls)
 8. [Uncertainty](#8-uncertainty)
+   - 8b. [Choosing targets: level of variation, shortcuts, and the right test](#8b-choosing-targets-level-of-variation-shortcuts-and-the-right-test)
 9. [The experiments](#9-the-experiments)
 10. [Graph LayerNorm and interventions (steering, erasure, ablation)](#10-graph-layernorm-and-interventions)
 11. [Global-attention ablation](#11-global-attention-ablation)
@@ -468,6 +469,182 @@ across layers and controls (monotone growth with depth, random-init ≈ 0), not 
 
 ---
 
+## 8b. Choosing targets: level of variation, shortcuts, and the right test
+
+> Added 2026-10-18 after the shortcut audit (§8b.5). This section decides which quantities are
+> probed and how each is scored. Where it conflicts with an experiment card in §9, this section
+> wins until the cards are updated.
+
+### 8b.1 Every target lives at one of three levels
+
+A probe row is one node of one partial tree (a *snapshot*: one neuron at one reduction level).
+Every target is attached to one of three levels:
+
+| level | constant within … | examples |
+|---|---|---|
+| **tree** | a snapshot (every node of the tree has the same value) | visible tree size, tallest dendrite reach, cell type, final TMD, levels remaining; *for basal rows* the apical's current reach, "apical is tallest", the apical's final reach |
+| **dendrite** | a primary dendrite (soma child and its subtree) | own dendrite size / reach, "in the apical dendrite", own height rank |
+| **node** | nothing: varies node to node, even within one dendrite | parent's / grandparent's edge and angle, soma distance, tortuosity, radial alignment, own edge, subtree Strahler / descendants / height, future subtree (P2) |
+
+**Why it matters.** A node-level probe pools rows from many snapshots. Its score mixes two
+questions:
+- *which tree (or dendrite) is this node in?*
+- *within its tree, how does this node differ from the others?*
+
+A model that knows only the first can score high on the pooled number. Toy case: two neurons with
+parent soma distances {10, 11, 12} and {50, 51, 52} µm. A predictor that outputs each tree's mean
+(11 or 51) has pooled Spearman ρ = 0.88 but knows nothing about individual nodes.
+
+Writing the target as a sum over levels,
+
+  y_i = μ_tree(i) + δ_dend(i) + ε_i ,
+
+a pooled score credits the model for μ and δ as well as for ε. Each level therefore gets its own
+test (§8b.3).
+
+### 8b.2 Within-group scoring
+
+For a grouping g (snapshot or dendrite) and a depth bin, take the out-of-fold prediction p_i and
+target y_i. Centre both on their group:
+
+  ỹ_i = y_i − mean_{j∈g(i)} y_j ,  p̃_i = p_i − mean_{j∈g(i)} p_j ,
+
+over rows whose group has ≥ 2 rows in the bin. Then
+
+  ρ_within = Spearman(ỹ, p̃) ,  share_between = 1 − Var(ỹ) / Var(y).
+
+Properties:
+- A prediction that is constant within every group carries no within-group information and
+  scores exactly 0.
+- `share_between` is the part of the target's spread that a group-level summary could explain
+  on its own.
+- The *tree-mean oracle* (predict each row with its group's true mean) gives the ceiling the
+  pooled score can reach from group identity alone.
+
+Implemented for snapshots in `interp/analyses/within_tree.py` (soma distance only) ✅.
+Generalising it to all node- and dendrite-level targets is ⛔ (§8b.6).
+
+### 8b.3 The right test per level
+
+| level | the question | test | baseline |
+|---|---|---|---|
+| tree | has a tree fact been broadcast to (or computed for) the tree? | **graph-level probe**, one row per snapshot (as P3 / P5); a node-level within-tree score is undefined (Var ỹ = 0) | a **tree-wide average of input / L0 features** (§8b.4) and the pooled `pool_in` / `pool_L0` activation vectors |
+| dendrite | does the node know which dendrite it is in, and that dendrite's properties? | **within-tree** (between dendrites of one snapshot) | own-input flags (slot, apical flag) |
+| node | does the node represent its own position / structure? | **within-tree**, and **within-dendrite** where rows allow | local relative-coordinate cues at 1, 2, 3 hops (§8b.5) |
+
+Pooled within-depth-bin scores (`p1_bins`) are still reported, but read as "tree + dendrite +
+node" combined.
+
+### 8b.4 Confounds that apply across targets
+
+1. **Depth.** Most targets grow with depth. For frontier rows depth equals the snapshot's visible
+   depth, so depth bins partly group rows by snapshot.
+2. **Input shortcuts.** The input already contains the following per node (`method/expansion.py`
+   feature assembly):
+   - **the leaf flag:** every leaf of the partial tree, finished tips and frontier
+     (`reduction_dataset._build_reduced_graph_data`);
+   - **the frontier flag;**
+   - **the child ordinal:** soma-child rank, or left/right for binary children;
+   - **the flow inputs** e_t and t.
+   Three of these give targets away:
+   - the leaf flag gives visible Strahler order, descendants and height of placed nodes;
+   - the tree-wide average of the frontier flag gives visible tree size;
+   - **slot 0 is the apical, chosen on the finished neuron** (`reduction_dataset._compute_apical_flag`:
+     the soma child whose final subtree reaches deepest along −û). So apical membership, and much
+     of a node's future growth, are inputs routed down the lineage, not inferences. This is by
+     design (sampling also declares slot 0 the apical), but it must be in the baseline of any
+     probe it can explain.
+3. **One attention step = one tree-wide average.**
+   - After L0 each placed node holds its own edge's relative vector (length, axial step,
+     sideways step) and its input flags. Absolute coordinates never enter the features
+     (`egnn_so2.py`: edge features are rho, du and branch angles only).
+   - One read of the global tokens can therefore deliver averages of these over the tree.
+   - Baseline for tree-level targets:
+     m_s = mean over the snapshot's placed edges of (length, axial step, |axial step|,
+     sideways length, is-tip), plus the frontier and soma-child fractions. Fit a GBM on [m_s, depth].
+4. **Repeated snapshots.** One neuron yields many snapshots. CV is grouped by neuron
+   (no leakage); within-group scores group by snapshot.
+5. **Row sampling.** Placed rows are a 20 % sample plus every soma child, so the 1–2 depth bin
+   is dominated by soma children. Two-depth bins mix depths, so single-depth bins are used where
+   counts allow.
+6. **TMD arm.** The conditioning vector carries tree-level facts (size, final shape). Tree-level
+   targets are trivially available there; only node- and dendrite-level targets are informative.
+7. **Frontier positions are noise at t = 0.** Targets built from the frontier node's own position
+   (own edge) measure denoising, not encoding.
+
+### 8b.5 Evidence: the shortcut audit (2026-10-15 to 10-18)
+
+Data-only checks on the val row table and final-tree targets, plus one probe run on the uncond
+arm. Scripts are in the session scratchpad (`audit/*.py`); the probe run is
+`interp/analyses/within_tree.py`.
+
+| finding | numbers | consequence |
+|---|---|---|
+| Visible Strahler / descendants of placed nodes ≈ the input leaf flag | 38 % of placed rows are finished tips (all order 1); internal nodes are order 2 (70 %) or 3 (28 %). Within depth bins the flag alone ranks Strahler at ρ 0.95–0.99 from depth 3, above the probe at the input (0.81–0.83) | probe internal nodes only, as order 2 vs ≥ 3 |
+| Visible tree size at A1 ≈ the average of the frontier flag | within-bin ρ: probe A1 0.87–0.91; frontier fraction alone 0.82–0.83 | tree-level; graph-level probe vs tree-average baseline |
+| Every A1 jump matches one tree-wide average of edge geometry + input flags | tallest reach 0.70–0.73 vs 0.77–0.78; own reach 0.56–0.62 vs 0.64–0.72; parent soma distance 0.53–0.59 vs 0.54–0.61; probe ≤ the average at A1 and later | A1 = broadcast of a tree average. No evidence of per-dendrite pooling (own-dendrite averages would give 0.86–0.98; probe reaches ≤ 0.72) |
+| The P6b fade with hop distance is in the cheap baseline too | apical reach: tree average 0.74 → 0.00 from dAB 2–4 to 17+; probe 0.58 → 0.05 | not evidence of over-squashing; P6b targets are tree-level for basal rows |
+| Apical membership explains much of P2's late rise | cheap features + "in apical dendrite" vs probe L11: grows-twice AUROC 0.727 vs 0.74; log size R² 0.321 vs 0.34; path length 0.405 vs 0.45 | P2 look-ahead claim on hold (§9.2) |
+| Soma distance, within-tree (uncond, 300 neurons) | frontier parent: within-tree ρ ≈ 0.01 at A1 (pooled 0.50–0.61), jumps to 0.43–0.60 at L1, flat afterwards. Placed own: within-tree 0.86–0.92 (depth 1–4), 0.70–0.84 (5–8) from L1, flat | tree-level at A1; a node-level estimate from one message at L1, not refined |
+| That L1 estimate ≈ the parent's own edge | within-tree ρ from local relative-coordinate cues, depth 5–6 / 7–8 / 9–12: parent's edge only 0.74 / 0.56 / 0.45; + grandparent's 0.89 / 0.79 / 0.60; + third edge 0.94 / 0.89 / 0.72. Network best layer 0.66 / 0.62 / 0.46 | the model uses about a 1-hop cue and leaves easily available 2–3 hop information unused; it does not integrate the path to the soma |
+
+### 8b.6 Decided target set
+
+**Node level** (main P1 story; pooled + within-tree, within-dendrite where rows allow):
+
+| target | rows | status |
+|---|---|---|
+| parent's edge length, parent's branch angle, grandparent's edge | frontier | ✅ probed pooled; ⛔ within-tree |
+| soma distance (parent's for frontier, own for placed) | both | ✅ within-tree (300 neurons); ⛔ full val |
+| tortuosity log(path / straight) | both | ⛔ within-tree |
+| radial alignment of the parent's edge | frontier | ⛔ within-tree |
+| own edge (denoising) | frontier | ✅ pooled; ⛔ within-tree |
+| visible Strahler order, descendants, height | **internal placed nodes only** | ⛔ (current version is the leaf-flag shortcut) |
+
+**Dendrite level** (the real cross-dendrite question; within-tree):
+
+| target | rows | status |
+|---|---|---|
+| own dendrite reach, own dendrite size | frontier | ⛔ within-tree |
+| own height rank among dendrites | basal frontier | ⛔ within-tree |
+| **new:** own dendrite reach relative to the apical's (is mine taller?) | basal frontier | ⛔ |
+| in the apical dendrite | placed | reported as routing of the input apical label down the lineage |
+
+**Tree level** (graph-level probes only; baseline = tree-wide average of input / L0 features plus
+`pool_in` / `pool_L0`):
+
+| target | status |
+|---|---|
+| cell type, final TMD components (P3) | ✅ graph level; ⛔ add the tree-average / pooled-L0 baseline |
+| levels remaining, final depth, is last (P5) | ✅ graph level; ⛔ same baseline |
+| visible tree size, tallest reach, apical's current reach, apical is tallest | ⛔ move from node rows to graph rows |
+| apical's final reach | dropped: largely defined by the input apical flag |
+
+**P2 look-ahead** (node level with large dendrite and tree parts). Reported three ways:
+1. pooled, as now;
+2. within-tree;
+3. within-dendrite;
+
+with "in apical dendrite" added to the observables, plus a variant on non-apical frontier rows
+only. Look-ahead that survives within-dendrite is a node-level plan; look-ahead that vanishes
+there was the apical label. ⛔
+
+**Dropped from the headline set:**
+- depth (sanity only);
+- visible children (an input);
+- is-frontier (an input);
+- the apical's final reach (given by the apical flag);
+- own dendrite height (equals depth for frontier rows).
+
+**Implementation (⛔):**
+- a `--unit none|tree|dendrite` option on the bins table, generalising `within_tree.py`;
+- internal-only rows for the visible-subtree targets;
+- apical membership in the P2 observables, plus the non-apical variant;
+- the tree-average baseline for graph-level probes;
+- the "mine vs the apical" target.
+
+---
+
 ## 9. The experiments
 
 Each card: **question → rows → targets → inputs → baseline → metric → controls → interpretation
@@ -533,7 +710,9 @@ features, which is in its input anyway. Three more groups ask what the network b
 * **Interpretation rule.** A morphometric is "built by the network" only if its Δ over the
   baseline is positive with a CI excluding 0 *and* the within-bin ρ rises across layers. A high
   plain R² alone is not enough, since depth explains much of it.
-* **Status.** ✅ built 2026-10-11; first run with the centring-only rerun.
+* **Status.** ✅ built 2026-10-11; run with the centring-only probes (2026-10-12). **Superseded in part by §8b:**
+  tree size, own dendrite size and the A1 jumps are tree-wide averages, the visible-subtree targets are the
+  input leaf flag, and node-level targets need within-tree scores (§8b.6).
 
 ### 9.2 P2 — look-ahead · `analyses/p2_lookahead.py`
 
@@ -570,7 +749,9 @@ features, which is in its input anyway. Three more groups ask what the network b
   complete enough description of the visible tree that what remains is "computed" — 🟡 the 12-hop
   profile does not include neighbour ρ / angles, so some local geometric information is outside
   the baseline. (iii) TMD arm: 64 PCs capture the conditioning (§14).
-* **Status.** ✅ built; pilot (pre-audit, t = 0) run; strict variant not yet run.
+* **Status.** ✅ built; full val run on both arms (centring-only, 2026-10-13). **On hold (§8b.5):** apical
+  membership, which the input apical flag supplies, explains most of the L2→L11 rise. Rerun with it in
+  the observables, plus within-tree / within-dendrite scores and a non-apical-only variant (§8b.6).
 
 ### 9.3 P3 — latent discovery · `analyses/p3_latent.py`
 
@@ -613,7 +794,8 @@ features, which is in its input anyway. Three more groups ask what the network b
   adds beyond geometry.
 * **Metric.** AUROC overall and per depth; Δ per depth with paired CI. Per-depth bins require
   ≥ 30 rows, ≥ 10 neurons and ≥ 10 positives and ≥ 10 negatives each spread over ≥ 5 neurons.
-* **Status.** ✅ built; pilot run at t = 0.6.
+* **Status.** ✅ built; full val run (2026-10-13). Read as routing of the input apical label (slot 0, chosen on
+  the finished neuron) down the lineage, not as inference of which dendrite is apical (§8b.4).
 
 ### 9.6 P6b — cross-dendrite awareness
 
@@ -634,7 +816,10 @@ features, which is in its input anyway. Three more groups ask what the network b
 * **Interpretation.** Δ > 0 in the 9–12 and 13+ bins, absent in the random net, and removed by the
   global-attention ablation (P6c) ⇒ cross-dendrite information routed through the global tokens.
 * **Assumptions.** dAB caveat in §3.3; reach uses |axial| (§3.3, §14).
-* **Status.** ✅ built; pilot run at t = 0.6 (pre-audit; two targets were artefacts, §14).
+* **Status.** ✅ built; full val run (2026-10-13). **Reframed by §8b:** for basal rows, apical reach and
+  "apical is tallest" are tree-level (one value per snapshot); a tree-wide average of edge geometry matches
+  the probe, including the fade with dAB. The cross-dendrite question moves to dendrite-level targets
+  (own rank, own reach vs the apical's) scored within-tree (§8b.6).
 
 ### 9.7 P6c — does the information travel through the global tokens?
 
