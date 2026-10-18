@@ -30,7 +30,7 @@ ANALYSES=${ANALYSES:-p1,p2,p3,p5,p6}
 T=${T:-0}
 ABLATED=${ABLATED:-}                     # name=path[,name=path...] (P6 part c)
 B=${B:-500}
-P1_GROUPS=${P1_GROUPS:-sanity,ctx,path,morpho}   # P1 target groups (interp/analyses/p1_local.py)
+P1_GROUPS=${P1_GROUPS:-sanity,ctx,path,dend,morpho}   # P1 target groups (interp/analyses/p1_local.py)
 JOBS=${JOBS:-8}                          # parallel worker processes (layers run in parallel); each gets
                                          # CPUs/JOBS BLAS threads. Peak memory ~2-3 GB per worker on full val.
 OUT=${OUT:-${STORE}/results}

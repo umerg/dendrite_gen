@@ -27,7 +27,7 @@ import pandas as pd
 from sklearn.decomposition import PCA
 
 from .. import probe as P
-from ..baselines import GRAPH_OBS, graph_table, matrix, morpho_cols
+from ..baselines import GRAPH_OBS, TREE_AVG_COLS, graph_table, matrix, morpho_cols, tree_average_table
 from ..load import compose_cfg, uhat_of
 from ..store import Store
 from .common import Checkpoint, Lazy, is_tmd_store, run_units, site_probe_unit, stack_score_unit, write
@@ -54,6 +54,8 @@ def run(store_root, t: float, split: str, out, config: str | None = None, n_pcs:
     cfg = compose_cfg(config or st.meta["config"])
     gt, ptmd = graph_table(st, uhat_of(cfg), partial_tmd_cfg=cfg if partial_tmd else None)
     gt = gt.sort_values("item").reset_index(drop=True)
+    ta = tree_average_table(st, uhat_of(cfg))          # §8b.6: single-attention-read summaries
+    gt = gt.merge(ta[["item"] + TREE_AVG_COLS], on="item", how="left", validate="one_to_one")
     sites = sites or graph_sites(st)
 
     ntmd = st.neuron_tmd()
@@ -72,7 +74,7 @@ def run(store_root, t: float, split: str, out, config: str | None = None, n_pcs:
         for k in range(pcs.shape[1]):
             targets[f"tmd_pc{k + 1}"] = pcs[gt.neuron.to_numpy(), k]
 
-    base = [*GRAPH_OBS, *morpho_cols(gt)]
+    base = [*GRAPH_OBS, *morpho_cols(gt), *TREE_AVG_COLS]
     obs = matrix(gt, base)
     if ptmd is not None:
         pt = np.nan_to_num(ptmd)

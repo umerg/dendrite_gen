@@ -222,3 +222,60 @@ def graph_table(store: Store, uhat, partial_tmd_cfg=None, cache: bool = True) ->
 
 def morpho_cols(df: pd.DataFrame) -> list[str]:
     return [c for c in df.columns if c.startswith("morpho_")]
+
+
+# ----------------------------------------------------------------------------- tree averages (§8b)
+
+TREE_AVG_VERSION = 1
+TREE_AVG_COLS = ["ta_len", "ta_du", "ta_adu", "ta_rho", "ta_tip", "ta_frac_frontier", "ta_frac_rootkids"]
+
+
+def tree_average_table(store: Store, uhat, cache: bool = True) -> pd.DataFrame:
+    """One row per reduction item: what a single attention read of the L0 node states could
+    deliver — averages over the snapshot's placed edges (child depth 1..v-1; frontier positions
+    are noise at t = 0) of the edge's relative vector (length, axial step, |axial step|,
+    sideways length) and of the leaf flag, plus the frontier and soma-child fractions of the
+    visible nodes (both input flags). Also the tree-level targets of §8b.6: visible size, the
+    tallest dendrite's reach, and the apical's reach relative to the tallest (and whether it is
+    the tallest). Methodology §8b.4(3)."""
+    path = store.path / f"tree_avg_v{TREE_AVG_VERSION}.parquet"
+    if cache and path.exists():
+        return pd.read_parquet(path)
+    uhat = np.asarray(uhat, dtype=float).reshape(3)
+    gi = store.graph_index.sort_values("item").reset_index(drop=True)
+    tf = store.targets_final()
+    rows = []
+    for n, final in tf.groupby("neuron"):
+        final = final.sort_values("node").reset_index(drop=True)
+        par = final.parent.to_numpy()
+        pos = final[["px", "py", "pz"]].to_numpy(float)
+        nonroot = par >= 0
+        vec = np.zeros_like(pos)
+        vec[nonroot] = pos[nonroot] - pos[par[nonroot]]
+        du = vec @ uhat
+        e = pd.DataFrame(dict(depth=final.depth, len=np.linalg.norm(vec, axis=1), du=du, adu=np.abs(du),
+                              rho=np.linalg.norm(vec - du[:, None] * uhat, axis=1),
+                              tip=(final.n_children == 0).astype(float)))[nonroot]
+        ax = final.axial_coord.abs().to_numpy()
+        for r in gi[gi.neuron == n].itertuples(index=False):
+            v = int(r.n_levels - r.level)
+            pe = e[e.depth <= v - 1]
+            vis = final[final.depth <= v]
+            placed = vis[(vis.depth < v) & (vis.owner >= 0)]
+            reach = pd.Series(ax[placed.index], index=placed.owner.to_numpy()).groupby(level=0).max()
+            ap = vis.loc[vis.is_apical_subtree, "owner"]
+            ap_o = int(ap.iloc[0]) if len(ap) else -1
+            tallest = float(reach.max()) if len(reach) else 0.0
+            rec = dict(item=r.item, neuron=n, level=r.level, visible_depth=v,
+                       n_visible=len(vis), log_n_visible=float(np.log1p(len(vis))), tallest_reach=tallest,
+                       apical_reach_rel=(float(reach.get(ap_o, 0.0)) / tallest) if tallest > 0 and ap_o >= 0 else np.nan,
+                       apical_is_tallest=float(reach.idxmax() == ap_o) if len(reach) and ap_o >= 0 else np.nan,
+                       ta_frac_frontier=float((vis.depth == v).mean()),
+                       ta_frac_rootkids=float((vis.depth == 1).mean()))
+            for c in ("len", "du", "adu", "rho", "tip"):
+                rec[f"ta_{c}"] = float(pe[c].mean()) if len(pe) else np.nan
+            rows.append(rec)
+    out = pd.DataFrame(rows).sort_values("item").reset_index(drop=True)
+    if cache:
+        out.to_parquet(path)
+    return out

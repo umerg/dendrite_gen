@@ -65,19 +65,26 @@ def report(res_dir, control=None) -> str:
                                     "delta_hi", "intact", "ablated", "ratio") if c in g.columns]
                 out.append(f"\n  [{part}]")
                 piv = g[keys + cols].dropna(axis=1, how="all")
-                out.append(piv.to_string(index=False, max_rows=400))
+                out.append(piv.to_string(index=False))
             continue
         if "_bins_" in csv.stem:
             from .common import site_depth
             df = df.assign(bin=df.depth_lo.astype(str) + "-" + df.depth_hi.astype(str).str.replace("99", "+"))
             order = list(dict.fromkeys(df.sort_values("depth_lo").bin))
+            if "rho_full" in df:
+                df = df.assign(drho=df.rho_full - df.rho_obs)
+            if "rho_tree_full" in df:
+                df = df.assign(drho_tree=df.rho_tree_full - df.rho_tree_obs)
+            views = (("rho", "probe ρ within depth bin, pooled over snapshots"),
+                     ("rho_tree", "probe ρ within snapshot (tree-centred, §8b.2)"),
+                     ("rho_dend", "probe ρ within dendrite (dendrite-centred)"),
+                     ("share_tree", "share of the bin's variance between snapshots"),
+                     ("drho", "Δρ pooled (full stack − observables only)"),
+                     ("drho_tree", "Δρ within snapshot (full stack − observables only)"))
             for tag, g in df.groupby("tag", sort=False):
-                for val, title in (("rho", "probe ρ within depth bin"),
-                                   ("drho", "Δρ within bin (full stack − observables only)")):
-                    if val == "drho":
-                        if "rho_full" not in g or g.rho_full.isna().all():
-                            continue
-                        g = g.assign(drho=g.rho_full - g.rho_obs)
+                for val, title in views:
+                    if val not in g or g[val].isna().all():
+                        continue
                     piv = g.pivot_table(index="site", columns="bin", values=val, aggfunc="first")
                     piv = piv.loc[sorted(piv.index, key=site_depth), [b for b in order if b in piv.columns]]
                     out.append(f"\n  [{tag}] {title}")

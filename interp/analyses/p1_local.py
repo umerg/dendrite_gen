@@ -11,16 +11,27 @@ Groups (``--groups``, default all):
           position — for a frontier node's parent and for placed nodes themselves. Path distance
           integrates edge lengths along the whole lineage: it is not a function of the node's
           coordinates and needs either depth-many hops or global routing.
-  morpho  Morphometric aggregates the net might build: own dendrite's visible size / reach /
-          height, whole-tree size, tallest reach (frontier rows); visible Strahler order,
-          visible descendants and height (placed rows).
+  dend    Dendrite-level targets (methodology §8b.6): own dendrite's visible reach and size;
+          for basal frontier rows, own height rank among the dendrites, own reach minus the
+          apical's (both relative to the tallest), and whether the own dendrite is taller than
+          the apical. Within a snapshot these differ between dendrites, so the within-tree score
+          asks whether a node knows *its own* dendrite, not just the tree.
+  morpho  Visible-subtree morphometrics on internal placed nodes only (finished tips are given
+          away by the input leaf flag): visible Strahler order ≥ 3, visible descendants, height.
 
-ctx/path/morpho targets correlate with depth, so each also gets (i) Δ over a small geometry
-observable set (GEOM_* below) and (ii) within-depth-bin rank scores (``bins`` table).
+Tree-level quantities (visible tree size, tallest reach, the apical's reach) are probed at graph
+level in P5 (``tree/`` targets), not here.
+
+ctx/path/dend/morpho targets correlate with depth, so each also gets (i) Δ over a small
+observable set (GEOM_* / depth) and (ii) within-depth-bin rank scores (``bins`` table), pooled,
+within partial-tree snapshots and within dendrites (§8b.2). The sanity group's own-edge target
+gets the bins table too.
 
 Outputs (``--out``): p1_<split>_t<t>.csv (layer sweep, baselines),
 p1_bins_<split>_t<t>.csv: per target × site × depth bin, Spearman ρ of the probe's out-of-fold
-prediction within the bin (and of the observables-only / full stack: rho_obs, rho_full),
+prediction within the bin (and of the observables-only / full stack: rho_obs, rho_full), and
+the same after centring on each snapshot / dendrite (rho_tree, rho_dend, rho_tree_obs,
+rho_tree_full; share_tree = between-snapshot share of the bin's variance),
 p1_depth_diag_<split>_t<t>.csv: per true depth d × site, the AUROC with which the depth probe's
 out-of-fold score separates depth d from depth d+1 (``auc_next``), plus mean |error|. AUROC is
 invariant to the ridge's shrinkage toward the mean depth, which makes exact-integer accuracy
@@ -41,7 +52,7 @@ from ..baselines import KHOP_COLS, matrix
 from .common import (Checkpoint, Lazy, load, ordered_sites, run_units, site_probe_unit, split_tables, sweep_units,
                      write)
 
-GROUPS = ("sanity", "ctx", "path", "morpho")
+GROUPS = ("sanity", "ctx", "path", "dend", "morpho")
 DEPTH_ONLY = ["depth"]
 GEOM_FRONT = ["depth", "parent_radial", "abs_parent_axial"]   # cheap geometry of the parent
 GEOM_PLACED = ["depth", "radial", "abs_axial"]
@@ -49,7 +60,13 @@ OBS_MODELS_SMALL = ("linear", "gbm_small", "gbm_mid")         # a few observable
 
 
 def new_jobs(front: pd.DataFrame, placed: pd.DataFrame, sites_all, sites_ctx, groups) -> list[tuple]:
-    """(tag, rows, y, sites, obs_cols) for the ctx / path / morpho groups."""
+    """(tag, rows, y, sites, obs_cols) for the ctx / path / dend / morpho groups (methodology §8b.6).
+
+    Tree-level targets (visible tree size, tallest reach, the apical's reach for basal rows) are
+    not probed here: they are constant within a snapshot and live in P5's graph-level ``tree/``
+    targets. ``dend`` holds dendrite-level targets, scored within snapshots by the bins table.
+    ``morpho`` uses internal placed nodes only: for finished tips the input leaf flag already gives
+    visible Strahler order 1, zero descendants and height 0 (§8b.5)."""
     lg = np.log1p
     f, c = front, placed[placed.depth >= 1]
     J = []
@@ -67,15 +84,21 @@ def new_jobs(front: pd.DataFrame, placed: pd.DataFrame, sites_all, sites_ctx, gr
               ("path/pathdist/placed", c, c.pathdist_soma, sites_ctx, GEOM_PLACED),
               ("path/log_tort/placed", c, c.log_tort, sites_ctx, GEOM_PLACED),
               ("path/radial/placed", c, c.radial, sites_ctx, DEPTH_ONLY)]
+    if "dend" in groups:
+        fa = f[f.owner >= 0]
+        b = fa[~fa.is_apical_subtree.astype(bool) & fa.apical_vis_reach.notna()
+               & (fa.tallest_vis_reach > 0)]
+        own_rel = b.own_arm_vis_reach / b.tallest_vis_reach        # same normalisation as apical_vis_reach
+        J += [("dend/own_arm_reach/frontier", fa, fa.own_arm_vis_reach, sites_all, DEPTH_ONLY),
+              ("dend/log_own_arm_size/frontier", fa, lg(fa.own_arm_vis_size), sites_all, DEPTH_ONLY),
+              ("dend/own_rank/basal", b, b.own_rank, sites_all, DEPTH_ONLY),
+              ("dend/own_minus_apical/basal", b, own_rel - b.apical_vis_reach, sites_all, DEPTH_ONLY),
+              ("dend/mine_taller/basal", b, (own_rel > b.apical_vis_reach).astype(int), sites_all, DEPTH_ONLY)]
     if "morpho" in groups:
-        J += [("morpho/log_own_arm_size/frontier", f, lg(f.own_arm_vis_size), sites_all, DEPTH_ONLY),
-              ("morpho/own_arm_reach/frontier", f, f.own_arm_vis_reach, sites_all, DEPTH_ONLY),
-              ("morpho/own_arm_height/frontier", f, f.own_arm_vis_height, sites_all, DEPTH_ONLY),
-              ("morpho/log_n_visible/frontier", f, lg(f.n_visible), sites_all, DEPTH_ONLY),
-              ("morpho/tallest_reach/frontier", f, f.tallest_vis_reach, sites_all, DEPTH_ONLY),
-              ("morpho/vis_strahler/placed", c, c.vis_strahler, sites_ctx, DEPTH_ONLY),
-              ("morpho/log_vis_desc/placed", c, lg(c.vis_desc), sites_ctx, DEPTH_ONLY),
-              ("morpho/vis_height/placed", c, c.vis_height, sites_ctx, DEPTH_ONLY)]
+        i = c[c.n_vis_children > 0]
+        J += [("morpho/strahler_ge3/internal", i, (i.vis_strahler >= 3).astype(int), sites_ctx, DEPTH_ONLY),
+              ("morpho/log_vis_desc/internal", i, lg(i.vis_desc), sites_ctx, DEPTH_ONLY),
+              ("morpho/vis_height/internal", i, i.vis_height, sites_ctx, DEPTH_ONLY)]
     return J
 
 
@@ -124,7 +147,7 @@ def run(store_root, t: float, split: str, out, B: int = 500, max_rows: int | Non
             sites = [s for s in sites if s in ("in", sites[-1])]
         kind = P.task_kind(y)
         units += sweep_units(path, df, y, sites, tag=tag, B=B, extra=extra, kind=kind,
-                             diag=tag.startswith("depth/"))
+                             diag=tag.startswith("depth/"), bins=tag == "own_edge/frontier")
         # the raw-input baseline is exactly the probe at site `in`; only the k-hop profile is extra
         units.append((f"{tag}|baseline:khop", site_probe_unit,
                       dict(path=path, site="baseline:khop", rref=None, y=y, groups=df.neuron.to_numpy(),
@@ -135,12 +158,14 @@ def run(store_root, t: float, split: str, out, B: int = 500, max_rows: int | Non
         y = np.asarray(y, dtype=float)
         ok = np.isfinite(y)
         df, y = df[ok].reset_index(drop=True), y[ok]
-        if len(df) < 50 or df.neuron.nunique() < 5 or np.std(y) == 0:
+        if len(df) < 50 or df.neuron.nunique() < 5 or np.std(y) == 0 or len(np.unique(y)) < 2:
             print(f"[P1] skip {tag}: too few rows")
             continue
         print(f"[P1] {tag}: {len(df)} rows, {df.neuron.nunique()} neurons, obs={obs_cols}", flush=True)
-        stack = Lazy(P.obs_stack, matrix(df, obs_cols), y, df.neuron.to_numpy(), models=OBS_MODELS_SMALL)
-        units += sweep_units(path, df, y, sites, tag=tag, B=B, extra=extra, kind="regression",
+        kind = P.task_kind(y)
+        y = y.astype(int) if kind != "regression" else y
+        stack = Lazy(P.obs_stack, matrix(df, obs_cols), y, df.neuron.to_numpy(), kind=kind, models=OBS_MODELS_SMALL)
+        units += sweep_units(path, df, y, sites, tag=tag, B=B, extra=extra, kind=kind,
                              stack=stack, bins=True)
 
     name = f"p1_{split}_t{t:g}"

@@ -22,6 +22,16 @@ tree is left, so the default Δ mixes node-specific look-ahead with the global p
 measures; the strict Δ is look-ahead *beyond knowing how much tree remains* (the model never sees
 the level, so this baseline is deliberately stronger than anything it observes).
 
+Apical variants (on by default, methodology §8b.5–6). The input apical flag (slot 0) is chosen
+on the finished neuron, and "this node is in the apical dendrite" alone predicts much of the
+future subtree. ``apical/<target>`` adds apical membership to the observables (Δ only);
+``nonapical/<target>`` repeats the primary probe on frontier rows outside the apical dendrite,
+where the label carries no "grow deep" signal. Look-ahead that survives both is not the label.
+
+Bins table (``p2_bins_<split>_t<t>.csv``): per depth bin, pooled and within-snapshot /
+within-dendrite Spearman of the probe and of the observables-only / full stacks (§8b.2), for the
+primary, apical and non-apical variants.
+
 Also writes steering directions (``directions_<split>_t<t>.npz``) per site:
   v_grow  — mass-mean y_h2=1 vs 0 among label2 frontier rows, stratified by depth
   v_label — mass-mean label2=1 vs 0 among all frontier rows, stratified by depth
@@ -37,7 +47,7 @@ import pandas as pd
 
 from .. import probe as P
 from ..baselines import KHOP_COLS, OBS_CONTEXT, OBS_FRONTIER, matrix
-from .common import Checkpoint, Lazy, load, ordered_sites, run_units, sweep_units, tmd_obs, write
+from .common import Checkpoint, Lazy, load, ordered_sites, run_units, split_tables, sweep_units, tmd_obs, write
 
 PRIMARY = [
     ("y_h2", lambda d: d.y_h2.to_numpy().astype(int)),
@@ -77,7 +87,7 @@ def directions(st, front: pd.DataFrame, sites) -> dict[str, np.ndarray]:
 
 
 def run(store_root, t: float, split: str, out, B: int = 500, controls: bool = True,
-        control_task: bool = False, obs_tmd: bool | None = None, strict: bool = True):
+        control_task: bool = False, obs_tmd: bool | None = None, strict: bool = True, apical: bool = True):
     st, rows = load(store_root, t, split)
     sites = ordered_sites(st)
     front = rows[rows.is_frontier].reset_index(drop=True)
@@ -91,6 +101,11 @@ def run(store_root, t: float, split: str, out, B: int = 500, controls: bool = Tr
         obs_f = np.hstack([obs_f, t_f])
         print("[P2] TMD-conditioned store: conditioning-TMD PCs added to observables", flush=True)
     lvl_f = grow[["level"]].to_numpy(float)
+    # §8b.5: the input apical flag (slot 0, chosen on the finished neuron) is routed down the
+    # lineage; "in the apical dendrite" alone explains much of the future-subtree targets.
+    ap_f = grow[["is_apical_subtree"]].to_numpy(float)
+    basal = ~grow.is_apical_subtree.astype(bool).to_numpy()
+    grow_b = grow[basal].reset_index(drop=True)
     path = str(st.path)
     units = []
     for name, fn in PRIMARY:
@@ -99,7 +114,14 @@ def run(store_root, t: float, split: str, out, B: int = 500, controls: bool = Tr
             continue
         ex = dict(t=t, split=split, target=name)
         units += sweep_units(path, grow, y, sites, tag=f"primary/{name}", B=B, extra=ex,
-                             stack=Lazy(P.obs_stack, obs_f, y, groups))
+                             stack=Lazy(P.obs_stack, obs_f, y, groups), bins=True)
+        if apical:
+            units += sweep_units(path, grow, y, sites, tag=f"apical/{name}", B=B, extra=ex, plain=False,
+                                 stack=Lazy(P.obs_stack, np.hstack([obs_f, ap_f]), y, groups), bins=True)
+            yb = y[basal]
+            if len(np.unique(yb)) >= 2 and grow_b.neuron.nunique() >= 5:
+                units += sweep_units(path, grow_b, yb, sites, tag=f"nonapical/{name}", B=B, extra=ex,
+                                     stack=Lazy(P.obs_stack, obs_f[basal], yb, groups[basal]), bins=True)
         if strict:
             units += sweep_units(path, grow, y, sites, tag=f"strict/{name}", B=B, extra=ex, plain=False,
                                  stack=Lazy(P.obs_stack, np.hstack([obs_f, lvl_f]), y, groups))
@@ -131,11 +153,13 @@ def run(store_root, t: float, split: str, out, B: int = 500, controls: bool = Tr
     out_name = f"p2_{split}_t{t:g}"
     ckpt = Checkpoint(out, out_name, dict(analysis="P2", store=str(store_root), t=t, split=split, B=B,
                                           controls=controls, control_task=control_task,
-                                          obs_tmd=t_f is not None, strict=strict))
-    recs = run_units(units, ckpt)
+                                          obs_tmd=t_f is not None, strict=strict, apical=apical))
+    recs, side = split_tables(run_units(units, ckpt))
     meta = dict(analysis="P2", store=str(store_root), t=t, split=split, store_meta=st.meta,
                 obs_cols=OBS_FRONTIER + KHOP_COLS, obs_tmd=t_f is not None)
     write(out, out_name, recs, meta)
+    if side.get("bins"):
+        write(out, f"p2_bins_{split}_t{t:g}", side["bins"], meta)
     dirs = directions(st, front, sites)
     np.savez(Path(out) / f"directions_p2_{split}_t{t:g}.npz", **dirs)
     return pd.DataFrame(recs)
@@ -151,11 +175,14 @@ def main(argv=None):
     ap.add_argument("--no-controls", action="store_true")
     ap.add_argument("--control-task", action="store_true")
     ap.add_argument("--no-strict", action="store_true", help="skip the +levels-remaining strict variant")
+    ap.add_argument("--no-apical", action="store_true",
+                    help="skip the +apical-membership baseline and the non-apical-rows variant (§8b.6)")
     ap.add_argument("--obs-tmd", choices=["auto", "on", "off"], default="auto",
                     help="add conditioning-TMD PCs to observables (auto: on for TMD-conditioned stores)")
     a = ap.parse_args(argv)
     run(a.store, a.t, a.split, a.out, B=a.B, controls=not a.no_controls, control_task=a.control_task,
-        obs_tmd={"auto": None, "on": True, "off": False}[a.obs_tmd], strict=not a.no_strict)
+        obs_tmd={"auto": None, "on": True, "off": False}[a.obs_tmd], strict=not a.no_strict,
+        apical=not a.no_apical)
 
 
 if __name__ == "__main__":
