@@ -161,7 +161,11 @@ def run_units(units: list[tuple], ckpt: Checkpoint, n_jobs: int | None = None) -
 
             def job(k, fn, kw):
                 return k, _call(fn, kw, threads)
-            gen = Parallel(n_jobs=n_jobs, return_as="generator_unordered")(
+            # max_nbytes=None: pickle arguments into each task instead of joblib's automatic
+            # /dev/shm memmaps. Those temporary files can vanish before a queued task loads them
+            # (small per-job /dev/shm on SLURM; "A task has failed to un-serialize"), and a
+            # unit's arguments are only a few MB.
+            gen = Parallel(n_jobs=n_jobs, return_as="generator_unordered", max_nbytes=None)(
                 delayed(job)(k, fn, kw) for k, fn, kw in resolved)
         for k, recs in gen:
             ckpt.put(k, recs)
@@ -323,12 +327,12 @@ def sweep_units(path: str, rows: pd.DataFrame, y, sites, *, tag: str, B: int, ex
     rref, groups = row_ref(rows), rows.neuron.to_numpy()
     base = dict(tag=tag, **(extra or {}))
     pre = key_prefix or tag
+    # built once per target and shared by every site's unit
+    depth, tree, dend = ((rows.depth.to_numpy(), tree_ids(rows), dend_ids(rows)) if bins else (None, None, None))
     return [(f"{pre}|{s}", site_probe_unit,
              dict(path=path, site=s, rref=rref, y=y, groups=groups, kind=kind, rec=base, B=B,
                   stack=stack, plain=plain, diag_tag=tag if diag else None,
-                  bins_by=rows.depth.to_numpy() if bins else None,
-                  bins_tree=tree_ids(rows) if bins else None,
-                  bins_dend=dend_ids(rows) if bins else None))
+                  bins_by=depth, bins_tree=tree, bins_dend=dend))
             for s in sites]
 
 
