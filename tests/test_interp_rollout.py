@@ -241,25 +241,91 @@ def test_rollout_cli_and_analysis(mm, tmp_path):
 
 
 @needs_data
-def test_class_and_reach_conditions_from_dirs(mm, tmp_path):
+def test_class_and_growth_conditions_from_dirs(mm, tmp_path):
+    import pandas as pd
+
     from interp.analyses import s_rollouts
     from interp.rollout import main
 
     rng = np.random.default_rng(0)
-    d = {"L5/sigma": np.array(1.0), "A5/sigma": np.array(1.0)}
+    d = {"L5/sigma": np.array(1.0), "L8/sigma": np.array(1.0)}
     for k in ("v", "random", "onmanifold"):
         d[f"L5/class2/{k}"] = rng.standard_normal(256).astype(np.float32)
-        d[f"A5/reach/{k}"] = rng.standard_normal(256).astype(np.float32)
+        d[f"L8/grow/{k}"] = rng.standard_normal(256).astype(np.float32)
+    d["L8/label/v"] = rng.standard_normal(256).astype(np.float32)      # references: no controls
     np.savez(tmp_path / "dirs.npz", **d)
     common = ["--config", "parity_neurons_uncond", "--which", "random", "--split", "val", "--data-dir", str(DATA_DIR),
-              "--max-neurons", "2", "--seeds", "0", "--out", str(tmp_path), "--device", "cpu", "--max-tree-size", "30",
+              "--max-neurons", "3", "--seeds", "0", "--out", str(tmp_path), "--device", "cpu", "--max-tree-size", "40",
               "--dirs", str(tmp_path / "dirs.npz")]
     main(common + ["--exp", "class", "--sites", "L5", "--alphas", "1,-1", "--kinds", "v,random"])
     names = {p.stem for p in (tmp_path / "class").glob("*.pkl")}
     assert {"intact_seed0", "L5_class2_v_a1_all_seed0", "L5_class2_v_a-1_all_seed0", "L5_class2_random_a1_all_seed0"} <= names
-    main(common + ["--exp", "reach", "--sites", "A5", "--alphas", "2", "--kinds", "v", "--targets", "basal,apical"])
-    names = {p.stem for p in (tmp_path / "reach").glob("*.pkl")}
-    assert {"abl_mean_basal_seed0", "A5_reach_v_a2_basal_seed0", "A5_reach_v_a2_apical_seed0"} <= names
-    s_rollouts.main(["--exp-dir", str(tmp_path / "reach"), "--config", "parity_neurons_uncond", "--split", "val",
+    main(common + ["--exp", "growth", "--sites", "L8", "--alphas", "8", "--kinds", "v,random",
+                   "--masks", "target_lineage,target", "--growth-dmin", "2"])
+    names = {p.stem for p in (tmp_path / "growth").glob("*.pkl")}
+    assert {"intact_seed0", "L8_grow_v_a8_target_lineage_seed0", "L8_grow_v_a8_target_seed0",
+            "L8_grow_random_a8_target_lineage_seed0", "L8_label_v_a8_target_seed0"} <= names
+    assert "L8_label_random_a8_target_seed0" not in names
+    s_rollouts.main(["--exp-dir", str(tmp_path / "growth"), "--config", "parity_neurons_uncond", "--split", "val",
                      "--data-dir", str(DATA_DIR), "--B", "20"])
-    assert (tmp_path / "reach" / "analysis" / "dist.csv").exists()
+    eff = pd.read_csv(tmp_path / "growth" / "analysis" / "effects.csv")
+    assert {"t_n_desc", "t_expanded", "s_n_desc", "other_basal_nodes"} <= set(eff.outcome)
+    assert (eff.n_key_mismatch == 0).all()           # every pair refers to the same lineage node
+    assert (tmp_path / "growth" / "analysis" / "dist.csv").exists()
+
+
+def test_growth_row_hand_tree():
+    from interp.metrics import growth_row, subtree_stats
+
+    u = (0, 1, 0)
+    # soma 0 → arms 1 (slot 0) and 2 (slot 1); 2 → 3, 4; 3 → 5, 6; 5 → 7, 8
+    pos = {0: (0, 0, 0), 1: (0, -1, 0), 2: (1, 1, 0), 3: (1, 2, 0), 4: (2, 2, 0), 5: (1, 3, 0), 6: (0, 3, 0),
+           7: (1, 5, 0), 8: (2, 4, 0)}
+    G = _tree([(0, 1), (0, 2), (2, 3), (2, 4), (3, 5), (3, 6), (5, 7), (5, 8)], pos)
+    owner = {0: -1, 1: 0, 2: 1, 3: 1, 4: 1, 5: 1, 6: 1, 7: 1, 8: 1}
+    for n in G.nodes:
+        G.nodes[n].update(owner=owner[n], key=100 + n)
+    st = subtree_stats(G, 3, u)
+    assert st["n_desc"] == 4 and st["height"] == 2 and st["strahler"] == 2 and st["axial_reach"] == 3
+    G.graph["target_key"] = 103
+    r = growth_row(G, u)
+    assert r["t_expanded"] and r["t_n_desc"] == 4 and r["t_height"] == 2
+    assert r["s_n_desc"] == 0 and not r["s_expanded"]          # sibling = node 4, a tip
+    assert r["dend_rest_nodes"] == 2 and r["other_basal_nodes"] == 0 and r["target_owner"] == 1
+    G.graph["target_key"] = None
+    assert growth_row(G, u) == {"has_target": False}
+
+
+@needs_data
+def test_growth_target_selection_is_shared_and_masks_are_local(mm):
+    from interp import hooks as H
+    from interp.rollout import AddDirection, generate, make_editor
+
+    cfg, method, model, graphs = mm
+    seen = []
+
+    def spy(state):
+        class Ctx:
+            def __enter__(s):
+                def hook(m, a, out):
+                    if state.is_target_t is not None:
+                        b = state.batch_t[state.mask("target")]
+                        seen.append(th.bincount(b, minlength=1).max().item() if b.numel() else 0)
+                    return None
+                s.h = H.egnn_module(model, 8).register_forward_hook(hook)
+                return s
+            def __exit__(s, *e):
+                s.h.remove()
+        return Ctx()
+
+    ref = generate(method, model, graphs, cfg, seed=0, select_dmin=2, interventions=[spy])
+    assert max(seen) <= 1                       # the one-shot mask touches at most one node per graph
+    keys = [g.graph["target_key"] for g in ref]
+    assert any(k is not None for k in keys)
+    v = np.ones(256, np.float32)
+    zero = make_editor(model, "L8", lambda st: AddDirection(st, v, 0.0, "target_lineage"))
+    assert _same(generate(method, model, graphs, cfg, seed=0, select_dmin=2, interventions=[zero]), ref, atol=0)
+    big = make_editor(model, "L8", lambda st: AddDirection(st, v, 30.0, "target_lineage"))
+    steered = generate(method, model, graphs, cfg, seed=0, select_dmin=2, interventions=[big])
+    assert [g.graph["target_key"] for g in steered] == keys     # same node chosen before any edit
+    assert not _same(steered, ref)

@@ -28,11 +28,30 @@ def ordered_sites(store: Store, dense_ok: bool = True) -> list[str]:
 
 
 def site_depth(site: str) -> float:
-    """Position of a site along the network for plotting (in=-1, A_i = i-0.5, L_i = i)."""
+    """Position of a site along the network for plotting (in=-1, A_i = i-0.5, L_i = i).
+    Graph-level sites: ``pool_<s>`` sits at ``<s>``; the tokens G_i just after A_i (i-0.4)."""
+    if site.startswith("pool_"):
+        return site_depth(site[5:])
     if site == "in":
         return -1.0
+    if site.startswith("baseline"):
+        return -2.0
     k, i = site[0], int(site[1:])
-    return i - 0.5 if k == "A" else float(i)
+    return {"A": i - 0.5, "G": i - 0.4}.get(k, float(i))
+
+
+def min_depth_rows(rows: pd.DataFrame, min_depth: int) -> pd.DataFrame:
+    """Keep node rows at depth >= ``min_depth`` (methodology §8b.8). For frontier rows the depth
+    is the snapshot's visible depth, so this keeps partial trees that reached ``min_depth``."""
+    if min_depth <= 1:
+        return rows
+    return rows[rows.depth >= min_depth].reset_index(drop=True)
+
+
+def with_min_depth(sig: dict, min_depth: int) -> dict:
+    """Checkpoint signature: record ``min_depth`` only when it filters, so existing checkpoints
+    of unfiltered runs stay valid."""
+    return {**sig, "min_depth": int(min_depth)} if min_depth > 1 else sig
 
 
 def load(store_root: str | Path, t: float, split: str):
@@ -48,7 +67,7 @@ def load(store_root: str | Path, t: float, split: str):
 # A checkpoint is only reused if its signature (analysis, store, t, split, B, options, code
 # version) matches; otherwise it is moved aside as *.stale and the analysis starts fresh.
 
-CKPT_VERSION = 3   # 3: within-tree / within-dendrite bins (§8b); 2: probes centre only; bump when unit results would change for the same signature
+CKPT_VERSION = 4   # 4: P5 per-visible-depth bins; 3: within-tree / within-dendrite bins (§8b); 2: probes centre only; bump when unit results would change for the same signature
 
 
 def n_jobs_default() -> int:

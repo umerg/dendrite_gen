@@ -11,7 +11,7 @@
 #CommentSBATCH --account=tik-internal
 #CommentSBATCH --constraint='titan_rtx|tesla_v100|titan_xp|a100_80gb'
 
-# Generation-time interventions (methodology §11b): rollouts for E0 / E1 S-class / E2 S-reach
+# Generation-time interventions (methodology §11b): rollouts for E0 / E1 S-class / E3 local growth
 # via interp/rollout.py. One job = one experiment, all its conditions × seeds; finished
 # <condition>_seed<s>.pkl files are skipped, so a killed job is resumed by resubmitting.
 #
@@ -19,22 +19,25 @@
 #   E0 (both arms):   sbatch --export=ALL,CKPT=$CK,CONFIG=parity_neurons_uncond,EXP=e0 scripts/interp_rollout.sbatch
 #   E1 layer sweep:   sbatch --export=ALL,CKPT=$CK,CONFIG=parity_neurons_uncond,EXP=class,DIRS=$D/directions_class_val_t0.npz,SITES=L3+L5+L7+L9,ALPHAS=1 scripts/interp_rollout.sbatch
 #   E1 yardstick:     sbatch --export=ALL,CKPT=$CKT,CONFIG=parity_neurons_tmd,EXP=intact,TMD_CLASS=2 scripts/interp_rollout.sbatch
-#   E2:               sbatch --export=ALL,CKPT=$CK,CONFIG=...,EXP=reach,DIRS=$D/directions_reach_val_t0.npz,SITES=A5,ALPHAS=-2+-1+1+2+4,KINDS=v+random+onmanifold scripts/interp_rollout.sbatch
+#   E3 site sweep:    sbatch --export=ALL,CKPT=$CK,CONFIG=...,EXP=growth,DIRS=$D/directions_growth_val_t0.npz,SITES=L7+L8+L9,ALPHAS=2,DIR_NAMES=grow scripts/interp_rollout.sbatch
+#   E3 dose+controls: sbatch --export=ALL,CKPT=$CK,CONFIG=...,EXP=growth,DIRS=...,SITES=L8,ALPHAS=-4+-2+-1+1+2+4,KINDS=v+random+onmanifold,MASKS=target_lineage+target scripts/interp_rollout.sbatch
+#   Phase B (val, neurons not in Phase A, fresh seeds): add SUBSET=rest,SEEDS=2+3+4
 # Lists use '+' (sbatch --export splits on commas); they are converted to commas below.
 
 CONFIG=${CONFIG:-parity_neurons_uncond}
 WHICH=${WHICH:-ema}
 CKPT=${CKPT:-}
-EXP=${EXP:-e0}                         # intact | e0 | class | reach
+EXP=${EXP:-e0}                         # intact | e0 | class | growth
 SPLIT=${SPLIT:-val}
-MAXN=${MAXN:-256}                      # 0 = whole split (Phase B)
+MAXN=${MAXN:-256}                      # Phase A subset size
+SUBSET=${SUBSET:-phaseA}               # phaseA | rest (Phase B: val neurons not in Phase A) | all
 SEEDS=${SEEDS:-0+1}
 DIRS=${DIRS:-}
 SITES=${SITES:-L5}
 ALPHAS=${ALPHAS:-1}
 KINDS=${KINDS:-v}
 DIR_NAMES=${DIR_NAMES:-}
-TARGETS=${TARGETS:-basal}
+MASKS=${MASKS:-target_lineage}         # growth: target_lineage | target
 TMD_CLASS=${TMD_CLASS:-}
 BATCH=${BATCH:-64}
 DATA_DIR=${DATA_DIR:-/scratch/guptau/neurons_conditional_full}
@@ -80,12 +83,12 @@ cd ${DIRECTORY}
 
 [[ -n "${CKPT}" && -f "${CKPT}" ]] || { echo "CKPT not found: '${CKPT}'" >&2; exit 1; }
 mkdir -p "${OUT}"
-echo "config=${CONFIG} exp=${EXP} split=${SPLIT} maxn=${MAXN} seeds=${SEEDS} out=${OUT}"
+echo "config=${CONFIG} exp=${EXP} split=${SPLIT} maxn=${MAXN} subset=${SUBSET} seeds=${SEEDS} out=${OUT}"
 
 python -m interp.rollout --config "${CONFIG}" --which "${WHICH}" --ckpt "${CKPT}" --exp "${EXP}" \
-    --split "${SPLIT}" --data-dir "${DATA_DIR}" --max-neurons "${MAXN}" --seeds "$(c ${SEEDS})" \
+    --split "${SPLIT}" --data-dir "${DATA_DIR}" --max-neurons "${MAXN}" --subset "${SUBSET}" --seeds "$(c ${SEEDS})" \
     --batch-items "${BATCH}" --sites "$(c ${SITES})" --alphas "$(c ${ALPHAS})" --kinds "$(c ${KINDS})" \
-    --targets "$(c ${TARGETS})" ${DIRS:+--dirs "${DIRS}"} ${DIR_NAMES:+--dir-names "$(c ${DIR_NAMES})"} \
+    --masks "$(c ${MASKS})" ${DIRS:+--dirs "${DIRS}"} ${DIR_NAMES:+--dir-names "$(c ${DIR_NAMES})"} \
     ${TMD_CLASS:+--tmd-class "${TMD_CLASS}"} --out "${OUT}"
 
 echo "Finished at: $(date)"

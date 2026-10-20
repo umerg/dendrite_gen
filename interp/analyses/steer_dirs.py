@@ -1,4 +1,4 @@
-"""Steering directions for E1 S-class and E2 S-reach (methodology §11b.4–5), from an existing
+"""Steering directions for E1 S-class and E3 local growth (methodology §11b.4–5), from an existing
 teacher-forced store (no new extraction).
 
 Output ``directions_<kind>_<split>_t<t>.npz``, keys per site s:
@@ -14,9 +14,12 @@ Output ``directions_<kind>_<split>_t<t>.npz``, keys per site s:
 kind = class (E1): per cell class c, one-vs-rest on the pooled node mean ``pool_L{k}``
   (what a uniform add on every node shifts), stratified by visible-depth bin, weights
   1/items-per-neuron. Names ``class<c>``.
-kind = reach (E2): on the global write δ_k = A_k − L_{k−1} of basal frontier rows, top vs
-  bottom tercile of the apical's absolute visible reach within strata of depth bin × own-arm
-  reach tercile, orthogonalised to the least-squares depth read-out of δ_k. Name ``reach``.
+kind = growth (E3): basal frontier rows (not apical subtree) at depth ≥ 5, sites L7–L9.
+  ``grow_raw`` = mass-mean of y_h2 (≥ 2 more generations) among rows that branch next, one
+  stratum per dendrite (= dendrite-centred, so it cannot encode which tree or dendrite);
+  ``label`` = same for branch-next (label2) over all rows; ``grow`` = grow_raw with label and the
+  depth read-out projected out, rescaled to ‖grow_raw‖ (α = 1 = one natural unit). Controls for
+  ``grow``: random (same norm) and onmanifold (y_h2 shuffled within each dendrite).
 
 Example::
     python -m interp.analyses.steer_dirs --store /.../ema --kind class --sites L3,L5,L7,L9 --out results_v3/
@@ -30,10 +33,9 @@ import numpy as np
 import pandas as pd
 
 from .. import probe as P
-from .common import load
+from .common import dend_ids, load
 
 V_BINS = [(1, 1), (2, 2), (3, 3), (4, 4), (5, 5), (6, 6), (7, 8), (9, 99)]
-DEPTH_BINS = [(1, 2), (3, 4), (5, 6), (7, 8), (9, 12), (13, 99)]
 
 
 def _bin(x, bins) -> np.ndarray:
@@ -87,44 +89,57 @@ def class_dirs(st, sites, min_neurons: int = 20, seed: int = 0) -> dict:
     return out
 
 
-def reach_rows(rows: pd.DataFrame) -> pd.DataFrame:
-    """Basal frontier rows with a visible apical, labelled by the apical's absolute visible reach."""
+def growth_rows(rows: pd.DataFrame, dmin: int = 5) -> pd.DataFrame:
+    """Basal frontier rows (not in the apical subtree) at depth ≥ dmin, with their dendrite id."""
     df = rows[rows.is_frontier & (rows.owner >= 1) & ~rows.is_apical_subtree.astype(bool)
-              & rows.apical_vis_reach.notna() & (rows.tallest_vis_reach > 0)].copy()
-    df["apical_vis_reach_abs"] = df.apical_vis_reach * df.tallest_vis_reach
-    db = _bin(df.depth.to_numpy(), DEPTH_BINS)
-    df["dbin"] = db
-    df = df[db >= 0]
-    df["own_t"] = df.groupby("dbin").own_arm_vis_reach.transform(lambda x: pd.qcut(x.rank(method="first"), 3, labels=False))
-    df["stratum"] = df.dbin * 3 + df.own_t
-    q = df.groupby("stratum").apical_vis_reach_abs.transform(lambda x: pd.qcut(x.rank(method="first"), 3, labels=False))
-    df["label"] = np.where(q == 2, 1, np.where(q == 0, 0, -1))
-    return df[df.label >= 0].reset_index(drop=True)
+              & (rows.depth >= dmin)].copy()
+    df["dend"] = dend_ids(df)
+    return df.reset_index(drop=True)
 
 
-def reach_dirs(st, rows, sites, seed: int = 0) -> dict:
-    df = reach_rows(rows)
-    y = df.label.to_numpy().astype(bool)
-    w = 1.0 / df.groupby("neuron").node.transform("size").to_numpy(float)
-    groups, strata = df.neuron.to_numpy(), df.stratum.to_numpy()
+def _shuffle_within(y: np.ndarray, groups: np.ndarray, rng) -> np.ndarray:
+    out = y.copy()
+    for g in np.unique(groups):
+        m = np.flatnonzero(groups == g)
+        out[m] = y[rng.permutation(m)]
+    return out
+
+
+def growth_dirs(st, rows, sites, dmin: int = 5, seed: int = 0) -> dict:
+    """E3 look-ahead direction, dendrite-centred (one mass-mean stratum per dendrite), with the
+    branch-next and depth directions removed. α = 1 is one ‖v_grow‖."""
+    df = growth_rows(rows, dmin)
+    lab = df.label2.to_numpy().astype(bool)
+    g2 = df[lab].reset_index(drop=True)
+    y = g2.y_h2.to_numpy().astype(bool)
+    w_all = 1.0 / df.groupby("neuron").node.transform("size").to_numpy(float)
+    w = 1.0 / g2.groupby("neuron").node.transform("size").to_numpy(float)
     rng = np.random.default_rng(seed)
-    print(f"[steer_dirs] reach: {len(df)} basal frontier rows, {df.neuron.nunique()} neurons", flush=True)
+    print(f"[steer_dirs] growth: {len(df)} basal frontier rows at depth ≥ {dmin} ({df.neuron.nunique()} neurons); "
+          f"{len(g2)} branching, y_h2 rate {y.mean():.2f}", flush=True)
     out = {}
     for s in sites:
-        k = int(s[1:])
-        if not s.startswith("A"):
-            raise ValueError("reach directions live on global-block sites A{k}")
-        D = st.acts(s, df) - st.acts(f"L{k - 1}", df)
-        mm = P.mass_mean(D, y, strata=strata, weights=w)
-        Dc = D - D.mean(0)
-        v_depth = np.linalg.lstsq(Dc, df.depth.to_numpy(float) - df.depth.mean(), rcond=None)[0]
-        v = P.orthogonalize(mm["v"], [v_depth])
-        r, om = _controls(D, y, strata, w, groups, float(np.linalg.norm(v)), rng)
-        out.update({f"{s}/reach/v": v, f"{s}/reach/random": r, f"{s}/reach/onmanifold": om,
-                    f"{s}/reach/n_pairs": np.array(mm["n_pairs"]), f"{s}/sigma": np.array(_sigma(st.acts(s, df))),
-                    f"{s}/reach/norm_before_orth": np.array(mm["norm"])})
-        print(f"[steer_dirs] reach @ {s}: ‖v‖={np.linalg.norm(v):.3g} (before depth-orth {mm['norm']:.3g}), "
-              f"σ={float(out[f'{s}/sigma']):.3g}", flush=True)
+        Xa = st.acts(s, df)
+        Xg = Xa[lab]
+        mm = P.mass_mean(Xg, y, strata=g2.dend.to_numpy(), weights=w)
+        lb = P.mass_mean(Xa, lab, strata=df.dend.to_numpy(), weights=w_all)
+        Xc = Xa - Xa.mean(0)
+        v_depth = np.linalg.lstsq(Xc, df.depth.to_numpy(float) - df.depth.mean(), rcond=None)[0]
+        nrm = mm["norm"]
+        v = P.orthogonalize(mm["v"], [lb["v"], v_depth])
+        v *= nrm / max(np.linalg.norm(v), 1e-12)
+        r = rng.standard_normal(len(v))
+        r *= nrm / np.linalg.norm(r)
+        om = P.mass_mean(Xg, _shuffle_within(y, g2.dend.to_numpy(), rng), strata=g2.dend.to_numpy(), weights=w)["v"]
+        om *= nrm / max(np.linalg.norm(om), 1e-12)
+        out.update({f"{s}/grow/v": v, f"{s}/grow/random": r, f"{s}/grow/onmanifold": om,
+                    f"{s}/grow_raw/v": mm["v"],
+                    f"{s}/label/v": lb["v"] * nrm / max(lb["norm"], 1e-12),
+                    f"{s}/grow/n_pairs": np.array(mm["n_pairs"]), f"{s}/label/n_pairs": np.array(lb["n_pairs"]),
+                    f"{s}/grow/cos_raw_label": np.array(float(mm["v"] @ lb["v"] / max(nrm * lb["norm"], 1e-12))),
+                    f"{s}/sigma": np.array(_sigma(Xa))})
+        print(f"[steer_dirs] growth @ {s}: ‖v_grow‖={nrm:.3g}, ‖v_label‖={lb['norm']:.3g}, "
+              f"cos(grow, label)={float(out[f'{s}/grow/cos_raw_label']):.2f}, σ={float(out[f'{s}/sigma']):.3g}", flush=True)
     return out
 
 
@@ -132,7 +147,7 @@ def run(store_root, t: float, split: str, out, kind: str, sites: list[str], seed
         min_neurons: int = 20) -> Path:
     st, rows = load(store_root, t, split)
     d = (class_dirs(st, sites, min_neurons=min_neurons, seed=seed) if kind == "class"
-         else reach_dirs(st, rows, sites, seed=seed))
+         else growth_dirs(st, rows, sites, seed=seed))
     path = Path(out) / f"directions_{kind}_{split}_t{t:g}.npz"
     path.parent.mkdir(parents=True, exist_ok=True)
     np.savez(path, **d)
@@ -145,12 +160,12 @@ def main(argv=None):
     ap.add_argument("--store", required=True)
     ap.add_argument("--t", type=float, default=0.0)
     ap.add_argument("--split", default="val")
-    ap.add_argument("--kind", required=True, choices=["class", "reach"])
-    ap.add_argument("--sites", default=None, help="default: L3,L5,L7,L9 (class) / A3,A5,A7,A9 (reach)")
+    ap.add_argument("--kind", required=True, choices=["class", "growth"])
+    ap.add_argument("--sites", default=None, help="default: L3,L5,L7,L9 (class) / L7,L8,L9 (growth)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", required=True)
     a = ap.parse_args(argv)
-    sites = (a.sites or ("L3,L5,L7,L9" if a.kind == "class" else "A3,A5,A7,A9")).split(",")
+    sites = (a.sites or ("L3,L5,L7,L9" if a.kind == "class" else "L7,L8,L9")).split(",")
     run(a.store, a.t, a.split, a.out, a.kind, sites, seed=a.seed)
 
 

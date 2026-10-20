@@ -22,6 +22,11 @@ Groups (``--groups``, default all):
 Tree-level quantities (visible tree size, tallest reach, the apical's reach) are probed at graph
 level in P5 (``tree/`` targets), not here.
 
+Apical / basal split (on by default; ``--no-split-apical`` to skip): every ctx / path target on
+frontier rows is also probed on frontier rows inside the apical dendrite (``.../frontier_apical``)
+and outside it (``.../frontier_basal``), so a layer profile is not an average of two dendrite
+types. ``--min-depth N`` keeps node rows at depth >= N (methodology §8b.8).
+
 ctx/path/dend/morpho targets correlate with depth, so each also gets (i) Δ over a small
 observable set (GEOM_* / depth) and (ii) within-depth-bin rank scores (``bins`` table), pooled,
 within partial-tree snapshots and within dendrites (§8b.2). The sanity group's own-edge target
@@ -49,8 +54,8 @@ import pandas as pd
 
 from .. import probe as P
 from ..baselines import KHOP_COLS, matrix
-from .common import (Checkpoint, Lazy, load, ordered_sites, run_units, site_probe_unit, split_tables, sweep_units,
-                     write)
+from .common import (Checkpoint, Lazy, load, min_depth_rows, ordered_sites, run_units, site_probe_unit,
+                     split_tables, sweep_units, with_min_depth, write)
 
 GROUPS = ("sanity", "ctx", "path", "dend", "morpho")
 DEPTH_ONLY = ["depth"]
@@ -102,14 +107,29 @@ def new_jobs(front: pd.DataFrame, placed: pd.DataFrame, sites_all, sites_ctx, gr
     return J
 
 
+def split_apical(jobs: list[tuple]) -> list[tuple]:
+    """Apical / basal copies of the frontier ctx / path jobs (rows inside / outside the apical
+    dendrite). The sibling count is skipped: binarised trees make it constant beyond depth 1."""
+    out = []
+    for tag, df, y, sites, obs in jobs:
+        if not tag.endswith("/frontier") or not tag.startswith(("ctx/", "path/")) or "n_front_siblings" in tag:
+            continue
+        ap = df.is_apical_subtree.astype(bool).to_numpy()
+        y = np.asarray(y)
+        for suffix, m in (("_apical", ap), ("_basal", ~ap)):
+            out.append((tag + suffix, df[m], y[m], sites, obs))
+    return out
+
+
 def run(store_root, t: float, split: str, out, B: int = 500, max_rows: int | None = None, seed: int = 0,
-        groups=GROUPS):
+        groups=GROUPS, min_depth: int = 1, apical_split: bool = True):
     groups = tuple(groups)
     bad = set(groups) - set(GROUPS)
     if bad:
         raise ValueError(f"unknown P1 groups {sorted(bad)}; choose from {GROUPS}")
     st, rows = load(store_root, t, split)
     rows = rows.assign(abs_parent_axial=rows.parent_axial.abs(), abs_axial=rows.axial_coord.abs())
+    rows = min_depth_rows(rows, min_depth)
     if max_rows and len(rows) > max_rows:
         nn = rows.neuron.nunique()
         keep = np.random.default_rng(seed).choice(rows.neuron.unique(), size=min(nn, max(5, int(nn * max_rows / len(rows)))), replace=False)
@@ -154,7 +174,10 @@ def run(store_root, t: float, split: str, out, B: int = 500, max_rows: int | Non
                            kind=kind, rec=dict(tag=tag, **extra), B=B, X=matrix(df, KHOP_COLS),
                            scale=True)))
 
-    for tag, df, y, sites, obs_cols in new_jobs(front, ctx, sites_all, sites_ctx, groups):
+    nj = new_jobs(front, ctx, sites_all, sites_ctx, groups)
+    if apical_split:
+        nj += split_apical(nj)
+    for tag, df, y, sites, obs_cols in nj:
         y = np.asarray(y, dtype=float)
         ok = np.isfinite(y)
         df, y = df[ok].reset_index(drop=True), y[ok]
@@ -169,11 +192,12 @@ def run(store_root, t: float, split: str, out, B: int = 500, max_rows: int | Non
                              stack=stack, bins=True)
 
     name = f"p1_{split}_t{t:g}"
-    ckpt = Checkpoint(out, name, dict(analysis="P1", store=str(store_root), t=t, split=split, B=B,
-                                      max_rows=max_rows, seed=seed))
+    ckpt = Checkpoint(out, name, with_min_depth(dict(analysis="P1", store=str(store_root), t=t, split=split, B=B,
+                                                     max_rows=max_rows, seed=seed), min_depth))
     recs, side = split_tables(run_units(units, ckpt))
     diag, bins = side.get("diag", []), side.get("bins", [])
-    meta = dict(analysis="P1", store=str(store_root), t=t, split=split, groups=list(groups), store_meta=st.meta)
+    meta = dict(analysis="P1", store=str(store_root), t=t, split=split, groups=list(groups), store_meta=st.meta,
+                min_depth=min_depth, apical_split=apical_split)
     write(out, name, recs, meta)
     if diag:
         write(out, f"p1_depth_diag_{split}_t{t:g}", diag, meta)
@@ -191,8 +215,12 @@ def main(argv=None):
     ap.add_argument("--B", type=int, default=500)
     ap.add_argument("--max-rows", type=int, default=None)
     ap.add_argument("--groups", default=",".join(GROUPS), help=f"comma-separated subset of {GROUPS}")
+    ap.add_argument("--min-depth", type=int, default=1, help="keep node rows at depth >= N (§8b.8)")
+    ap.add_argument("--no-split-apical", action="store_true",
+                    help="skip the apical / basal copies of the frontier ctx / path targets")
     a = ap.parse_args(argv)
-    run(a.store, a.t, a.split, a.out, B=a.B, max_rows=a.max_rows, groups=[g for g in a.groups.split(",") if g])
+    run(a.store, a.t, a.split, a.out, B=a.B, max_rows=a.max_rows, groups=[g for g in a.groups.split(",") if g],
+        min_depth=a.min_depth, apical_split=not a.no_split_apical)
 
 
 if __name__ == "__main__":

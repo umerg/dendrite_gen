@@ -14,13 +14,14 @@
 #
 # TASK=calib    GT tall-arm rates (must reproduce ~80.3 % one tall / 19.7 % >= 2 tall)
 # TASK=clf      fit the morphology cell-class classifier (train) and score it on test
-# TASK=dirs     steering directions from a teacher-forced store (KIND=class|reach)
+# TASK=dirs     steering directions from a teacher-forced store (KIND=class|growth)
 # TASK=analyze  paired analysis of one rollout experiment directory (EXP_DIR)
 #
 # Usage:
 #   sbatch --export=ALL,TASK=calib scripts/interp_steer_cpu.sbatch
 #   sbatch --export=ALL,TASK=clf,OUT=/itet-stor/guptau/net_scratch/interp/class_clf scripts/interp_steer_cpu.sbatch
 #   sbatch --export=ALL,TASK=dirs,KIND=class,STORE=$U,OUT=$U/results_v3 scripts/interp_steer_cpu.sbatch
+#   sbatch --export=ALL,TASK=dirs,KIND=growth,STORE=$U,OUT=$U/results_v3 scripts/interp_steer_cpu.sbatch
 #   sbatch --export=ALL,TASK=analyze,CONFIG=parity_neurons_uncond,EXP_DIR=.../rollouts_val/e0,CLF=.../class_clf scripts/interp_steer_cpu.sbatch
 
 TASK=${TASK:?set TASK=calib|clf|dirs|analyze}

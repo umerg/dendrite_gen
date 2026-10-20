@@ -93,6 +93,85 @@ def tree_table(graphs, uhat, frac: float = 0.6) -> pd.DataFrame:
     return pd.DataFrame([tree_row(G, uhat, frac) for G in graphs])
 
 
+# ----------------------------------------------------------------------------- E3: one node's subtree
+
+def _children(G: nx.Graph) -> dict[int, list[int]]:
+    r = _root(G)
+    par = nx.bfs_predecessors(G, r)
+    ch: dict[int, list[int]] = {n: [] for n in G.nodes}
+    for c, p in par:
+        ch[p].append(c)
+    return ch
+
+
+def _parents(G: nx.Graph) -> dict[int, int]:
+    return dict(nx.bfs_predecessors(G, _root(G)))
+
+
+def _subtree(ch: dict, n: int) -> list[int]:
+    out, stack = [], [n]
+    while stack:
+        v = stack.pop()
+        out.append(v)
+        stack.extend(ch[v])
+    return out
+
+
+def subtree_stats(G: nx.Graph, node: int, uhat, ch: dict | None = None) -> dict:
+    """Descendants of ``node`` (excluding itself): count, height (generations), path length,
+    Strahler order of the subtree rooted at ``node``, axial reach of the subtree from ``node``."""
+    ch = ch or _children(G)
+    nodes = _subtree(ch, node)
+    u = np.asarray(uhat, dtype=np.float64).reshape(3)
+    u = u / np.linalg.norm(u)
+    p0 = _pos(G, node)
+    height, stack = 0, [(node, 0)]
+    while stack:
+        v, d = stack.pop()
+        height = max(height, d)
+        stack.extend((c, d + 1) for c in ch[v])
+    order = {}
+    for v in reversed(nodes):           # children before parents (DFS pre-order reversed)
+        if not ch[v]:
+            order[v] = 1
+        else:
+            o = sorted((order[c] for c in ch[v]), reverse=True)
+            order[v] = o[0] + 1 if len(o) > 1 and o[0] == o[1] else o[0]
+    length = float(sum(np.linalg.norm(_pos(G, c) - _pos(G, v)) for v in nodes for c in ch[v]))
+    reach = float(max(abs((_pos(G, v) - p0) @ u) for v in nodes))
+    return dict(n_desc=len(nodes) - 1, height=height, path_length=length, strahler=order[node], axial_reach=reach)
+
+
+def growth_row(G: nx.Graph, uhat) -> dict:
+    """E3 readout for a rollout graph carrying ``graph['target_key']`` and node ``key`` attrs.
+    Target subtree, its sibling's subtree, the rest of its dendrite, the other basal dendrites."""
+    key = G.graph.get("target_key")
+    nan = float("nan")
+    base = dict(has_target=key is not None)
+    if key is None:
+        return base
+    hit = [n for n in G.nodes if G.nodes[n].get("key") == key]
+    if len(hit) != 1:
+        raise ValueError(f"target key found {len(hit)} times")
+    t = hit[0]
+    ch, par = _children(G), _parents(G)
+    st = subtree_stats(G, t, uhat, ch)
+    out = {**base, "t_expanded": bool(ch[t]), **{f"t_{k}": v for k, v in st.items()}}
+    sib = [c for c in ch[par[t]] if c != t] if t in par else []
+    if sib:
+        ss = subtree_stats(G, sib[0], uhat, ch)
+        out.update(s_expanded=bool(ch[sib[0]]), s_n_desc=ss["n_desc"], s_height=ss["height"])
+    else:
+        out.update(s_expanded=False, s_n_desc=nan, s_height=nan)
+    own = G.nodes[t].get("owner", -1)
+    in_t = set(_subtree(ch, t))
+    dend = [n for n in G.nodes if G.nodes[n].get("owner", -2) == own]
+    out["dend_rest_nodes"] = len([n for n in dend if n not in in_t])
+    out["other_basal_nodes"] = sum(1 for n in G.nodes if G.nodes[n].get("owner", -1) >= 1 and G.nodes[n]["owner"] != own)
+    out["target_owner"] = own
+    return out
+
+
 def main(argv=None):
     """GT calibration: tall-arm rates of real neurons (doc reference: 80.3 % one tall, 19.7 % ≥ 2)."""
     import argparse
