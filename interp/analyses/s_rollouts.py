@@ -29,7 +29,9 @@ from .. import metrics as M
 
 CONT = ["n_nodes", "n_tips", "max_depth", "axial_extent", "total_length", "n_tall", "dominance",
         "apical_reach", "basal_reach_max", "apical_nodes", "basal_nodes"]
-BIN = ["ge2_tall", "one_tall", "tallest_is_slot0", "tallest_neg", "cap_hit"]
+BIN = ["ge2_tall", "one_tall", "tallest_is_slot0", "tallest_neg", "cap_hit", "t_expanded", "s_expanded"]
+GROWTH = ["t_n_desc", "t_height", "t_path_length", "t_strahler", "t_axial_reach", "s_n_desc", "s_height",
+          "dend_rest_nodes", "other_basal_nodes"]
 DIST_KEYS = ["mmd_morpho", "strahler_w1", "sholl_peak_w1", "axial_extent_w1", "node_count_w1",
              "branch_length_w1", "bifurcation_angle_w1"]
 
@@ -52,6 +54,11 @@ def tree_frame(runs, uhat, clfs: dict | None = None) -> pd.DataFrame:
         df["gt_index"] = [g.graph["gt_index"] for g in gs]
         df["gt_class"] = [g.graph.get("cell_class") for g in gs]
         df["cap_hit"] = [bool(g.graph.get("cap_hit", False)) for g in gs]
+        if any("target_key" in g.graph for g in gs):      # E3: the steered node's subtree
+            gr = pd.DataFrame([M.growth_row(g, uhat) for g in gs])
+            gr["target_key"] = [None if g.graph.get("target_key") is None else str(g.graph["target_key"])
+                                for g in gs]   # uint64 → str (parquet-safe)
+            df = pd.concat([df, gr.drop(columns=[c for c in gr if c in df])], axis=1)
         for name, clf in (clfs or {}).items():
             pr = clf.proba_features(clf.features(gs))
             for j, c in enumerate(clf.classes_):
@@ -87,18 +94,23 @@ def _boot_mean(d: np.ndarray, groups: np.ndarray, B: int = 1000, seed: int = 0) 
 
 def paired_effects(trees: pd.DataFrame, ref: str = "intact", outcomes: list[str] | None = None,
                    B: int = 1000) -> pd.DataFrame:
-    outcomes = outcomes or ([c for c in CONT + BIN if c in trees] + [c for c in trees if c.startswith("p_")])
+    outcomes = outcomes or ([c for c in CONT + BIN + GROWTH if c in trees] + [c for c in trees if c.startswith("p_")])
     base = trees[trees.condition == ref].set_index(["gt_index", "seed"])
     recs = []
     for cond, g in trees[trees.condition != ref].groupby("condition"):
         g = g.set_index(["gt_index", "seed"])
         j = g.join(base, how="inner", lsuffix="", rsuffix="_ref")
+        n_mismatch = 0
+        if "target_key" in j:      # E3 pairs must refer to the same lineage node
+            same = j.target_key.astype(object).eq(j.target_key_ref.astype(object))
+            n_mismatch = int((~same & j.target_key.notna()).sum())
+            j = j[same & j.target_key.notna()]
         groups = j.index.get_level_values(0).to_numpy()
         for o in outcomes:
             a, b = j[o].to_numpy(float), j[f"{o}_ref"].to_numpy(float)
             d = a - b
             ok = np.isfinite(d)
-            rec = dict(condition=cond, outcome=o, n=int(ok.sum()), mean=float(np.nanmean(a)),
+            rec = dict(condition=cond, outcome=o, n=int(ok.sum()), n_key_mismatch=n_mismatch, mean=float(np.nanmean(a)),
                        mean_ref=float(np.nanmean(b)), delta=float(np.nanmean(d)))
             rec["ci_lo"], rec["ci_hi"] = _boot_mean(d, groups, B)
             if o in BIN:
@@ -161,7 +173,8 @@ def main(argv=None):
     ap.add_argument("--clf", default=None, help="directory with class_clf_full.pkl / class_clf_size_free.pkl")
     ap.add_argument("--class-ref", type=int, default=None)
     ap.add_argument("--no-dist", action="store_true")
-    ap.add_argument("--primary", default="ge2_tall,basal_reach_max,apical_reach,n_nodes,dominance,cap_hit")
+    ap.add_argument("--primary", default="ge2_tall,basal_reach_max,apical_reach,n_nodes,dominance,cap_hit,"
+                                        "t_expanded,t_n_desc,t_height,s_n_desc,dend_rest_nodes,other_basal_nodes")
     ap.add_argument("--B", type=int, default=1000)
     ap.add_argument("--out", default=None)
     a = ap.parse_args(argv)

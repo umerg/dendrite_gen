@@ -32,7 +32,7 @@
 9. [The experiments](#9-the-experiments)
 10. [Graph LayerNorm and interventions (steering, erasure, ablation)](#10-graph-layernorm-and-interventions)
 11. [Global-attention ablation](#11-global-attention-ablation)
-   - 11b. [Interventions during generation (E0, E1 S-class, E2 S-reach)](#11b-interventions-during-generation-e0-e1-s-class-e2-s-reach)
+   - 11b. [Interventions during generation (E0, E1 S-class, E3 local growth)](#11b-interventions-during-generation-e0-e1-s-class-e3-local-growth)
 12. [Verification ledger](#12-verification-ledger)
 13. [Deviations from the original plan](#13-deviations-from-the-original-plan)
 14. [Known limitations and open issues](#14-known-limitations-and-open-issues)
@@ -675,12 +675,16 @@ within-dendrite 0.27 (L1) → 0.35 (L11). Random-init ≈ 0.
 
 1. *Two-hop delay.* At t = 0 a frontier node's own edge, and every edge feature built from it, is noise.
    Geometry enters h only through edge features (§1.3).
-   - At `L0` the parent receives its real edge to the grandparent, plus messages from its other children.
+   - At `L0` the parent receives its real edge to the grandparent.
    - At `L1` the frontier node receives the updated parent. This is the first site where a frontier
-     row holds any real geometry: parent edge, parent angle, grandparent edge, frontier sibling count.
+     row holds any real geometry: the parent's edge and branch angle.
+   - The grandparent's own edge enters the grandparent at `L0` and the parent at `L1`, so it can reach
+     the frontier at `L2` at the earliest.
    - `L1` is the second message-passing step (`in → L0 → A1 → L1`), so two hops are available there.
-2. *Those cues predict growth.* A linear combination of parent edge, parent angle, sibling count and the
-   parent's soma distance can rank future subtree size within a dendrite without any look-ahead.
+2. *Those cues predict growth.* A linear combination of the parent's edge, angle, axial step and soma
+   distance can rank future subtree size within a dendrite without any look-ahead.
+   (The frontier sibling count is not a cue beyond depth 1: binarised trees give every frontier node
+   exactly one sibling, so the target is constant in every bin except 1–2.)
 3. *The apical label arrives at the same time.* The slot-0 flag sits at depth 1 and moves one hop per
    block, so it reaches depth 3 by `L1`. This predicts a within-tree vs within-dendrite gap at `L1`
    that is large in shallow bins and small in deep ones.
@@ -688,7 +692,13 @@ within-dendrite 0.27 (L1) → 0.35 (L11). Random-init ≈ 0.
 **Evidence already in hand.**
 - ✅ Within-tree Δρ over `OBS_FRONTIER` at `L1` ≈ 0: mean over bins −0.01 for height and path length,
   −0.01 to 0.01 for y_h2. `OBS_FRONTIER` already contains the parent's edge length, the parent's branch
-  angle and the frontier sibling count, so the `L1` signal is no more than those cues.
+  angle, so the `L1` signal adds nothing beyond those cues.
+- ✅ **T4 (arrival time), P1 v3 uncond, within-tree ρ averaged over bins.** Parent edge
+  −0.02 / 0.01 / 0.00 / **0.71** at `in` / `L0` / `A1` / `L1` (random-init `L1` 0.24). Parent angle
+  0.00 / 0.01 / −0.01 / **0.58** (random-init 0.31). Parent soma path distance −0.01 / 0.00 / 0.00 /
+  **0.46** (random-init 0.15), flat to `L11` (0.47). The TMD arm is the same (parent edge 0.69 at `L1`).
+  The grandparent's edge is 0.01 at `L1` and builds slowly (0.06 at `L3`, 0.26 at `L7`): consistent with
+  the two-hop timing, and with the network leaning on the one-hop cue (§8b.5).
 - ✅ The gap predicted by (3). Height at `L1`, within-tree vs within-dendrite ρ: bin 3–4 0.38 vs 0.27;
   5–6 0.25 vs 0.21; 7–8 0.11 vs 0.12.
 - Within-tree Δρ becomes positive only from about `L9` (height mean 0.01, path length 0.07 at `L11`).
@@ -698,10 +708,10 @@ random-init):
 
 | # | test | prediction if the hypothesis holds |
 |---|---|---|
-| T1 | **Cue probe.** Within-dendrite ρ of a linear probe on local cues c alone, scored like the activation probes. c = parent edge length, parent branch angle, parent axial step, grandparent edge length and angle, frontier sibling count, parent's visible children, parent soma path distance | ρ_dend(c) ≥ ρ_dend(`L1`) in every bin |
+| T1 | **Cue probe.** Within-dendrite ρ of a linear probe on local cues c alone, scored like the activation probes. c = parent edge length, parent branch angle, parent axial step, grandparent edge length and angle, parent soma path distance, parent radial alignment | ρ_dend(c) ≥ ρ_dend(`L1`) in every bin |
 | T2 | **Cue share of the prediction.** Dendrite-centre the OOF prediction p and the cues, then regress p̃ on c̃ with grouped CV | R²(p̃ \| c̃) high at `L1`, lower at `L11` |
 | T3 | **Residual look-ahead.** Within-dendrite ρ between y and the part of p not explained by c (the T2 residual) | ≈ 0 at `L1`; > 0 with CI excluding 0 at `L11` only |
-| T4 | **Arrival time.** Within-tree ρ for parent edge length and parent angle on frontier rows (P1 `ctx/` targets) | ≈ 0 at `L0` and `A1`, high at `L1` |
+| T4 | **Arrival time.** Within-tree ρ for parent edge length and parent angle on frontier rows (P1 `ctx/` targets) | ≈ 0 at `L0` and `A1`, high at `L1`. ✅ confirmed (above) |
 
 **Reading.** If T1–T3 hold, the defensible claim for P2 is "look-ahead beyond local cues appears only in
 the late layers (T3 at `L11`)". The `L1` jump is then reported as a relay of visible cues, timed by the
@@ -710,8 +720,48 @@ message, and the hypothesis is wrong.
 
 **Implementation notes.** The cues are computable from `targets.py` and the row table. T2 and T3 need the
 OOF predictions, which the P2 sweep does not store: either save them for these sites or refit (one probe
-per site and bin). T4 comes from the P1 v3 rerun on trained weights. Use the same `_within` centring, bins
+per site and bin). Use the same `_within` centring, bins
 and neuron bootstrap as §8b.2.
+
+### 8b.8 Headline lens: frontier rows at depth ≥ 5, apical and basal separately
+
+**Rule.** Headline node-level numbers use frontier rows at depth ≥ 5, scored within the tree or
+within the dendrite, with apical and basal rows reported separately. Shallower bins go to an appendix.
+
+**Why depth ≥ 5 (a receptive-field argument, not a post-hoc cut).**
+- At `L1` a frontier node has heard from 2 hops (`in → L0 → A1 → L1`).
+- At depth d, its soma child is d − 1 hops away. The soma child carries the slot / apical flag and
+  defines the dendrite.
+- For d ≤ 3 the soma child is within 2 hops, so dendrite-level facts arrive for free at `L1`.
+  Example: a basal dendrite with one placed node has a reach equal to that node's position.
+- For d ≥ 5 the soma child is ≥ 4 hops away and cannot arrive before `L3`. Dendrite knowledge at
+  `L1` must then come from local cues or the global read, which the lens can tell apart.
+- Frontier rows of one snapshot share one depth (the visible depth), so the filter keeps whole
+  partial trees that reached ≥ 5 levels.
+
+**Evidence that the shallow bins distort.** Basal own-dendrite height rank, within-tree ρ at `L1`
+(v3 uncond): 0.63 / 0.12 / 0.05 / 0.04 / 0.02 for depth 1–2 / 3–4 / 5–6 / 7–8 / 9–12. The pooled
+mean over bins (0.17) was carried by the one-hop 1–2 bin.
+
+**Safeguards.**
+1. Report the shallow bins in an appendix.
+2. Check that conclusions hold with a cutoff of 7.
+3. Deep frontier nodes have less future left, so look-ahead targets have a smaller range there. This
+   biases look-ahead down (conservative).
+
+**Implementation (✅ built 2026-10-20; ⛔ not yet run).**
+- `--min-depth N` on P1, P2 and P5 (`MIN_DEPTH` in `scripts/interp_analyze.sbatch`). It filters
+  rows before fitting, so probes are fit on deep rows only. P5 filters snapshots by visible depth.
+  P3 is already reported per visible depth.
+- P2 `inapical/<target>`: the primary probe on frontier rows inside the apical dendrite. There is one
+  apical dendrite per snapshot, so within-tree = within-dendrite for these rows. Together with
+  `nonapical/` it separates the global (between-tree) part of the apical's growth from local
+  ranking inside it.
+- P1 `.../frontier_apical` and `.../frontier_basal` copies of every frontier `ctx/` and `path/`
+  target (`--no-split-apical` to skip).
+- P5 `p5_bins_*`: graph-level OOF predictions scored per visible-depth bin, with the observables
+  stack in the same bin (`rho_obs`).
+- `CKPT_VERSION` = 4.
 
 ---
 
@@ -916,10 +966,10 @@ features, which is in its input anyway. Three more groups ask what the network b
   the analysis and its graph-LayerNorm checks (§10.3) are ⛔ not built.
 * **Interventions during generation → §11b** (revised 2026-10-20 after the v3 within-group results).
   - The planned set is **E0** (global-attention ablation during sampling, gate), **E1 S-class**
-    (cell-type steering of the uncond arm) and **E2 S-reach** (does basal growth use the
-    tokens' apical reach).
-  - **S-growth** is deferred. Its nonapical Δ is tiny, half its signal is apical routing, and
-    pooled directions encode tree identity.
+    (cell-type steering of the uncond arm, global) and **E3** (local growth steer into one
+    basal frontier node). E2 S-reach was designed and then dropped (§11b.1).
+  - **S-growth** became E3, with the fixes its first design needed: basal rows only (no apical
+    routing), dendrite-centred mass-mean (no tree identity), branch-next and depth removed.
   - **S-apical** is reduced to the `input_flag_swap` reference, since deep-node apical identity
     is the copied input flag.
   - Built and unit-tested (rollout driver with keyed noise, masks, per-t / masked
@@ -964,9 +1014,10 @@ LayerNorm; all three are real.
     σ_g'^2 = σ_g^2 + α² Var_F(v) + 2α Cov(h − μ_g, v).
     So the edit also rescales every node. There is no off-target *set* here, only a norm shift,
     which the matched-norm controls share.
-  * **Node-masked** (E2): αv is added on basal nodes only. This is the |S|/N_g case of §10.1. The
-    apical's change is the measured off-target coupling, made interpretable by lineage-keyed
-    noise (§11b.2): the apical receives the same noise in every condition.
+  * **Node-masked** (E3): αv is added on one lineage only (the target node and its frontier
+    descendants). This is the |S|/N_g case of §10.1 with |S| tiny. The siblings' and other
+    dendrites' change is the measured off-target coupling, made interpretable by lineage-keyed
+    noise (§11b.2): they receive the same noise in every condition.
 * Not verified yet: nothing in the steering pipeline has been run.
 
 ### 10.3 LEACE erasure (⛔ not built — design decisions and the open question)
@@ -1028,16 +1079,19 @@ directly), so the method is overridden per instance and restored on exit. Modes:
 **Primary mode: `mean`** — it removes routed information while keeping the network on its usual
 operating point. `zero` is a robustness check.
 
-## 11b. Interventions during generation (E0, E1 S-class, E2 S-reach)
+## 11b. Interventions during generation (E0, E1 S-class, E3 local growth)
 
 > **Status.** 🟡 Built and unit-tested on random-init (`tests/test_interp_rollout.py`,
 > `test_steer_dirs`); ⛔ nothing run on trained checkpoints yet. This section froze the design
 > before any rollout was generated. Plan: `~/.claude/plans/i-think-let-s-plan-piped-river.md` (iteration 2026-10-20).
+> **Revised 2026-10-20:** E2 S-reach dropped (code removed; recoverable from `c86a416`) in favour of E3, a
+> local growth steer. E1 pushes graph-level information into every node and E3 pushes look-ahead into one
+> node, so the paper reports one global and one local intervention. Phase B stays on val (§11b.2).
 
 A probe shows that information is *present*. An intervention during generation shows that it is
 *used*. The original pair, S-growth (P2) and S-apical (P6), was designed before the v3
 within-group scoring (§8b). §11b.1 explains why the set changed. §11b.2 covers what all three
-experiments share. §11b.3–5 give one card per experiment.
+experiments share. §11b.3–5 give one card per experiment: E0 (gate), E1 (global), E3 (local).
 
 ### 11b.1 Why these three, after v3
 
@@ -1045,9 +1099,9 @@ experiments share. §11b.3–5 give one card per experiment.
 |---|---|
 | A1 jumps are tree-level: within-tree ρ ≈ 0, matched by the tree-average baseline, reproduced by random-init (§8b.5) | Directions pooled across trees partly encode *which tree*. A node-level steer built from them can act like a tree-level one. |
 | P3 cell class survives the partial-tree + tree-average baseline (uncond, Δ +0.05–0.10, random ≤ 0) | The strongest graph-level latent. Graph-level, so the within-tree confound does not apply. → **E1** |
-| P5 `tree/` reach targets beat the tree average from G1 (+0.04–0.11; random ≈ +0.02) | Tokens carry learned cross-dendrite reach. Whether basal growth *uses* it is the mechanistic question behind the apical error mode. → **E2** |
-| Every token claim assumes generation reads the tokens | Test that first, without directions. → **E0**, which gates E1/E2 |
-| P2 look-ahead is real within a dendrite but small. Nonapical Δ is +0.003–0.008; about half the primary Δ is the apical label routed down the lineage (§8b.5) | **S-growth deferred.** If revived: mass-mean on snapshot-centred activations and labels, non-apical rows only, v_ap projected out, steer at L5–L9 |
+| P5 `tree/` reach targets beat the tree average from G1 (+0.04–0.11; random ≈ +0.02) | Tokens carry learned cross-dendrite reach. A steer of it (**E2 S-reach**) would push tree-level information again, like E1. **Dropped** for the one-global / one-local design; E0's block and tree-mean ablations still say whether the global read shapes basal growth. |
+| Every token claim assumes generation reads the tokens | Test that first, without directions. → **E0**, which gates E1 |
+| P2 look-ahead is real within a dendrite but small. Nonapical Δ is +0.003–0.008; about half the primary Δ is the apical label routed down the lineage (§8b.5); the within-dendrite signal rises from about L7 | **E3** (the former S-growth), built so it cannot ride on tree identity or apical routing: basal rows only, one mass-mean stratum per dendrite, branch-next and depth projected out, steered into one frontier node at L7–L9 |
 | Deep-node apical identity is mostly the input slot-0 flag copied down the lineage | **S-apical reduced** to the `input_flag_swap` reference. Steering v_ap ≈ editing the input flag. |
 
 ### 11b.2 Shared design
@@ -1094,10 +1148,12 @@ i.e. every expand step and every Euler step.
 condition also reports the induced shift relative to the per-graph scale, ‖α v‖ / σ_g, so dose
 curves can be read against the normalisation shift of §10.1.
 
-**Controls**, at matched norm, for E1/E2:
+**Controls**, at matched norm, for E1/E3:
 - (i) −α;
 - (ii) a random Gaussian direction;
-- (iii) an "on-manifold" direction: the mass-mean between two random halves of the same rows.
+- (iii) an "on-manifold" direction: E1, the mass-mean between two random halves of the neurons;
+  E3, the mass-mean after shuffling the label within each dendrite (random halves of neurons
+  never meet inside a dendrite stratum).
 
 Control (iii) shares the graph-LN side effect and the activation statistics; (ii) checks
 whether any push of that size matters.
@@ -1127,7 +1183,16 @@ whether any push of that size matters.
 - Holm within each experiment's primary family.
 - Phases:
   - **Phase A** chooses sites and doses on val (256 neurons × 2 seeds).
-  - **Phase B** confirms on test (1,167 neurons × 3 seeds) with primary endpoints frozen after A.
+  - **Phase B** confirms on **val**: the 2,273 val neurons not in Phase A (`--subset rest`),
+    fresh seeds 2–4, primary endpoints frozen after A.
+
+**Why not test (calibration, 2026-10-20).** The tall-arm metric reproduces the documented GT
+rates on val exactly (one tall 80.3 %, ≥ 2 tall 19.7 %, dominance 2.57, −û 96.8 %). The test
+split is shifted: median 75 nodes vs 51 for train and val, ≥ 2 tall 42.2 %, dominance 1.95, −û
+77.0 %. The class mix matches across splits; the conditional dataset keeps the upstream split
+and drops test-only classes (WM-P, MC, BPC), so the upstream test set was selected differently.
+Test is therefore an out-of-distribution check, not a replication; any test comparison uses
+test's own GT reference.
 
 ### 11b.3 E0 — is global attention used during generation? (both arms)
 
@@ -1154,7 +1219,8 @@ extraction mean was estimated at one fixed t. For E0 the mean is recorded during
 - TMD arm: `tmd_cond` pairwise fidelity (does conditioning still work without the global read?).
 
 **Gate.** If `mean` leaves every readout within seed spread, the tokens are not used in
-generation. E1 and E2 are then expected to be null, and are run only as confirmation.
+generation. E1 is then expected to be null and is run only as confirmation. E3 does not depend
+on the gate (its direction is node-local).
 
 ### 11b.4 E1 — S-class: steering the unconditional generator toward a cell type (uncond)
 
@@ -1205,52 +1271,71 @@ the size-free classifier and Δ within generated-size bins, and keeps realism.
 why the size-free classifier and the size-binned Δ are part of the success criterion, not
 extras.
 
-### 11b.5 E2 — S-reach: do basal dendrites use what the tokens say about the apical? (both arms)
+### 11b.5 E3 — local growth steer: is the look-ahead state used? (both arms)
 
-**Question.** P5 `tree/` and P6b show that basal frontier states carry the apical's reach beyond
-the tree average. Generated neurons too often grow ≥ 2 tall arms (35.8 % vs 19.7 % in GT,
-`docs/APICAL_AXIAL_ERROR_MODE.md`). Is the information used to hold basal dendrites back
-("knows and restrains"), or present but ignored ("knows but grows")?
+**Question.** P2 finds that a frontier node's state predicts its own future subtree within its
+dendrite, beyond the branch-next label (§9.2, §8b). Does pushing that state make *that node's*
+subtree grow, while its siblings and the other dendrites stay put? This is the local
+counterpart of E1.
 
-**Direction, in the space of the global write.**
-- Use the change made by the attention sub-block, δ_k = A_k − L_{k−1}, on basal frontier rows
-  (owner ≥ 1).
-- Contrast high vs low **absolute** visible apical reach (new target `apical_vis_reach_abs`, the
-  un-normalised numerator of `apical_vis_reach`, §3.3): top vs bottom tercile within strata.
-- Strata = visible depth bin × own-arm visible reach tercile, so v does not just mean "my arm is
-  tall".
-- v is orthogonalised to the depth read-out direction.
-- Sites: global blocks k ∈ {3, 5, 7, 9}.
+**Direction** (`steer_dirs --kind growth`, sites L7, L8, L9, where the within-dendrite signal
+rises).
+- Rows: basal frontier rows (owner ≥ 1, not in the apical subtree) at depth ≥ 5. Within one
+  reduction snapshot every frontier node has the same depth, so this selects snapshots, and depth
+  is constant inside a dendrite.
+- Dendrite d = neuron × level × owner (`common.dend_ids`); weights 1/rows per neuron.
+- Look-ahead, among rows that branch next (label2 = 1), with one stratum per dendrite:
+  $$v_{\text{grow}} = \frac{\sum_d n_d\,(\mu^{+}_d - \mu^{-}_d)}{\sum_d n_d},\qquad
+  \mu^{\pm}_d = \text{mean activation in dendrite } d \text{ with } y_{h2} = 1 / 0,\quad n_d = \min(n_d^+, n_d^-).$$
+  A difference of means inside each dendrite equals the difference of dendrite-centred means, so
+  a per-dendrite (and per-tree) offset cancels exactly: the direction cannot encode which tree
+  or which dendrite (✅ `test_steer_dirs`, planted per-dendrite offsets leave v_grow unchanged).
+- Branch-next: v_label = the same with label2 1 vs 0 over all those rows. Depth: the pooled
+  least-squares depth read-out (near-redundant given the strata, removed anyway).
+- $$v_\perp = \frac{\lVert v_{\text{grow}}\rVert}{\lVert \tilde v\rVert}\,\tilde v,\qquad
+  \tilde v = v_{\text{grow}} - \Pi_{\{v_{\text{label}},\,v_{\text{depth}}\}}\,v_{\text{grow}},$$
+  so α = 1 adds one natural unit of the look-ahead contrast. Saved as `grow`; `grow_raw`
+  (v_grow) and `label` (v_label at the same norm) are references.
 
-**Edit.**
-- `SiteEditor` on A_k adds α v to **basal nodes only** (owner_slot ≥ 1). This is the same
-  location the direction was estimated in: what those nodes take from the tokens.
-- α ∈ {−2, −1, 0, 1, 2, 4}.
-- Variant: basal frontier nodes only.
+**Target node** (identical in every condition).
+- In every E3 run, including intact, each graph picks a target the first time a basal frontier
+  node reaches generated depth ≥ 5: the candidate with the smallest lineage key (deterministic,
+  effectively random).
+- Before the first edit all conditions are identical (lineage-keyed noise), so they pick the
+  same node; its key is stored (`G.graph["target_key"]`) and pairs are checked to share it
+  (`n_key_mismatch` = 0, ✅ unit-tested).
+- Neurons without such a node have no target and are excluded from E3 effects (count reported).
 
-**References.**
-- Basal-only `mean` ablation of Attn₂: remove what basal nodes read globally, with no direction.
-- +α on slot 0, as a specificity check.
-- Random and on-manifold controls in the δ space.
+**Edit.** `SiteEditor` on L_k adds αv to:
+- **primary, `target_lineage`**: the target while it is on the frontier, then its descendants
+  while they are on the frontier (a sustained push down one lineage);
+- **variant, `target`**: the target during its one frontier step only. The model has no hidden
+  state across expand steps, so anything after that step is carried by the geometry and labels
+  the push produced.
+- α ∈ {−4, −2, −1, 1, 2, 4}. Phase A: site sweep L7/L8/L9 at α = 2; dose at the best site;
+  controls (random, on-manifold), references (`grow_raw`, `label`) and the one-shot variant at
+  α ∈ {2, 4}.
 
-**Endpoints, paired by lineage-keyed noise.**
-- Primary: the steered tree's max basal reach and its ≥ 2-tall indicator.
-- Secondary: basal size, dominance, tallest = slot 0.
-- Off-target: apical reach and size, which must be reported. A change there is coupling through
-  graph LN or the tokens (§10.1), not noise, because the apical's noise is identical across
-  conditions.
+**Endpoints** (`metrics.growth_row`, paired by neuron × seed and target key).
+- On target: expanded at its first decision; final subtree size, height (generations), path
+  length, Strahler order, axial reach.
+- Off target: the sibling's subtree; the rest of the target's dendrite; the other basal
+  dendrites' size; apical reach and size; the ≥ 2-tall share. Unedited lineages get identical
+  noise, so any change there is model coupling (graph LN, global attention, §10.1).
 
-**Predictions and readings.**
+**Key comparisons and success.**
+- `grow` vs `label` at matched Δ P(expand): is the effect more than "branch now"? Reported as
+  Δheight / ΔP(expand).
+- `grow` vs `grow_raw`: what removing branch-next costs.
+- Success: a dose-response in target subtree height/size under `target_lineage`; above the
+  random and on-manifold controls; larger per unit of first-step expansion than `label`; and
+  on-target changes larger than off-target ones.
 
 | Outcome | Reading |
 |---|---|
-| +α shrinks basal reach and lowers the ≥ 2-tall share; −α does the opposite; controls ≈ 0 | basal growth reads the apical's reach from the tokens: a usable lever on the error mode |
-| No effect, while basal-only ablation also has none | the reach information is present (probes) but unused by growth: the error is a usage failure |
-| No effect from v, but basal-only ablation changes growth | the global read matters, but not along this direction: v is the wrong summary |
-
-**Deferred variant.** Patch the token read from a donor tree with a taller apical into the
-recipient's basal nodes (interchange intervention). It uses natural values instead of a
-direction. It is built only if E2 shows an effect.
+| `grow` raises the target's subtree beyond `label` at matched expansion; off-target small | the look-ahead state is used locally: the node's state sets its future, not just its next step |
+| Only `label`-like effects (P(expand) moves, height per unit expansion no larger than `label`) | the probed look-ahead is a read-out, not a lever: growth is decided step by step |
+| Large off-target changes | the push travels through graph LN or the global read; quantify with the §10.1 shift |
 
 ---
 
@@ -1283,6 +1368,8 @@ direction. It is built only if E2 shows an effect.
 | Lineage-keyed rollout noise: keys depend only on lineage; keyed rollouts deterministic and independent of batch packing (batch 64 vs 1, positions within 1e-3) | `test_lineage_keys_depend_only_on_lineage`, `test_keyed_generate_is_deterministic_and_packing_independent` | ✅ |
 | Owner slot from lineage = soma-child ancestry; soma children are ids 1..k in spawn order | `test_owner_matches_ancestry_and_slots` | ✅ |
 | α = 0 editor and an empty-mask ablation are the identity during rollouts | `test_zero_edit_and_empty_mask_ablation_are_identity` | ✅ |
+| E3: every condition picks the same target node (same key); the one-shot mask touches ≤ 1 node per graph; α = 0 lineage edit is the identity; subtree readouts on a hand tree | `test_growth_target_selection_is_shared_and_masks_are_local`, `test_growth_row_hand_tree`, `test_class_and_growth_conditions_from_dirs` | ✅ |
+| E3 direction: per-dendrite offsets cancel; v_⊥ ⟂ v_label; controls norm-matched | `test_steer_dirs` | ✅ |
 | Re-implemented tall-arm metric reproduces GT ≥ 2-tall share 19.7 % | planned calibration | ⛔ |
 | Uniform-edit graph-LN identity (only the **1** component removed; other graphs untouched) | `test_graph_layernorm_removes_only_the_constant_component` | ✅ |
 | Whether graph LN re-exposes LEACE-erased concepts | — | ⛔ |
@@ -1311,7 +1398,8 @@ direction. It is built only if E2 shows an effect.
 | Random init, 2 seeds | 1 seed so far | cost; the sbatch accepts any seed |
 | Holm correction within families | not implemented | §8 |
 | P4 (LEACE amnesic), steering, rollout capture, GT-prefix rollouts, train memorisation contrast | not built | ordering: probes first |
-| Steering = S-growth + S-apical, via a `+steer` hook in `Trainer.test` | **E0 / E1 S-class / E2 S-reach** (§11b), standalone rollout driver; S-growth deferred, S-apical → `input_flag_swap` reference | v3 within-group scoring moved the strong signals to graph-level latents and token reach (§11b.1); a standalone driver runs many conditions per job |
+| Steering = S-growth + S-apical, via a `+steer` hook in `Trainer.test` | **E0 / E1 S-class / E3 local growth** (§11b), standalone rollout driver; S-growth rebuilt as E3 (dendrite-centred, basal only, one-node push); S-apical → `input_flag_swap` reference; E2 S-reach designed then dropped | v3 within-group scoring moved the strong signals to graph-level latents (§11b.1); one global and one local steer; a standalone driver runs many conditions per job |
+| Phase B on test | Phase B on val neurons not used in Phase A, fresh seeds | the test split is shifted (§11b.2) |
 | Store tiers A / B1 / B2 / C | dense / sparse row groups + graph arrays (same content) | implementation detail |
 
 ---
@@ -1384,5 +1472,5 @@ candidate for a refit with a larger cap, not an automatic exclusion.
 | `interp/analyses/common.py` | §14b unit engine: checkpoint, lazy baselines, parallel runner, per-site probe unit |
 | `interp/analyses/p1…p6, report.py` | §9 experiments; text summary |
 | `scripts/interp_extract.sbatch`, `scripts/interp_analyze.sbatch` | cluster jobs |
-| `interp/rollout.py`, `interp/metrics.py`, `interp/class_clf.py`, `interp/analyses/steer_dirs.py`, `interp/analyses/s_rollouts.py`, `scripts/interp_rollout.sbatch` (GPU), `scripts/interp_steer_cpu.sbatch` (calib / clf / dirs / analyze) | §11b: rollout driver + keyed noise + step context; tall-arm / size metrics; morphology class classifier; E1/E2 directions; paired analysis; GPU job |
+| `interp/rollout.py`, `interp/metrics.py`, `interp/class_clf.py`, `interp/analyses/steer_dirs.py`, `interp/analyses/s_rollouts.py`, `scripts/interp_rollout.sbatch` (GPU), `scripts/interp_steer_cpu.sbatch` (calib / clf / dirs / analyze) | §11b: rollout driver + keyed noise + step context + E3 target selection; tall-arm / size / subtree metrics; morphology class classifier; E1 / E3 directions; paired analysis; GPU job |
 | `tests/test_interp_*.py` | §12 verification |

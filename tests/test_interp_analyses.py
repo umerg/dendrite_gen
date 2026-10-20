@@ -163,9 +163,51 @@ def test_steer_dirs(store, tmp_path):
         assert v.shape == (256,)
         for c in ("random", "onmanifold"):      # controls are norm-matched
             assert np.isclose(np.linalg.norm(d[f"L3/{n}/{c}"]), np.linalg.norm(v), rtol=1e-6)
-    p = steer_dirs.run(store, 0.0, "val", tmp_path, "reach", ["A3"])
-    d = dict(np.load(p))
-    v = d["A3/reach/v"]
-    assert v.shape == (256,) and np.isclose(np.linalg.norm(d["A3/reach/random"]), np.linalg.norm(v))
-    with pytest.raises(ValueError):
-        steer_dirs.run(store, 0.0, "val", tmp_path, "reach", ["L3"])
+    from interp.analyses.common import load
+
+    st, rows = load(store, 0.0, "val")
+    dmin = 2                                    # tiny random-init store: few deep basal rows
+    d = steer_dirs.growth_dirs(st, rows, ["L7", "L8"], dmin=dmin)
+    for s in ("L7", "L8"):
+        v, raw, lab = d[f"{s}/grow/v"], d[f"{s}/grow_raw/v"], d[f"{s}/label/v"]
+        assert v.shape == (256,)
+        for k in ("random", "onmanifold"):      # controls and references are norm-matched to v_grow
+            assert np.isclose(np.linalg.norm(d[f"{s}/grow/{k}"]), np.linalg.norm(raw))
+        assert np.isclose(np.linalg.norm(v), np.linalg.norm(raw)) and np.isclose(np.linalg.norm(lab), np.linalg.norm(raw))
+        assert abs(v @ lab) < 1e-6 * np.linalg.norm(v) * np.linalg.norm(lab)        # branch-next removed
+    # dendrite strata: a per-dendrite offset in the activations does not enter v_grow
+    df = steer_dirs.growth_rows(rows, dmin)
+    g2 = df[df.label2.astype(bool)].reset_index(drop=True)
+    X = st.acts("L8", g2)
+    off = np.random.default_rng(0).standard_normal((g2.dend.nunique(), 256)) * 50
+    Xs = X + off[pd.factorize(g2.dend)[0]]
+    from interp import probe as P
+    a = P.mass_mean(X, g2.y_h2.to_numpy().astype(bool), strata=g2.dend.to_numpy())["v"]
+    b = P.mass_mean(Xs, g2.y_h2.to_numpy().astype(bool), strata=g2.dend.to_numpy())["v"]
+    assert np.allclose(a, b, atol=1e-6)
+
+
+def test_min_depth_and_apical_split(store, tmp_path):
+    """§8b.8: --min-depth drops shallow rows everywhere; apical / basal row variants exist."""
+    from interp.analyses import p1_local, p2_lookahead, p5_stop
+
+    recs, _ = p1_local.run(store, 0.0, "val", tmp_path / "p1", B=10, groups=["ctx", "path"], min_depth=3)
+    tags = set(recs.tag)
+    assert {"ctx/parent_edge/frontier_apical", "ctx/parent_edge/frontier_basal",
+            "path/parent_pathdist/frontier_basal"} <= tags
+    assert not any("n_front_siblings/frontier_" in t for t in tags)
+    b1 = pd.read_csv(tmp_path / "p1" / "p1_bins_val_t0.csv")
+    assert (b1.depth_lo >= 3).all()
+
+    p2 = p2_lookahead.run(store, 0.0, "val", tmp_path / "p2", B=10, controls=False, strict=False, min_depth=3)
+    assert {"inapical/y_h2", "nonapical/y_h2"} <= set(p2.tag)
+    b2 = pd.read_csv(tmp_path / "p2" / "p2_bins_val_t0.csv")
+    assert (b2.depth_lo >= 3).all() and "inapical/y_h2" in set(b2.tag)
+
+    p5 = p5_stop.run(store, 0.0, "val", tmp_path / "p5", B=10, sites=["G1", "pool_L0"], min_depth=3)
+    assert len(p5)
+    b5 = pd.read_csv(tmp_path / "p5" / "p5_bins_val_t0.csv")
+    assert (b5.depth_lo >= 3).all() and {"levels_remaining", "tree/tallest_reach"} <= set(b5.tag)
+    assert b5.rho_obs.notna().any()
+    from interp.analyses.report import report
+    assert "p5_bins_val_t0" in report(tmp_path / "p5")

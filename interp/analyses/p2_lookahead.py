@@ -27,6 +27,12 @@ on the finished neuron, and "this node is in the apical dendrite" alone predicts
 future subtree. ``apical/<target>`` adds apical membership to the observables (Δ only);
 ``nonapical/<target>`` repeats the primary probe on frontier rows outside the apical dendrite,
 where the label carries no "grow deep" signal. Look-ahead that survives both is not the label.
+``inapical/<target>`` repeats it on rows inside the apical dendrite (one dendrite per snapshot, so
+its within-tree and within-dendrite scores coincide): with ``nonapical`` it separates what the
+global read tells the apical (between trees) from local ranking inside it.
+
+``--min-depth N`` (methodology §8b.8) keeps frontier rows at depth >= N, i.e. partial trees that
+reached N levels; shallower nodes receive their dendrite-level facts within the first two hops.
 
 Bins table (``p2_bins_<split>_t<t>.csv``): per depth bin, pooled and within-snapshot /
 within-dendrite Spearman of the probe and of the observables-only / full stacks (§8b.2), for the
@@ -47,7 +53,8 @@ import pandas as pd
 
 from .. import probe as P
 from ..baselines import KHOP_COLS, OBS_CONTEXT, OBS_FRONTIER, matrix
-from .common import Checkpoint, Lazy, load, ordered_sites, run_units, split_tables, sweep_units, tmd_obs, write
+from .common import (Checkpoint, Lazy, load, min_depth_rows, ordered_sites, run_units, split_tables, sweep_units,
+                     tmd_obs, with_min_depth, write)
 
 PRIMARY = [
     ("y_h2", lambda d: d.y_h2.to_numpy().astype(int)),
@@ -87,8 +94,10 @@ def directions(st, front: pd.DataFrame, sites) -> dict[str, np.ndarray]:
 
 
 def run(store_root, t: float, split: str, out, B: int = 500, controls: bool = True,
-        control_task: bool = False, obs_tmd: bool | None = None, strict: bool = True, apical: bool = True):
+        control_task: bool = False, obs_tmd: bool | None = None, strict: bool = True, apical: bool = True,
+        min_depth: int = 1):
     st, rows = load(store_root, t, split)
+    rows = min_depth_rows(rows, min_depth)
     sites = ordered_sites(st)
     front = rows[rows.is_frontier].reset_index(drop=True)
     grow = front[front.label2].reset_index(drop=True)
@@ -106,6 +115,7 @@ def run(store_root, t: float, split: str, out, B: int = 500, controls: bool = Tr
     ap_f = grow[["is_apical_subtree"]].to_numpy(float)
     basal = ~grow.is_apical_subtree.astype(bool).to_numpy()
     grow_b = grow[basal].reset_index(drop=True)
+    grow_a = grow[~basal].reset_index(drop=True)
     path = str(st.path)
     units = []
     for name, fn in PRIMARY:
@@ -122,6 +132,12 @@ def run(store_root, t: float, split: str, out, B: int = 500, controls: bool = Tr
             if len(np.unique(yb)) >= 2 and grow_b.neuron.nunique() >= 5:
                 units += sweep_units(path, grow_b, yb, sites, tag=f"nonapical/{name}", B=B, extra=ex,
                                      stack=Lazy(P.obs_stack, obs_f[basal], yb, groups[basal]), bins=True)
+            # rows inside the apical dendrite (one dendrite per snapshot, so within-tree =
+            # within-dendrite for these rows)
+            ya = y[~basal]
+            if len(np.unique(ya)) >= 2 and grow_a.neuron.nunique() >= 5:
+                units += sweep_units(path, grow_a, ya, sites, tag=f"inapical/{name}", B=B, extra=ex,
+                                     stack=Lazy(P.obs_stack, obs_f[~basal], ya, groups[~basal]), bins=True)
         if strict:
             units += sweep_units(path, grow, y, sites, tag=f"strict/{name}", B=B, extra=ex, plain=False,
                                  stack=Lazy(P.obs_stack, np.hstack([obs_f, lvl_f]), y, groups))
@@ -151,12 +167,13 @@ def run(store_root, t: float, split: str, out, B: int = 500, controls: bool = Tr
                                      stack=Lazy(P.obs_stack, np.hstack([obs_c, ctx[["level"]].to_numpy(float)]), y, cg))
 
     out_name = f"p2_{split}_t{t:g}"
-    ckpt = Checkpoint(out, out_name, dict(analysis="P2", store=str(store_root), t=t, split=split, B=B,
-                                          controls=controls, control_task=control_task,
-                                          obs_tmd=t_f is not None, strict=strict, apical=apical))
+    ckpt = Checkpoint(out, out_name, with_min_depth(dict(analysis="P2", store=str(store_root), t=t, split=split, B=B,
+                                                         controls=controls, control_task=control_task,
+                                                         obs_tmd=t_f is not None, strict=strict, apical=apical),
+                                                    min_depth))
     recs, side = split_tables(run_units(units, ckpt))
     meta = dict(analysis="P2", store=str(store_root), t=t, split=split, store_meta=st.meta,
-                obs_cols=OBS_FRONTIER + KHOP_COLS, obs_tmd=t_f is not None)
+                obs_cols=OBS_FRONTIER + KHOP_COLS, obs_tmd=t_f is not None, min_depth=min_depth)
     write(out, out_name, recs, meta)
     if side.get("bins"):
         write(out, f"p2_bins_{split}_t{t:g}", side["bins"], meta)
@@ -176,13 +193,14 @@ def main(argv=None):
     ap.add_argument("--control-task", action="store_true")
     ap.add_argument("--no-strict", action="store_true", help="skip the +levels-remaining strict variant")
     ap.add_argument("--no-apical", action="store_true",
-                    help="skip the +apical-membership baseline and the non-apical-rows variant (§8b.6)")
+                    help="skip the +apical-membership baseline and the non-apical / in-apical row variants (§8b.6)")
+    ap.add_argument("--min-depth", type=int, default=1, help="keep frontier rows at depth >= N (§8b.8)")
     ap.add_argument("--obs-tmd", choices=["auto", "on", "off"], default="auto",
                     help="add conditioning-TMD PCs to observables (auto: on for TMD-conditioned stores)")
     a = ap.parse_args(argv)
     run(a.store, a.t, a.split, a.out, B=a.B, controls=not a.no_controls, control_task=a.control_task,
         obs_tmd={"auto": None, "on": True, "off": False}[a.obs_tmd], strict=not a.no_strict,
-        apical=not a.no_apical)
+        apical=not a.no_apical, min_depth=a.min_depth)
 
 
 if __name__ == "__main__":

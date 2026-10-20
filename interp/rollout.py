@@ -16,6 +16,12 @@ condition: differences there come from the model (global attention, graph LayerN
 ``owner`` (spawn slot of the soma child a node descends from; slot 0 = model apical, -1 = soma),
 ``frontier`` (bool over nodes), ``t`` (flow time of the current network call).
 
+E3 target selection (``select_dmin``): at each expand step, every graph without a target picks
+the basal frontier node (owner ≥ 1, depth ≥ select_dmin) with the smallest lineage key. Before
+the first edit every condition is identical (keyed noise), so all conditions pick the same node;
+its key is written to ``G.graph["target_key"]``. Masks ``target`` (the node, while it is on the
+frontier) and ``target_lineage`` (the node and, later, its frontier descendants).
+
 CLI (one experiment, many conditions, one job)::
 
     python -m interp.rollout --config parity_neurons_uncond --ckpt /.../step_218500.pt \\
@@ -88,13 +94,20 @@ class RolloutState:
     owner_t: th.Tensor | None = None       # long [N]
     batch_t: th.Tensor | None = None       # long [N]
     n_degenerate_frames: list = field(default_factory=list)
+    select_dmin: int | None = None         # E3: enable target selection at this generated depth
+    under: np.ndarray | None = None        # bool [N]: target or its descendant
+    targets: dict = field(default_factory=dict)        # graph j -> global node index
+    target_step: dict = field(default_factory=dict)    # graph j -> expand step of selection
+    is_target_t: th.Tensor | None = None
+    under_t: th.Tensor | None = None
 
     @classmethod
     def new(cls, seed: int, graph_keys, device="cpu") -> "RolloutState":
         g = np.asarray(graph_keys, dtype=np.uint64)
         keys = splitmix(splitmix(np.uint64(seed) + np.uint64(7)) ^ splitmix(g))
         n = len(g)
-        return cls(keys=keys, owner=np.full(n, -1, np.int64), depth=np.zeros(n, np.int64), device=device)
+        return cls(keys=keys, owner=np.full(n, -1, np.int64), depth=np.zeros(n, np.int64), device=device,
+                   under=np.zeros(n, bool))
 
     def grow(self, parent_idx: np.ndarray) -> np.ndarray:
         """Register nodes appended since the last call. ``parent_idx`` covers all nodes (0-based,
@@ -114,7 +127,23 @@ class RolloutState:
         self.keys = np.concatenate([self.keys, child_keys(self.keys[par], rank)])
         self.owner = np.concatenate([self.owner, np.where(par_is_root, rank, self.owner[par])])
         self.depth = np.concatenate([self.depth, self.depth[par] + 1])
+        self.under = np.concatenate([self.under, self.under[par]])
         return new
+
+    def select(self, batch: np.ndarray, leaf_idx: np.ndarray):
+        """E3: give each graph without a target the basal frontier node at depth ≥ select_dmin
+        with the smallest lineage key."""
+        if self.select_dmin is None or len(leaf_idx) == 0:
+            return
+        cand = leaf_idx[(self.owner[leaf_idx] >= 1) & (self.depth[leaf_idx] >= self.select_dmin)]
+        for j in np.unique(batch[cand]):
+            j = int(j)
+            if j in self.targets:
+                continue
+            c = cand[batch[cand] == j]
+            n = int(c[np.argmin(self.keys[c])])
+            self.targets[j], self.target_step[j] = n, self.step
+            self.under[n] = True
 
     # masks for editors / ablations (torch, on the model device)
     def mask(self, which: str) -> th.Tensor:
@@ -129,6 +158,10 @@ class RolloutState:
             return o == 0
         if which == "frontier":
             return f
+        if which == "target":
+            return f & self.is_target_t
+        if which == "target_lineage":
+            return f & self.under_t
         raise ValueError(which)
 
 
@@ -164,6 +197,12 @@ def track(method, model, state: RolloutState, keyed: bool = True):
         f[leaf_idx] = True
         state.frontier_t, state.batch_t = f, batch
         state.owner_t = th.as_tensor(state.owner, device=dev)
+        if state.select_dmin is not None:
+            state.select(batch.detach().cpu().numpy(), leaf_idx.detach().cpu().numpy())
+            it = th.zeros(N, dtype=th.bool, device=dev)
+            if state.targets:
+                it[th.as_tensor(list(state.targets.values()), device=dev)] = True
+            state.is_target_t, state.under_t = it, th.as_tensor(state.under, device=dev)
         if not keyed:
             return orig_sample(leaf_idx=leaf_idx, batch=batch, **kw)
         z = normals(state.keys[leaf_idx.detach().cpu().numpy()], 4)
@@ -268,10 +307,12 @@ def gt_inputs(graphs: list[nx.Graph], cfg, model) -> dict:
 
 
 def generate(method, model, graphs, cfg, seed: int, *, inputs: dict | None = None, batch_items: int = 64,
-             keyed: bool = True, interventions=(), device: str = "cpu", tmd_override=None) -> list[nx.Graph]:
+             keyed: bool = True, interventions=(), device: str = "cpu", tmd_override=None,
+             select_dmin: int | None = None) -> list[nx.Graph]:
     """Generate one neuron per GT graph. ``interventions``: callables ``state -> context manager``
-    entered around every batch (editors, ablations). Returns graphs in GT order with
-    ``graph`` attrs gt_index, neuron_id, cell_class, cap_hit and node attr ``owner``."""
+    entered around every batch (editors, ablations). Returns graphs in GT order with ``graph``
+    attrs gt_index, neuron_id, cell_class, cap_hit (+ target_key / target_step with
+    ``select_dmin``) and node attrs ``owner`` and ``key`` (lineage key)."""
     inputs = inputs or gt_inputs(graphs, cfg, model)
     if tmd_override is not None:
         inputs = {**inputs, "tmd": np.asarray(tmd_override, np.float32)}
@@ -282,6 +323,7 @@ def generate(method, model, graphs, cfg, seed: int, *, inputs: dict | None = Non
         idx = order[b0:b0 + batch_items]
         th.manual_seed(int(seed) * 100_003 + b0)   # unkeyed path: reproducible per batch
         state = RolloutState.new(seed, idx, device=device)
+        state.select_dmin = select_dmin
         kw = dict(target_size=th.as_tensor(inputs["size"][idx], device=device),
                   num_root_children=th.as_tensor(inputs["nrc"][idx], device=device))
         if inputs["tmd"] is not None:
@@ -295,13 +337,19 @@ def generate(method, model, graphs, cfg, seed: int, *, inputs: dict | None = Non
             preds = method.sample_graphs(model=model, **kw)
         batch = state.batch_t.cpu().numpy() if state.batch_t is not None else np.arange(len(idx))
         for j, (gi, G) in enumerate(zip(idx, preds)):
-            own = state.owner[batch == j] if state.batch_t is not None else np.array([-1])
+            nodes = np.flatnonzero(batch == j) if state.batch_t is not None else np.array([j])
+            own, keys = state.owner[nodes], state.keys[nodes]
             if len(own) != G.number_of_nodes():
                 raise RuntimeError("node bookkeeping out of step with sample_graphs")
             for n in G.nodes:
                 G.nodes[n]["owner"] = int(own[n])
+                G.nodes[n]["key"] = int(keys[n])
                 if psf is not None:
                     G.nodes[n]["pos"] = G.nodes[n]["pos"] * float(psf)
+            if select_dmin is not None:
+                tg = state.targets.get(j)
+                G.graph.update(target_key=int(state.keys[tg]) if tg is not None else None,
+                               target_step=state.target_step.get(j))
             G.graph.update(root=0, gt_index=int(gi), neuron_id=graphs[gi].graph.get("neuron_id"),
                            cell_class=graphs[gi].graph.get("cell_class"),
                            cap_hit=bool(G.number_of_nodes() >= (method.max_tree_size or 10 ** 9)))
@@ -322,6 +370,9 @@ def make_ablation(model, mode: str, blocks=None, means=None, target: str | None 
     return mk
 
 
+GROWTH_DMIN = 5   # E3: target = basal frontier node at generated depth >= 5
+
+
 def load_dirs(path) -> dict:
     with np.load(path, allow_pickle=False) as z:
         return {k: z[k] for k in z.files}
@@ -339,18 +390,17 @@ def conditions(exp: str, model, args, dirs: dict | None, means: dict | None) -> 
             C.append(dict(name=f"abl_mean_b{''.join(map(str, blk))}", spec=dict(ablate="mean", blocks=blk),
                           interventions=[make_ablation(model, "mean", blk, means)]))
         return C
-    if exp == "reach":
-        C.append(dict(name="abl_mean_basal", spec=dict(ablate="mean", blocks=G, target="basal"),
-                      interventions=[make_ablation(model, "mean", G, means, target="basal")]))
     sites = args.sites.split(",")
     alphas = [float(a) for a in args.alphas.split(",")]
     kinds = args.kinds.split(",")
     names = args.dir_names.split(",") if args.dir_names else None
-    targets = args.targets.split(",") if exp == "reach" else ["all"]
+    targets = args.masks.split(",") if exp == "growth" else ["all"]
     for s in sites:
         avail = sorted({k.split("/")[1] for k in dirs if k.startswith(f"{s}/") and k.endswith("/v")})
         for dn in (names or avail):
             for kind in kinds:
+                if f"{s}/{dn}/{kind}" not in dirs:     # controls exist for the main direction only
+                    continue
                 v = dirs[f"{s}/{dn}/{kind}"]
                 for a in alphas:
                     for tg in targets:
@@ -379,10 +429,12 @@ def main(argv=None):
     ap.add_argument("--config", required=True)
     ap.add_argument("--ckpt", default=None)
     ap.add_argument("--which", default="ema", help="ema | raw | random")
-    ap.add_argument("--exp", required=True, choices=["intact", "e0", "class", "reach"])
+    ap.add_argument("--exp", required=True, choices=["intact", "e0", "class", "growth"])
     ap.add_argument("--split", default="val")
     ap.add_argument("--data-dir", default=None)
-    ap.add_argument("--max-neurons", type=int, default=256, help="random subset (fixed seed 0); 0 = all")
+    ap.add_argument("--max-neurons", type=int, default=256, help="Phase A subset size (random, fixed seed 0)")
+    ap.add_argument("--subset", default="phaseA", choices=["phaseA", "rest", "all"],
+                    help="phaseA = the --max-neurons subset; rest = every other neuron of the split (Phase B)")
     ap.add_argument("--seeds", default="0,1")
     ap.add_argument("--batch-items", type=int, default=64)
     ap.add_argument("--no-keyed", action="store_true", help="plain sampler noise (no lineage keys)")
@@ -391,7 +443,8 @@ def main(argv=None):
     ap.add_argument("--alphas", default="1")
     ap.add_argument("--kinds", default="v", help="v,neg is expressed by negative alphas; controls: random,onmanifold")
     ap.add_argument("--dir-names", default=None, help="subset of direction names (default: all in the npz)")
-    ap.add_argument("--targets", default="basal", help="reach: node sets to edit (basal,basal_frontier,apical)")
+    ap.add_argument("--masks", default="target_lineage", help="growth: node sets to edit (target_lineage,target)")
+    ap.add_argument("--growth-dmin", type=int, default=GROWTH_DMIN, help="growth: min generated depth of the target")
     ap.add_argument("--tmd-class", type=int, default=None,
                     help="TMD arm yardstick: condition on TMDs of real neurons of this class (cycled)")
     ap.add_argument("--max-tree-size", type=int, default=None, help="override method.max_tree_size (tests)")
@@ -405,8 +458,9 @@ def main(argv=None):
     model.to(a.device)
     if a.max_tree_size:
         method.max_tree_size = a.max_tree_size
-    if a.max_neurons and len(graphs) > a.max_neurons:
-        keep = np.sort(np.random.default_rng(0).choice(len(graphs), a.max_neurons, replace=False))
+    if a.subset != "all" and a.max_neurons and len(graphs) > a.max_neurons:
+        phase_a = np.sort(np.random.default_rng(0).choice(len(graphs), a.max_neurons, replace=False))
+        keep = phase_a if a.subset == "phaseA" else np.setdiff1d(np.arange(len(graphs)), phase_a)
         graphs = [graphs[i] for i in keep]
     inputs = gt_inputs(graphs, cfg, model)
     tmd_override, tag = None, ""
@@ -419,18 +473,18 @@ def main(argv=None):
         tmd_override = np.stack([tmd_vector(pool[d], cfg) for d in donors])
         tag = f"_tmdclass{a.tmd_class}"
 
-    out = Path(a.out) / (a.exp + tag)
+    out = Path(a.out) / (a.exp + tag + ("" if a.subset == "phaseA" else f"_{a.subset}"))
     out.mkdir(parents=True, exist_ok=True)
     dirs = load_dirs(a.dirs) if a.dirs else None
     seeds = [int(s) for s in a.seeds.split(",")]
-    run_meta = dict(meta, config=a.config, split=a.split, n=len(graphs), keyed=not a.no_keyed,
+    run_meta = dict(meta, config=a.config, split=a.split, subset=a.subset, growth_dmin=a.growth_dmin, n=len(graphs), keyed=not a.no_keyed,
                     batch_items=a.batch_items, neuron_ids=[g.graph["neuron_id"] for g in graphs], dirs=a.dirs)
     gen = dict(inputs=inputs, batch_items=a.batch_items, keyed=not a.no_keyed, device=a.device,
-               tmd_override=tmd_override)
+               tmd_override=tmd_override, select_dmin=a.growth_dmin if a.exp == "growth" else None)
 
-    # intact first; for e0 / reach it also records the per-(block, t) mean global read
+    # intact first; for e0 it also records the per-(block, t) mean global read
     means = None
-    need_means = a.exp in ("e0", "reach")
+    need_means = a.exp == "e0"
     mpath = out / "attn2_means.pt"
     for s in seeds:
         p = out / f"intact_seed{s}.pkl"

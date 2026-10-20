@@ -14,6 +14,8 @@
 #
 # Usage:
 #   sbatch --export=ALL,STORE=/itet-stor/.../interp/parity_neurons_tmd/step_218500/ema scripts/interp_analyze.sbatch
+#   Depth >= 5 rerun (methodology §8b.8; P3 is already split by visible depth, P6 unchanged):
+#   sbatch --export=ALL,STORE=...,ANALYSES=p1,p2,p5,MIN_DEPTH=5,OUT=<STORE>/results_v4_d5 scripts/interp_analyze.sbatch
 #   P6 ablation (part c) — the ablated store must exist for the SAME split and t as the analysis
 #   (interp_extract.sbatch ablation example extracts SPLITS=test, MAXN=500, T=0):
 #   sbatch --export=ALL,STORE=...,SPLIT=test,ANALYSES=p6,ABLATED="mean=/itet-stor/.../ema_ablate-mean" scripts/interp_analyze.sbatch
@@ -31,6 +33,7 @@ T=${T:-0}
 ABLATED=${ABLATED:-}                     # name=path[,name=path...] (P6 part c)
 B=${B:-500}
 P1_GROUPS=${P1_GROUPS:-sanity,ctx,path,dend,morpho}   # P1 target groups (interp/analyses/p1_local.py)
+MIN_DEPTH=${MIN_DEPTH:-1}                # P1/P2/P5: keep nodes (P5: snapshots) at depth >= N (methodology §8b.8)
 JOBS=${JOBS:-8}                          # parallel worker processes (layers run in parallel); each gets
                                          # CPUs/JOBS BLAS threads. Peak memory ~2-3 GB per worker on full val.
 OUT=${OUT:-${STORE}/results}
@@ -89,10 +92,10 @@ for an in "${AN[@]}"; do
     echo "=== ${an} $(date)"
     set +o errexit
     case "${an}" in
-        p1) python -m interp.analyses.p1_local     --store "${STORE}" --t "${T}" --split "${SPLIT}" --out "${OUT}" --B "${B}" --groups "${P1_GROUPS}" ;;
-        p2) python -m interp.analyses.p2_lookahead --store "${STORE}" --t "${T}" --split "${SPLIT}" --out "${OUT}" --B "${B}" ;;
+        p1) python -m interp.analyses.p1_local     --store "${STORE}" --t "${T}" --split "${SPLIT}" --out "${OUT}" --B "${B}" --groups "${P1_GROUPS}" --min-depth "${MIN_DEPTH}" ;;
+        p2) python -m interp.analyses.p2_lookahead --store "${STORE}" --t "${T}" --split "${SPLIT}" --out "${OUT}" --B "${B}" --min-depth "${MIN_DEPTH}" ;;
         p3) python -m interp.analyses.p3_latent    --store "${STORE}" --t "${T}" --split "${SPLIT}" --out "${OUT}" --B "${B}" --tmd-input ;;
-        p5) python -m interp.analyses.p5_stop      --store "${STORE}" --t "${T}" --split "${SPLIT}" --out "${OUT}" --B "${B}" ;;
+        p5) python -m interp.analyses.p5_stop      --store "${STORE}" --t "${T}" --split "${SPLIT}" --out "${OUT}" --B "${B}" --min-depth "${MIN_DEPTH}" ;;
         p6) python -m interp.analyses.p6_apical    --store "${STORE}" --t "${T}" --split "${SPLIT}" --out "${OUT}" --B "${B}" "${ABL_ARGS[@]}" ;;
         *) echo "unknown analysis ${an}" >&2; false ;;
     esac
