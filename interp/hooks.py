@@ -131,19 +131,35 @@ class AttnAblation(contextlib.AbstractContextManager):
     broadcast, removes node-specific routing). ``ff_x`` and the token stream are untouched.
     Implemented as a per-instance override because hooks on attn2 never fire
     (``batched_forward`` calls ``Attention.forward`` directly).
+
+    Generation-time options (rollouts visit several flow times t):
+      ``t_fn``      callable returning the current flow time. With it, "record" accumulates
+                    per (block, t-key) and "mean" looks up ``means[(i, tkey)]`` first, falling
+                    back to ``means[i]``. t-key = round(10·t) (the sampler's Euler grid).
+      ``node_mask`` callable returning a bool tensor over the query nodes; only those nodes
+                    are ablated, the rest get the real read.
     """
 
     def __init__(self, model, blocks: Iterable[int] | None = None, mode: str = "zero",
-                 means: dict[int, th.Tensor] | None = None):
+                 means: dict | None = None, t_fn: Callable[[], float] | None = None,
+                 node_mask: Callable[[], th.Tensor] | None = None):
         if mode not in ("zero", "mean", "graphmean", "record"):
             raise ValueError(mode)
         self.model, self.mode, self.means = model, mode, means or {}
+        self.t_fn, self.node_mask = t_fn, node_mask
         # mode="record": pass-through that accumulates per-block sums of the attn2 output,
         # used to estimate the dataset-mean read for mode="mean" (see ``recorded_means``).
-        self.sums: dict[int, th.Tensor] = {}
-        self.counts: dict[int, int] = {}
+        self.sums: dict = {}
+        self.counts: dict = {}
         self.blocks = list(blocks) if blocks is not None else global_block_ids(model)
         self._patched = []
+
+    def _key(self, i):
+        return (i, tkey(self.t_fn())) if self.t_fn is not None else i
+
+    def _mean(self, i):
+        k = self._key(i)
+        return self.means[k] if k in self.means else self.means[i]
 
     def __enter__(self):
         for i in self.blocks:
@@ -151,30 +167,42 @@ class AttnAblation(contextlib.AbstractContextManager):
             orig = attn2.sparse_forward_with_separate_batches  # bound method
 
             def patched(q, kv, *, q_batch=None, kv_batch=None, mask=None, _orig=orig, _i=i):
-                if self.mode == "zero":
-                    return th.zeros_like(q)
-                if self.mode == "mean":
-                    return self.means[_i].to(q).expand_as(q).clone()
-                out = _orig(q, kv, q_batch=q_batch, kv_batch=kv_batch, mask=mask)
+                need_real = self.mode in ("graphmean", "record") or self.node_mask is not None
+                out = _orig(q, kv, q_batch=q_batch, kv_batch=kv_batch, mask=mask) if need_real else None
                 if self.mode == "record":
-                    s = out.detach().sum(0)
-                    self.sums[_i] = self.sums.get(_i, 0) + s
-                    self.counts[_i] = self.counts.get(_i, 0) + out.size(0)
+                    k = self._key(_i)
+                    self.sums[k] = self.sums.get(k, 0) + out.detach().double().sum(0)
+                    self.counts[k] = self.counts.get(k, 0) + out.size(0)
                     return out
-                return _graph_mean(out, q_batch) if q_batch is not None else out.mean(0, keepdim=True).expand_as(out)
+                if self.mode == "zero":
+                    abl = th.zeros_like(q)
+                elif self.mode == "mean":
+                    abl = self._mean(_i).to(q).expand_as(q).clone()
+                else:
+                    abl = (_graph_mean(out, q_batch) if q_batch is not None
+                           else out.mean(0, keepdim=True).expand_as(out))
+                if self.node_mask is None:
+                    return abl
+                m = self.node_mask().to(q.device).unsqueeze(-1)
+                return th.where(m, abl, out)
 
             attn2.sparse_forward_with_separate_batches = patched
             self._patched.append(attn2)
         return self
 
-    def recorded_means(self) -> dict[int, th.Tensor]:
-        return {i: self.sums[i] / max(self.counts[i], 1) for i in self.sums}
+    def recorded_means(self) -> dict:
+        return {k: (self.sums[k] / max(self.counts[k], 1)).float() for k in self.sums}
 
     def __exit__(self, *exc):
         for attn2 in self._patched:
             del attn2.sparse_forward_with_separate_batches  # restore the class method
         self._patched.clear()
         return False
+
+
+def tkey(t: float) -> int:
+    """Euler-grid key of a flow time (sampler grid t = 0, 0.1, ..., 0.9)."""
+    return int(round(float(t) * 10))
 
 
 class SiteEditor(contextlib.AbstractContextManager):

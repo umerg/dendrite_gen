@@ -149,3 +149,23 @@ def test_within_tree(store, tmp_path):
     assert len(orc) and (orc.rho_within.dropna().abs() < 1e-9).all()   # tree-only knowledge scores 0 within trees
     assert (tmp_path / "within_tree_val_t0.csv").exists()
     assert "rho_within" in within_tree.table(df, "rho_within")
+
+
+def test_steer_dirs(store, tmp_path):
+    from interp.analyses import steer_dirs
+
+    p = steer_dirs.run(store, 0.0, "val", tmp_path, "class", ["L3", "L5"], min_neurons=3)
+    d = dict(np.load(p))
+    names = {k.split("/")[1] for k in d if k.startswith("L3/class") and k.endswith("/v")}
+    assert names and d["L3/sigma"] > 0
+    for n in names:
+        v = d[f"L3/{n}/v"]
+        assert v.shape == (256,)
+        for c in ("random", "onmanifold"):      # controls are norm-matched
+            assert np.isclose(np.linalg.norm(d[f"L3/{n}/{c}"]), np.linalg.norm(v), rtol=1e-6)
+    p = steer_dirs.run(store, 0.0, "val", tmp_path, "reach", ["A3"])
+    d = dict(np.load(p))
+    v = d["A3/reach/v"]
+    assert v.shape == (256,) and np.isclose(np.linalg.norm(d["A3/reach/random"]), np.linalg.norm(v))
+    with pytest.raises(ValueError):
+        steer_dirs.run(store, 0.0, "val", tmp_path, "reach", ["L3"])

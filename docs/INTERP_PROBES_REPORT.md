@@ -1,5 +1,8 @@
 # What does the generator know? — Interpretability probes, first results
 
+> **Superseded (2026-10-20)** by [`INTERP_RESULTS.md`](INTERP_RESULTS.md), which reports the full runs with
+> within-tree scoring and without Δ. Kept as the record of the pilot.
+
 > **Update (2026-10-11).** Everything below is **superseded**. The first full cluster run (both
 > arms, val, t = 0, with random-init controls) used winsorised, z-scored probes. Probes now only
 > centre activations (commit 0b18bb0), and P1 gained the ctx / path / morpho groups

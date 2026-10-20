@@ -922,8 +922,8 @@ features, which is in its input anyway. Three more groups ask what the network b
     pooled directions encode tree identity.
   - **S-apical** is reduced to the `input_flag_swap` reference, since deep-node apical identity
     is the copied input flag.
-  - `hooks.SiteEditor` and `hooks.AttnAblation` exist; the rollout driver, keyed rollout noise,
-    metrics and directions are ⛔ not built. Graph-LayerNorm consequences: §10.2.
+  - Built and unit-tested (rollout driver with keyed noise, masks, per-t / masked
+    `AttnAblation`, metrics, classifier, directions, paired analysis); ⛔ not run on trained weights. Graph-LayerNorm consequences: §10.2.
 
 ---
 
@@ -1030,8 +1030,9 @@ operating point. `zero` is a robustness check.
 
 ## 11b. Interventions during generation (E0, E1 S-class, E2 S-reach)
 
-> **Status.** ⛔ Not built, not run. This section freezes the design before any rollout is
-> generated. Plan: `~/.claude/plans/i-think-let-s-plan-piped-river.md` (iteration 2026-10-20).
+> **Status.** 🟡 Built and unit-tested on random-init (`tests/test_interp_rollout.py`,
+> `test_steer_dirs`); ⛔ nothing run on trained checkpoints yet. This section froze the design
+> before any rollout was generated. Plan: `~/.claude/plans/i-think-let-s-plan-piped-river.md` (iteration 2026-10-20).
 
 A probe shows that information is *present*. An intervention during generation shows that it is
 *used*. The original pair, S-growth (P2) and S-apical (P6), was designed before the v3
@@ -1277,10 +1278,13 @@ direction. It is built only if E2 shows an effect.
 | Receptive field = 12 hops by message passing | architecture argument | 🟡 |
 | dAB > 12 ⇒ information about a* cannot arrive by message passing | argument; partial proxies exist | 🟡 |
 | Graph-LN off-target effects of steering | — | ⛔ |
-| Rollout driver reproduces `Trainer.test` generations (distribution metrics within seed spread) | planned (§11b.2) | ⛔ |
-| Lineage-keyed rollout noise: untouched lineages get identical noise across conditions | planned unit test | ⛔ |
+| Rollout driver: unkeyed `generate` is bit-identical to `method.sample_graphs` at the same seed | `test_unkeyed_generate_matches_sample_graphs` | ✅ |
+| Rollout driver reproduces `Trainer.test` generations (distribution metrics within seed spread) | cluster check (§11b.2) | ⛔ |
+| Lineage-keyed rollout noise: keys depend only on lineage; keyed rollouts deterministic and independent of batch packing (batch 64 vs 1, positions within 1e-3) | `test_lineage_keys_depend_only_on_lineage`, `test_keyed_generate_is_deterministic_and_packing_independent` | ✅ |
+| Owner slot from lineage = soma-child ancestry; soma children are ids 1..k in spawn order | `test_owner_matches_ancestry_and_slots` | ✅ |
+| α = 0 editor and an empty-mask ablation are the identity during rollouts | `test_zero_edit_and_empty_mask_ablation_are_identity` | ✅ |
 | Re-implemented tall-arm metric reproduces GT ≥ 2-tall share 19.7 % | planned calibration | ⛔ |
-| Uniform-edit graph-LN identity (only the **1** component removed) | planned unit test | ⛔ |
+| Uniform-edit graph-LN identity (only the **1** component removed; other graphs untouched) | `test_graph_layernorm_removes_only_the_constant_component` | ✅ |
 | Whether graph LN re-exposes LEACE-erased concepts | — | ⛔ |
 | Representations in the model's own rollouts match teacher-forced ones | — | ⛔ |
 
@@ -1380,5 +1384,5 @@ candidate for a refit with a larger cap, not an automatic exclusion.
 | `interp/analyses/common.py` | §14b unit engine: checkpoint, lazy baselines, parallel runner, per-site probe unit |
 | `interp/analyses/p1…p6, report.py` | §9 experiments; text summary |
 | `scripts/interp_extract.sbatch`, `scripts/interp_analyze.sbatch` | cluster jobs |
-| `interp/rollout.py`, `interp/metrics.py`, `interp/class_clf.py`, `interp/analyses/steer_dirs.py`, `interp/analyses/s_rollouts.py`, `scripts/interp_rollout.sbatch` | ⛔ planned, §11b: rollout driver + keyed noise + step context; tall-arm / size metrics; morphology class classifier; E1/E2 directions; paired analysis; GPU job |
+| `interp/rollout.py`, `interp/metrics.py`, `interp/class_clf.py`, `interp/analyses/steer_dirs.py`, `interp/analyses/s_rollouts.py`, `scripts/interp_rollout.sbatch` (GPU), `scripts/interp_steer_cpu.sbatch` (calib / clf / dirs / analyze) | §11b: rollout driver + keyed noise + step context; tall-arm / size metrics; morphology class classifier; E1/E2 directions; paired analysis; GPU job |
 | `tests/test_interp_*.py` | §12 verification |
