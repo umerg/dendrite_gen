@@ -32,6 +32,7 @@
 9. [The experiments](#9-the-experiments)
 10. [Graph LayerNorm and interventions (steering, erasure, ablation)](#10-graph-layernorm-and-interventions)
 11. [Global-attention ablation](#11-global-attention-ablation)
+   - 11b. [Interventions during generation (E0, E1 S-class, E2 S-reach)](#11b-interventions-during-generation-e0-e1-s-class-e2-s-reach)
 12. [Verification ledger](#12-verification-ledger)
 13. [Deviations from the original plan](#13-deviations-from-the-original-plan)
 14. [Known limitations and open issues](#14-known-limitations-and-open-issues)
@@ -400,6 +401,10 @@ neuron weights except Spearman.
 
 ## 6. Δ over observables — the main statistic
 
+> **Not used in the results report (2026-10-20).** `INTERP_RESULTS.md` reports plain probe scores against
+> the input layer and the random-init network, and relies on within-group scoring (§8b) for node claims.
+> The Δ machinery below is still computed and kept for reference.
+
 ### 6.1 Definition (cross-fitted stacking)
 
 For each outer fold (train T, test S):
@@ -660,6 +665,54 @@ there was the apical label. ⛔
   tables are no longer truncated.
 - **`CKPT_VERSION` = 3,** so every analysis reruns from scratch.
 
+### 8b.7 Planned check: what does the L1 look-ahead signal read? (⛔ not built)
+
+**Observation (v3, uncond).** Within-tree and within-dendrite look-ahead (P2) is ≈ 0 at `in`, `L0` and
+`A1`, then jumps at `L1`. Example, height, depth bin 3–4: within-tree ρ 0.00 (A1) → 0.38 (L1) → 0.50 (L11);
+within-dendrite 0.27 (L1) → 0.35 (L11). Random-init ≈ 0.
+
+**Hypothesis: the L1 jump relays visible local cues; it is not look-ahead computation.**
+
+1. *Two-hop delay.* At t = 0 a frontier node's own edge, and every edge feature built from it, is noise.
+   Geometry enters h only through edge features (§1.3).
+   - At `L0` the parent receives its real edge to the grandparent, plus messages from its other children.
+   - At `L1` the frontier node receives the updated parent. This is the first site where a frontier
+     row holds any real geometry: parent edge, parent angle, grandparent edge, frontier sibling count.
+   - `L1` is the second message-passing step (`in → L0 → A1 → L1`), so two hops are available there.
+2. *Those cues predict growth.* A linear combination of parent edge, parent angle, sibling count and the
+   parent's soma distance can rank future subtree size within a dendrite without any look-ahead.
+3. *The apical label arrives at the same time.* The slot-0 flag sits at depth 1 and moves one hop per
+   block, so it reaches depth 3 by `L1`. This predicts a within-tree vs within-dendrite gap at `L1`
+   that is large in shallow bins and small in deep ones.
+
+**Evidence already in hand.**
+- ✅ Within-tree Δρ over `OBS_FRONTIER` at `L1` ≈ 0: mean over bins −0.01 for height and path length,
+  −0.01 to 0.01 for y_h2. `OBS_FRONTIER` already contains the parent's edge length, the parent's branch
+  angle and the frontier sibling count, so the `L1` signal is no more than those cues.
+- ✅ The gap predicted by (3). Height at `L1`, within-tree vs within-dendrite ρ: bin 3–4 0.38 vs 0.27;
+  5–6 0.25 vs 0.21; 7–8 0.11 vs 0.12.
+- Within-tree Δρ becomes positive only from about `L9` (height mean 0.01, path length 0.07 at `L11`).
+
+**Planned tests** (P2 primary rows, depth bins 3–4 … 13+; sites `L0`, `A1`, `L1`, `L5`, `L11`, trained and
+random-init):
+
+| # | test | prediction if the hypothesis holds |
+|---|---|---|
+| T1 | **Cue probe.** Within-dendrite ρ of a linear probe on local cues c alone, scored like the activation probes. c = parent edge length, parent branch angle, parent axial step, grandparent edge length and angle, frontier sibling count, parent's visible children, parent soma path distance | ρ_dend(c) ≥ ρ_dend(`L1`) in every bin |
+| T2 | **Cue share of the prediction.** Dendrite-centre the OOF prediction p and the cues, then regress p̃ on c̃ with grouped CV | R²(p̃ \| c̃) high at `L1`, lower at `L11` |
+| T3 | **Residual look-ahead.** Within-dendrite ρ between y and the part of p not explained by c (the T2 residual) | ≈ 0 at `L1`; > 0 with CI excluding 0 at `L11` only |
+| T4 | **Arrival time.** Within-tree ρ for parent edge length and parent angle on frontier rows (P1 `ctx/` targets) | ≈ 0 at `L0` and `A1`, high at `L1` |
+
+**Reading.** If T1–T3 hold, the defensible claim for P2 is "look-ahead beyond local cues appears only in
+the late layers (T3 at `L11`)". The `L1` jump is then reported as a relay of visible cues, timed by the
+two-hop delay (T4). If T3 is clearly positive at `L1`, the network does more than relay at the first
+message, and the hypothesis is wrong.
+
+**Implementation notes.** The cues are computable from `targets.py` and the row table. T2 and T3 need the
+OOF predictions, which the P2 sweep does not store: either save them for these sites or refit (one probe
+per site and bin). T4 comes from the P1 v3 rerun on trained weights. Use the same `_within` centring, bins
+and neuron bootstrap as §8b.2.
+
 ---
 
 ## 9. The experiments
@@ -769,6 +822,8 @@ features, which is in its input anyway. Three more groups ask what the network b
 * **Status.** ✅ built; full val run on both arms (centring-only, 2026-10-13). **On hold (§8b.5):** apical
   membership, which the input apical flag supplies, explains most of the L2→L11 rise. Rerun with it in
   the observables, plus within-tree / within-dendrite scores and a non-apical-only variant (§8b.6).
+  The v3 rerun shows within-dendrite look-ahead from `L1`; §8b.7 sets out the check that the `L1` part is a
+  relay of visible local cues rather than computed look-ahead.
 
 ### 9.3 P3 — latent discovery · `analyses/p3_latent.py`
 
@@ -859,10 +914,16 @@ features, which is in its input anyway. Three more groups ask what the network b
 * **P4 — amnesic conditioning test (TMD arm).** Erase the TMD subspace at a site with LEACE and
   measure the loss in conditioning fidelity. `probe.leace_fit/apply` exist and are unit-tested;
   the analysis and its graph-LayerNorm checks (§10.3) are ⛔ not built.
-* **S-growth / S-apical — steering.** Add α·v (e.g. v_grow, v_⊥, or an apical direction) to
-  selected nodes at one site during generation and measure the generated neurons. Requires a
-  rollout driver with per-node keyed noise so steered and unsteered rollouts are paired.
-  `hooks.SiteEditor` exists; everything else is ⛔ not built. Graph-LayerNorm consequences: §10.2.
+* **Interventions during generation → §11b** (revised 2026-10-20 after the v3 within-group results).
+  - The planned set is **E0** (global-attention ablation during sampling, gate), **E1 S-class**
+    (cell-type steering of the uncond arm) and **E2 S-reach** (does basal growth use the
+    tokens' apical reach).
+  - **S-growth** is deferred. Its nonapical Δ is tiny, half its signal is apical routing, and
+    pooled directions encode tree identity.
+  - **S-apical** is reduced to the `input_flag_swap` reference, since deep-node apical identity
+    is the copied input flag.
+  - `hooks.SiteEditor` and `hooks.AttnAblation` exist; the rollout driver, keyed rollout noise,
+    metrics and directions are ⛔ not built. Graph-LayerNorm consequences: §10.2.
 
 ---
 
@@ -897,6 +958,15 @@ LayerNorm; all three are real.
 * Controls that share the normalisation side-effect: a random direction of equal norm and an
   "on-manifold" random mass-mean direction. If the steering effect exceeds these at matched norm,
   the effect is attributable to the direction, not to the norm shift.
+* **Two edit geometries are planned (§11b).**
+  * **Uniform** (E1): the same αv is added to every node of a graph. Only v's component along
+    **1** is removed by the scalar centring. σ_g still changes:
+    σ_g'^2 = σ_g^2 + α² Var_F(v) + 2α Cov(h − μ_g, v).
+    So the edit also rescales every node. There is no off-target *set* here, only a norm shift,
+    which the matched-norm controls share.
+  * **Node-masked** (E2): αv is added on basal nodes only. This is the |S|/N_g case of §10.1. The
+    apical's change is the measured off-target coupling, made interpretable by lineage-keyed
+    noise (§11b.2): the apical receives the same noise in every condition.
 * Not verified yet: nothing in the steering pipeline has been run.
 
 ### 10.3 LEACE erasure (⛔ not built — design decisions and the open question)
@@ -958,6 +1028,229 @@ directly), so the method is overridden per instance and restored on exit. Modes:
 **Primary mode: `mean`** — it removes routed information while keeping the network on its usual
 operating point. `zero` is a robustness check.
 
+## 11b. Interventions during generation (E0, E1 S-class, E2 S-reach)
+
+> **Status.** ⛔ Not built, not run. This section freezes the design before any rollout is
+> generated. Plan: `~/.claude/plans/i-think-let-s-plan-piped-river.md` (iteration 2026-10-20).
+
+A probe shows that information is *present*. An intervention during generation shows that it is
+*used*. The original pair, S-growth (P2) and S-apical (P6), was designed before the v3
+within-group scoring (§8b). §11b.1 explains why the set changed. §11b.2 covers what all three
+experiments share. §11b.3–5 give one card per experiment.
+
+### 11b.1 Why these three, after v3
+
+| v3 evidence | Consequence for interventions |
+|---|---|
+| A1 jumps are tree-level: within-tree ρ ≈ 0, matched by the tree-average baseline, reproduced by random-init (§8b.5) | Directions pooled across trees partly encode *which tree*. A node-level steer built from them can act like a tree-level one. |
+| P3 cell class survives the partial-tree + tree-average baseline (uncond, Δ +0.05–0.10, random ≤ 0) | The strongest graph-level latent. Graph-level, so the within-tree confound does not apply. → **E1** |
+| P5 `tree/` reach targets beat the tree average from G1 (+0.04–0.11; random ≈ +0.02) | Tokens carry learned cross-dendrite reach. Whether basal growth *uses* it is the mechanistic question behind the apical error mode. → **E2** |
+| Every token claim assumes generation reads the tokens | Test that first, without directions. → **E0**, which gates E1/E2 |
+| P2 look-ahead is real within a dendrite but small. Nonapical Δ is +0.003–0.008; about half the primary Δ is the apical label routed down the lineage (§8b.5) | **S-growth deferred.** If revived: mass-mean on snapshot-centred activations and labels, non-apical rows only, v_ap projected out, steer at L5–L9 |
+| Deep-node apical identity is mostly the input slot-0 flag copied down the lineage | **S-apical reduced** to the `input_flag_swap` reference. Steering v_ap ≈ editing the input flag. |
+
+### 11b.2 Shared design
+
+**Driver** (`interp/rollout.py`, ⛔). A standalone loop over conditions with the model loaded
+once (`load.build_method_and_model`, EMA weights). The generation block mirrors
+`Trainer._evaluate_rollout` (`graph_generation/training.py`):
+- target size = GT node count;
+- number of root children = GT root degree;
+- TMD from the GT neuron (TMD arm);
+- `method.sample_graphs`;
+- positions × `pos_scale_factor`.
+
+Batches are fixed and size-sorted, with no permutation, so every condition sees the same
+batches. Output: one `pred_graphs` pkl per condition and seed, in the existing format, so
+`compute_distribution_metrics` and the gallery tools apply unchanged.
+
+**Pairing by lineage-keyed noise.** The sampler draws its priors C ∈ ℝ^{L×3} and e ∈ ℝ^{L×1}
+per expand step over all L frontier leaves of the batch. Once an intervention changes L, every
+later draw shifts, and the same neuron's other dendrites get different noise. The driver
+therefore gives every generated node a key:
+- the root's key is k(root) = H(seed, neuron);
+- a child's key is k(child) = H(k(parent), child rank);
+- each leaf's prior is drawn from its own key with the Philox scheme of `hooks.keyed_flow_noise`;
+- the per-root frame angle is keyed by neuron.
+
+Nodes whose lineage is not edited then receive identical noise in every condition, so any
+difference in an untouched dendrite is caused by the model (global attention, graph LN). It is
+not resampling noise. If the batched node layout prevents stable keys, fall back to batch size 1
+and record this in `meta`.
+
+**Step context.** A forward pre-hook on the network stores, per call:
+- t = x[:, −1];
+- `batch` and `parent_idx`;
+- the frontier mask (`new_flag` input column);
+- `owner_slot`: pointer jumping on `parent_idx` to the root child, then the rank of that root
+  child's node index within its graph, which equals the spawn slot (slot 0 = model apical,
+  §1).
+
+Masks for editors and ablations come from this context. Edits apply at every network call,
+i.e. every expand step and every Euler step.
+
+**Edit units.** α is measured in units of the direction's natural scale ‖μ⁺ − μ⁻‖. Every
+condition also reports the induced shift relative to the per-graph scale, ‖α v‖ / σ_g, so dose
+curves can be read against the normalisation shift of §10.1.
+
+**Controls**, at matched norm, for E1/E2:
+- (i) −α;
+- (ii) a random Gaussian direction;
+- (iii) an "on-manifold" direction: the mass-mean between two random halves of the same rows.
+
+Control (iii) shares the graph-LN side effect and the activation statistics; (ii) checks
+whether any push of that size matters.
+
+**Readouts** (`interp/metrics.py`, `interp/class_clf.py`, ⛔):
+- **Size:** n nodes, tips, max depth, axial extent, total length, cap-hit rate.
+- **Tall-arm statistics** (definition of `docs/APICAL_AXIAL_ERROR_MODE.md` §3; the scripts cited
+  there are lost and are re-implemented):
+  - arm reach r_a = max_{v ∈ arm a} |(p_v − p_root)·û|;
+  - arm a is tall if r_a ≥ 0.6 · max_b r_b;
+  - reported: share of trees with ≥ 2 tall arms, dominance r_(1)/r_(2), tallest arm = slot 0
+    (generated trees only), and tallest arm points along −û.
+  - Calibration gate: on GT, the ≥ 2-tall share must reproduce 19.7 % (±1 pp).
+- **Realism:** `compute_distribution_metrics` against GT (MMD on morphometrics, Strahler/Sholl
+  W1).
+- **Cell class:** a multinomial logistic classifier on real morphology. Inputs are the
+  `assemble_morpho_vector` features, per-tree Sholl/Strahler/axial statistics and size. It is fit
+  on train neurons; balanced accuracy on real test is its ceiling. A **size-free** variant drops
+  the size features and normalises the rest by size.
+
+**Statistics.**
+- The unit is neuron × seed, paired against `intact`.
+- Continuous outcomes: Wilcoxon signed-rank with a Hodges–Lehmann shift.
+- Binary outcomes (≥ 2 tall): McNemar.
+- 1,000-sample neuron bootstrap CIs.
+- Dose-response: slope CI + Spearman.
+- Holm within each experiment's primary family.
+- Phases:
+  - **Phase A** chooses sites and doses on val (256 neurons × 2 seeds).
+  - **Phase B** confirms on test (1,167 neurons × 3 seeds) with primary endpoints frozen after A.
+
+### 11b.3 E0 — is global attention used during generation? (both arms)
+
+**Question.** Does the generated neuron change when the nodes' global read (Attn₂, tokens →
+nodes) is removed? Tokens were only ever probed under teacher forcing (§9.7).
+
+**Conditions.** `hooks.AttnAblation`, applied to all global blocks unless stated otherwise:
+
+| Condition | What it keeps | Reading if ≈ intact |
+|---|---|---|
+| `mean` | dataset-mean read | generation does not need any graph-specific global information |
+| `graphmean` | each graph's mean read on all its nodes | a tree-wide broadcast is enough; node-specific routing is not used (fits the v3 "A1 = tree average" finding) |
+| `zero` | nothing (removes the bias too) | robustness reference |
+| `mean` on {1,3}, {5,7}, {9,11} | the other blocks | which depth of global read matters |
+
+**Change from the teacher-forced ablation (§11).** Sampling visits t ∈ {0, 0.1, …, 0.9}, but the
+extraction mean was estimated at one fixed t. For E0 the mean is recorded during intact rollouts
+(`record` mode), per block and per Euler step t, and replayed per t (`means_by_t`).
+
+**Readouts.**
+- Size, tall-arm statistics, realism, cap-hit.
+- Uncond: entropy of the classifier's predicted class distribution (does ablation collapse class
+  diversity?).
+- TMD arm: `tmd_cond` pairwise fidelity (does conditioning still work without the global read?).
+
+**Gate.** If `mean` leaves every readout within seed spread, the tokens are not used in
+generation. E1 and E2 are then expected to be null, and are run only as confirmation.
+
+### 11b.4 E1 — S-class: steering the unconditional generator toward a cell type (uncond)
+
+**Direction.** For class c and site L_k, the one-vs-rest mass-mean of the per-graph pooled
+activation $\bar h_g^{(k)}$ (`graph_acts/pool_L{k}`), stratified by visible-depth bin v
+(`p3_latent.V_BINS`) and weighted 1/neuron:
+
+$$v_c^{(k)} = \frac{\sum_v n_v\big(\mu^{+}_{v} - \mu^{-}_{v}\big)}{\sum_v n_v},\qquad
+\mu^{\pm}_v = \text{mean of } \bar h_g^{(k)} \text{ over items in bin } v \text{ with class } {=}c \;/\; {\neq}c,\quad n_v=\min(n_v^+,n_v^-).$$
+
+**Why pooled and residual.**
+- The edit adds the same α v_c to every node of the graph, which moves the pooled mean by exactly
+  α v_c. The direction is therefore estimated where the edit acts.
+- The edit is made at L_k, the residual stream.
+- Sites k ∈ {3, 5, 7, 9}.
+
+**Graph LN for a uniform edit.**
+- With h'_i = h_i + αv for all i ∈ g, the scalar graph mean shifts by α·mean(v). Only the
+  component of v along **1** is removed by the centring.
+- The variance becomes σ_g'^2 = σ_g^2 + α² Var_F(v) + 2α Cov(h − μ_g, v), so the norm also
+  rescales every node.
+- This is a property of the edit, not an artefact. It is unit-tested on random-init and reported
+  via ‖αv‖/σ_g.
+
+**Design.**
+- α ∈ {0, 0.5, 1, 2, 4}.
+- Phase A:
+  - a layer sweep at α = 1 over all 7 classes picks k*;
+  - a dose sweep at k*;
+  - controls at α ∈ {1, 4}.
+- Phase B: 3 classes with the most reliable classifier, {0, α*, −α*, random, on-manifold}.
+
+**Primary endpoint.** Δ mean P_clf(c), steered vs intact, paired. The size-free classifier is
+reported alongside.
+
+**Secondary endpoints.**
+- Distance to GT class c minus distance to GT class c for intact (MMD / W1).
+- Realism vs all GT.
+- Size, cap-hit.
+
+**Yardstick.** The TMD arm conditioned on TMDs of real class-c neurons. Its ΔP_clf(c) is the size
+of shift that explicit conditioning buys.
+
+**Success.** A monotone dose-response that exceeds the random and on-manifold controls, survives
+the size-free classifier and Δ within generated-size bins, and keeps realism.
+
+**Confound.** Classes differ in size, so a pure size push raises P_clf for large classes. This is
+why the size-free classifier and the size-binned Δ are part of the success criterion, not
+extras.
+
+### 11b.5 E2 — S-reach: do basal dendrites use what the tokens say about the apical? (both arms)
+
+**Question.** P5 `tree/` and P6b show that basal frontier states carry the apical's reach beyond
+the tree average. Generated neurons too often grow ≥ 2 tall arms (35.8 % vs 19.7 % in GT,
+`docs/APICAL_AXIAL_ERROR_MODE.md`). Is the information used to hold basal dendrites back
+("knows and restrains"), or present but ignored ("knows but grows")?
+
+**Direction, in the space of the global write.**
+- Use the change made by the attention sub-block, δ_k = A_k − L_{k−1}, on basal frontier rows
+  (owner ≥ 1).
+- Contrast high vs low **absolute** visible apical reach (new target `apical_vis_reach_abs`, the
+  un-normalised numerator of `apical_vis_reach`, §3.3): top vs bottom tercile within strata.
+- Strata = visible depth bin × own-arm visible reach tercile, so v does not just mean "my arm is
+  tall".
+- v is orthogonalised to the depth read-out direction.
+- Sites: global blocks k ∈ {3, 5, 7, 9}.
+
+**Edit.**
+- `SiteEditor` on A_k adds α v to **basal nodes only** (owner_slot ≥ 1). This is the same
+  location the direction was estimated in: what those nodes take from the tokens.
+- α ∈ {−2, −1, 0, 1, 2, 4}.
+- Variant: basal frontier nodes only.
+
+**References.**
+- Basal-only `mean` ablation of Attn₂: remove what basal nodes read globally, with no direction.
+- +α on slot 0, as a specificity check.
+- Random and on-manifold controls in the δ space.
+
+**Endpoints, paired by lineage-keyed noise.**
+- Primary: the steered tree's max basal reach and its ≥ 2-tall indicator.
+- Secondary: basal size, dominance, tallest = slot 0.
+- Off-target: apical reach and size, which must be reported. A change there is coupling through
+  graph LN or the tokens (§10.1), not noise, because the apical's noise is identical across
+  conditions.
+
+**Predictions and readings.**
+
+| Outcome | Reading |
+|---|---|
+| +α shrinks basal reach and lowers the ≥ 2-tall share; −α does the opposite; controls ≈ 0 | basal growth reads the apical's reach from the tokens: a usable lever on the error mode |
+| No effect, while basal-only ablation also has none | the reach information is present (probes) but unused by growth: the error is a usage failure |
+| No effect from v, but basal-only ablation changes growth | the global read matters, but not along this direction: v is the wrong summary |
+
+**Deferred variant.** Patch the token read from a donor tree with a taller apical into the
+recipient's basal nodes (interchange intervention). It uses natural values instead of a
+direction. It is built only if E2 shows an effect.
+
 ---
 
 ## 12. Verification ledger
@@ -984,6 +1277,10 @@ operating point. `zero` is a robustness check.
 | Receptive field = 12 hops by message passing | architecture argument | 🟡 |
 | dAB > 12 ⇒ information about a* cannot arrive by message passing | argument; partial proxies exist | 🟡 |
 | Graph-LN off-target effects of steering | — | ⛔ |
+| Rollout driver reproduces `Trainer.test` generations (distribution metrics within seed spread) | planned (§11b.2) | ⛔ |
+| Lineage-keyed rollout noise: untouched lineages get identical noise across conditions | planned unit test | ⛔ |
+| Re-implemented tall-arm metric reproduces GT ≥ 2-tall share 19.7 % | planned calibration | ⛔ |
+| Uniform-edit graph-LN identity (only the **1** component removed) | planned unit test | ⛔ |
 | Whether graph LN re-exposes LEACE-erased concepts | — | ⛔ |
 | Representations in the model's own rollouts match teacher-forced ones | — | ⛔ |
 
@@ -1010,6 +1307,7 @@ operating point. `zero` is a robustness check.
 | Random init, 2 seeds | 1 seed so far | cost; the sbatch accepts any seed |
 | Holm correction within families | not implemented | §8 |
 | P4 (LEACE amnesic), steering, rollout capture, GT-prefix rollouts, train memorisation contrast | not built | ordering: probes first |
+| Steering = S-growth + S-apical, via a `+steer` hook in `Trainer.test` | **E0 / E1 S-class / E2 S-reach** (§11b), standalone rollout driver; S-growth deferred, S-apical → `input_flag_swap` reference | v3 within-group scoring moved the strong signals to graph-level latents and token reach (§11b.1); a standalone driver runs many conditions per job |
 | Store tiers A / B1 / B2 / C | dense / sparse row groups + graph arrays (same content) | implementation detail |
 
 ---
@@ -1017,7 +1315,7 @@ operating point. `zero` is a robustness check.
 ## 14. Known limitations and open issues
 
 1. **Presence, not use.** Every current result is a probe. Causal claims need P6c, P4 and
-   steering.
+   the generation-time interventions of §11b.
 2. **Teacher forcing only.** The model sees true partial trees; its own rollouts may differ.
 3. **TMD arm residual.** Conditioning information beyond 64 PCs is not in the baseline; the
    unconditional arm is the clean test of look-ahead.
@@ -1082,4 +1380,5 @@ candidate for a refit with a larger cap, not an automatic exclusion.
 | `interp/analyses/common.py` | §14b unit engine: checkpoint, lazy baselines, parallel runner, per-site probe unit |
 | `interp/analyses/p1…p6, report.py` | §9 experiments; text summary |
 | `scripts/interp_extract.sbatch`, `scripts/interp_analyze.sbatch` | cluster jobs |
+| `interp/rollout.py`, `interp/metrics.py`, `interp/class_clf.py`, `interp/analyses/steer_dirs.py`, `interp/analyses/s_rollouts.py`, `scripts/interp_rollout.sbatch` | ⛔ planned, §11b: rollout driver + keyed noise + step context; tall-arm / size metrics; morphology class classifier; E1/E2 directions; paired analysis; GPU job |
 | `tests/test_interp_*.py` | §12 verification |
