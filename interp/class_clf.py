@@ -96,7 +96,17 @@ class MorphoClassifier:
     @staticmethod
     def load(path) -> "MorphoClassifier":
         with open(path, "rb") as f:
-            return pickle.load(f)
+            return _Unpickler(f).load()
+
+
+class _Unpickler(pickle.Unpickler):
+    """Classifiers saved by ``python -m interp.class_clf`` before the ``__main__`` fix name their
+    class ``__main__.MorphoClassifier``; resolve that to this module from any caller."""
+
+    def find_class(self, module, name):
+        if module == "__main__" and name == "MorphoClassifier":
+            return MorphoClassifier
+        return super().find_class(module, name)
 
 
 def main(argv=None):
@@ -136,4 +146,7 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    main()
+    # run the importable module's main, so saved pickles name interp.class_clf.MorphoClassifier
+    # rather than __main__.MorphoClassifier (unloadable from any other entry point)
+    from interp.class_clf import main as _main
+    _main()

@@ -115,6 +115,25 @@ def test_class_clf_separates_toy_classes():
     assert "node_count" not in sf.keys and "axial_extent" in sf.keys
 
 
+def test_class_clf_loads_pickles_saved_from_main(tmp_path):
+    """A classifier pickled while class_clf ran as ``__main__`` must load from another entry point
+    (s_rollouts runs as ``__main__`` itself)."""
+    import pickle
+
+    from interp.class_clf import MorphoClassifier
+
+    feats = [dict(axial_extent=100.0 + 80 * (i % 2), total_extent=200.0) for i in range(20)]
+    clf = MorphoClassifier((0, 1, 0)).fit_features(feats, [i % 2 for i in range(20)])
+    raw = pickle.dumps(clf, protocol=0)
+    assert b"cinterp.class_clf\nMorphoClassifier" in raw
+    p = tmp_path / "old.pkl"
+    p.write_bytes(raw.replace(b"cinterp.class_clf\nMorphoClassifier", b"c__main__\nMorphoClassifier"))
+    with pytest.raises(AttributeError):
+        pickle.loads(p.read_bytes())                      # the failure seen on the cluster
+    back = MorphoClassifier.load(p)
+    np.testing.assert_allclose(back.proba_features(feats), clf.proba_features(feats))
+
+
 # ----------------------------------------------------------------------------- model + sampler
 
 @pytest.fixture(scope="module")
